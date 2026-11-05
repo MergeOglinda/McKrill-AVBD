@@ -1,0 +1,42 @@
+# Normalize line endings: LF in the repository, no surprises on Windows checkouts
+* text=auto
+
+# Source and shaders
+*.cs        text eol=lf diff=csharp
+*.compute   text eol=lf
+*.hlsl      text eol=lf
+*.cginc     text eol=lf
+*.shader    text eol=lf
+*.shadergraph text eol=lf
+*.asmdef    text eol=lf
+*.asmref    text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.csv       text eol=lf
+
+# Unity YAML assets and meta files (force-text serialization is the default)
+*.meta      text eol=lf
+*.unity     text eol=lf
+*.prefab    text eol=lf
+*.mat       text eol=lf
+*.asset     text eol=lf
+*.controller text eol=lf
+*.anim      text eol=lf
+
+# Binary files
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.tga       binary
+*.psd       binary
+*.exr       binary
+*.hdr       binary
+*.fbx       binary
+*.dll       binary
+*.so        binary
+*.a         binary
+
+# Git LFS is not enabled yet. When large binaries appear (textures, meshes,
+# captured profiler data), add filter=lfs diff=lfs merge=lfs -text to those patterns.
