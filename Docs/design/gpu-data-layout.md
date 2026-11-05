@@ -4,8 +4,8 @@ Design spec for the package's GPU buffers. It is written step by step; each sect
 
 | Step | Section | Status |
 | --- | --- | --- |
-| 1 | Read/write matrix | Done (this version) |
-| 2 | Packing rules | Not started |
+| 1 | Read/write matrix | Done |
+| 2 | Packing rules | Done (this version) |
 | 3 | Body arrays | Not started |
 | 4 | Other buffers | Not started |
 | 5 | Capacity calculator | Not started |
@@ -127,3 +127,48 @@ These findings change or refine the proposed body arrays in task 3, step 3.
 Everything the matrix marks cold for the solver (velocity, shape, group mask, friction, flags, step-start pose, color, sleep state, appearance id) can stay grouped by access phase as proposed.
 
 With these changes the body state comes to roughly 215 to 230 B per body, close to the proposal's 216 B. The exact figure is fixed in step 3.
+
+## 2. Packing rules
+
+These rules apply to every GPU buffer. No struct is defined until they are written down, and later steps cite them by number. They come from the Unity constraints for this task: structured buffer strides must be a multiple of 4 and below 2048 bytes, should be a multiple of 16, and should be built from float4-sized fields because mixed variable sizes can lay out differently per graphics API.
+
+### Rules
+
+| Rule | Statement | Why |
+| --- | --- | --- |
+| P1 | **Vector words only.** Every structured-buffer element is built only from `float4` and `uint4` members. No bare `float`, `float2`, `float3`, `uint2` or `uint3` members, and no explicit padding variables. Exception: a homogeneous scalar buffer (`uint` or `float`, stride 4) holding one kind of scalar, such as index lists, sort keys, counters and per-element counts. | Mixed member sizes can lay out differently per graphics API. A single scalar type has no layout ambiguity. |
+| P2 | **Member typing.** A `float4` member holds floats only. A `uint4` member holds ids, flags, counts, and any float passed through `asfloat`/`asuint`. Ids, flags and sentinels are never stored in `float4` members. | `0xFFFFFFFF` is a NaN when read as a float, and a float path is not guaranteed to preserve NaN bit patterns. |
+| P3 | **Stride.** Every stride is a multiple of 16 B and below 2048 B. Records read by index in V, D or N (gathers) use 16 B or a multiple of 32 B, so that no record straddles a 32 B sector on the reference GPU. Records read in index order by consecutive threads (streams) may use any multiple of 16 B. | A gathered 48 B record always touches two sectors for 48 B of payload. A stream pays no such cost. |
+| P4 | **Spare lanes.** The unused `w` of a `float3` may carry a scalar only if every stage that reads or writes that scalar also reads or writes the vector in the same `float4`. Otherwise the lane stays unused. | A spare lane is free only when it is fetched anyway. |
+| P5 | **Grouping by access phase.** Fields share a record only if the same stages touch them (section 1). A hot record never grows to hold a cold field. Fields written in the solver iterations (pose, multipliers, penalties) go in different arrays from fields that are read-only in the iterations, wherever the split adds no sector to any hot stage. | One cold field in a hot record is paid for in every iteration. |
+| P6 | **Invalid id.** `AVBD_INVALID = 0xFFFFFFFFu` means no body, no contact, empty slot or no color. Every capacity and valid id stays below `0x7FFFFFFF`, so the top bit is free for tagging (for example references into the static collider table, decided in step 4) and `AVBD_INVALID` can never be a valid tagged id. The capacity calculator enforces the limit. | One sentinel everywhere, and room to tag ids later without a layout change. |
+| P7 | **Flags.** Flags live in one `uint` per record: the low 24 bits are flags and the high 8 bits are an enum kind (shape type for bodies, constraint type for constraints). Bit positions are named in one place, the layout contract (step 9), with a C# `[Flags]` mirror. Each flag bit has exactly one owning writer stage. Unused bits are zero, and a stage changes only the bits it owns, by masking. | One word per record, no cross-stage write races. |
+| P8 | **Numeric conventions.** 32-bit floats throughout, no 16-bit types. Rotations are full unit quaternions stored as (x, y, z, w) with the Unity.Mathematics convention. A body's position is its center of mass, which equals the shape center in v1. Body axes are the principal axes, so inertia is diagonal in body space. Contact anchors are stored in body space. World space follows Unity (left-handed, Y up). | The CPU reference (task 4) and the GPU kernels must mean the same thing by every field. |
+| P9 | **No reliance on initial contents.** The package does not assume new buffers are zeroed. Buffers that kernels might read before writing are cleared explicitly at creation and after growth. A free slot is marked by a flag bit and `AVBD_INVALID` in its id fields. | Keeps behavior identical across APIs and drivers. |
+| P10 | **One definition per record.** Each record has one HLSL definition and one C# mirror built from `float4`/`uint4` words. Kernels access records only through accessor functions, never raw field offsets (step 9). | Layout cannot drift between kernels, C# and the CPU reference. |
+
+### Size classes
+
+| Size | Use |
+| --- | --- |
+| 4 B scalar | Index lists, sort keys, counters, per-element counts (the P1 exception) |
+| 16 B | A single vector word, small ranges, control blocks |
+| 32 B | Standard body record: one sector. Pose, inertial target, step-start pose, velocity, shape and meta records are expected to use this class |
+| 64, 96, 128 B | Constraint records (contacts, joints), always a multiple of 32 B when gathered. The exact size per record is set in step 4 |
+| 2048 B or more | Not allowed |
+
+### How each rule is checked
+
+| Rule | Check |
+| --- | --- |
+| P1, P2, P3, P10 | Layout round-trip test (steps 9 and 10) on DX12 and Vulkan, plus a stride assertion in C# that each mirror struct has the expected size |
+| P4, P5 | Review against the section 1 matrix whenever a record is defined or changed. There is no automated check |
+| P6 | Capacity calculator tests (step 5) |
+| P7 | Test that the C# flag enum has no overlapping bits, and a debug assertion for owned-bit writes |
+| P8 | CPU reference parity test (task 4) |
+| P9 | Growth and clear tests (step 10) |
+
+### Carried into step 3
+
+- **Appearance id (section 1, finding 7).** Default: it lives in the Meta record. It is read only by R, so under P4 it can sit in a spare lane only if R also reads that record's vector. Step 3 places it.
+- **Compact warm-start snapshot (section 1, finding 5).** At 48 B it is allowed only if it is read in index order (P3). If narrowphase matching gathers it by key, it becomes 64 B, which gives about 461 MB instead of about 422 MB for the 200k-body example. Step 4 decides.
