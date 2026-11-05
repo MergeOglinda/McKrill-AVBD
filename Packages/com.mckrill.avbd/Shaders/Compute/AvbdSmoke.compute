@@ -1,0 +1,18 @@
+// Smoke kernel: writes a known pattern into a structured buffer.
+// Proves that the compute shader is found, the shared include resolves and a dispatch works.
+
+#pragma kernel CSMain
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdCommon.hlsl"
+
+RWStructuredBuffer<uint> _Output;
+uint _Count;
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Count)
+        return;
+
+    _Output[id.x] = AVBD_SMOKE_PATTERN(id.x);
+}

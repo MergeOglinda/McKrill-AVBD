@@ -1,0 +1,26 @@
+{
+  "name": "com.mckrill.avbd",
+  "version": "0.1.0",
+  "displayName": "McKrill AVBD",
+  "description": "GPU-resident Augmented Vertex Block Descent (AVBD) physics for Unity: rigid bodies, joints and soft bodies solved entirely on the GPU and rendered through URP.",
+  "unity": "6000.6",
+  "keywords": [
+    "physics",
+    "avbd",
+    "gpu",
+    "compute",
+    "urp",
+    "simulation"
+  ],
+  "author": {
+    "name": "MergeOglinda",
+    "url": "https://github.com/MergeOglinda"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "com.unity.render-pipelines.universal": "17.6.0",
+    "com.unity.burst": "2.0.0",
+    "com.unity.collections": "6.6.0",
+    "com.unity.test-framework": "1.8.0"
+  }
+}

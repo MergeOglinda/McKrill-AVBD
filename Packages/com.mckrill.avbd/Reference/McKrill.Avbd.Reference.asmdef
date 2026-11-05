@@ -1,0 +1,19 @@
+{
+  "name": "McKrill.Avbd.Reference",
+  "rootNamespace": "McKrill.Avbd.Reference",
+  "references": [
+    "McKrill.Avbd.Runtime",
+    "Unity.Mathematics",
+    "Unity.Collections",
+    "Unity.Burst"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
