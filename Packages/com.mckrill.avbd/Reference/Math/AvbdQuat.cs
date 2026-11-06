@@ -60,5 +60,62 @@ namespace McKrill.Avbd.Reference
                 new float3(-a.z, 0f, a.x),   // column 1
                 new float3(a.y, -a.x, 0f));  // column 2
         }
+
+        // ---- Upstream-exact operations (avbd-demo3d maths.h) ----------------------------------------
+        // The solver port uses these instead of Unity.Mathematics' quaternion operators so that every
+        // formula is written out the same way as the C++ reference. Quaternion layout is the same:
+        // value.xyz = vector, value.w = scalar.
+
+        /// <summary>Hamilton product a * b, written out term by term like upstream's quat operator*.</summary>
+        public static quaternion Mul(quaternion a, quaternion b)
+        {
+            float4 p = a.value;
+            float4 q = b.value;
+            return new quaternion(new float4(
+                p.w * q.x + p.x * q.w + p.y * q.z - p.z * q.y,
+                p.w * q.y - p.x * q.z + p.y * q.w + p.z * q.x,
+                p.w * q.z + p.x * q.y - p.y * q.x + p.z * q.w,
+                p.w * q.w - p.x * q.x - p.y * q.y - p.z * q.z));
+        }
+
+        /// <summary>Conjugate (-x, -y, -z, w). No normalization.</summary>
+        public static quaternion Conjugate(quaternion q)
+        {
+            float4 v = q.value;
+            return new quaternion(new float4(-v.x, -v.y, -v.z, v.w));
+        }
+
+        /// <summary>Inverse as conjugate / squared length, like upstream. No normalization.</summary>
+        public static quaternion Inverse(quaternion q)
+        {
+            float4 v = q.value;
+            float lengthSq = v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+            return new quaternion(new float4(-v.x, -v.y, -v.z, v.w) / lengthSq);
+        }
+
+        /// <summary>Rotates v by q using upstream's formula v + 2w(u x v) + u x (2 (u x v)).</summary>
+        public static float3 Rotate(quaternion q, float3 v)
+        {
+            float3 u = q.value.xyz;
+            float3 t = math.cross(u, v) * 2f;
+            return v + t * q.value.w + math.cross(u, t);
+        }
+
+        /// <summary>Rotates v by qAng, then translates by qLin (upstream's transform()).</summary>
+        public static float3 Transform(float3 qLin, quaternion qAng, float3 v)
+        {
+            return Rotate(qAng, v) + qLin;
+        }
+
+        /// <summary>
+        /// Upstream's quat - quat: the vector part of 2 * a * inverse(b), with NO sign canonicalization.
+        /// This is what the C++ reference uses everywhere (joint angular error, velocity update, body
+        /// primal right-hand side). <see cref="Difference"/> adds a w &lt; 0 flip that upstream does not
+        /// have; the two differ only when the relative rotation exceeds 180 degrees.
+        /// </summary>
+        public static float3 DifferenceRaw(quaternion a, quaternion b)
+        {
+            return Mul(a, Inverse(b)).value.xyz * 2f;
+        }
     }
 }
