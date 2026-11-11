@@ -17,11 +17,13 @@ Design spec for the package's GPU buffers. It is written step by step; each sect
 
 All sizes in this document are estimates from the working design. They are not measured.
 
+**Revision note.** Sections 1 and 2 were corrected against the reference solver (savant117 avbd-demo3d, vendored in this repo). The step-start pose is hot (contacts read it every iteration), the previous velocity is added for the adaptive warm start, the warm-start snapshot must carry anchors and the stick flag, the solver constants are completed, and joints are noted as a separate pattern. See findings 1, 4, 5, 6, 9, 10 and the changed matrix rows.
+
 ## 1. Read/write matrix
 
 ### Scope
 
-This matrix covers dynamic rigid bodies and their contacts. Joints, soft-body particles and elements, and static colliders follow the same pattern and are added in step 4. Static colliders are tested directly per dynamic body in the narrowphase and never enter the pair list.
+This matrix covers dynamic rigid bodies and their contacts. Soft-body particles and elements and static colliders follow the same pattern and are added in step 4. Joints do not: they evaluate the constraint from the current poses (no step-start pose), use a quaternion-difference angular constraint scaled by a torque arm (needs both body sizes), add a geometric-stiffness term, carry stiffness caps and a fracture flag, and may be anchored to a world point with no body A. Step 4 defines a separate joint record. Static colliders are tested directly per dynamic body in the narrowphase and never enter the pair list.
 
 ### Stages
 
@@ -54,8 +56,9 @@ Persistent per-body state.
 | Rotation | W | | R | R | | | RW | RW | R | R | | R | Hot |
 | Mass and principal inertia | W | | | | | | | R | | | | | Hot |
 | Inertial target (position, rotation) | | | | | | | W | R | | | | | Hot |
-| Step-start pose | | | | | | | W | | | R | | R | Cold |
+| Step-start pose | | | | | | | W | R | R | R | | R | Hot |
 | Linear and angular velocity | W | | R | | | | R | | | W | R | | Cold |
+| Previous linear velocity (adaptive warm start) | | | | | | | R | | | W | | | Cold |
 | Shape type | W | | R | R | | | | | | | | R | Cold |
 | Shape dimensions | W | | R | R | | | | | | | | R | Cold |
 | Group mask | W | | R | | | | | | | | | | Cold |
@@ -69,9 +72,10 @@ Persistent per-body state.
 Notes:
 
 - V writes only the pose of the body it solves. A body is solved by exactly one thread, and neighbours are read from other color groups, so no atomics are needed.
-- V reads the position and rotation of the other bodies in each of its constraints. The partner needs no mass, inertia, shape or friction: contact points are stored in body-local coordinates and friction is stored in the contact.
+- V reads the position, rotation and step-start pose of the other bodies in each of its contact constraints, because the contact constraint is evaluated as C0 plus a Jacobian times the displacement since the step start, for both bodies. The partner needs no mass, inertia, shape or friction: contact points are stored in body-local coordinates and friction is stored in the contact. Joints evaluate C from the current poses and do not need the step-start pose.
 - The kinematic upload in E also writes pose and velocity for kinematic bodies. P skips them through the flags.
 - P overwrites the pose with the initial guess. Everything that needs the pose from the start of the step (S, B, N) must run before P, or read the step-start pose.
+- P computes the adaptive warm-start weight from the change between the previous and the current linear velocity, so it reads both. U copies the current velocity to the previous-velocity field before it overwrites the velocity.
 
 ### Derived buffers
 
@@ -103,30 +107,33 @@ Only the stages that touch contacts are shown.
 | Body A and body B | W | R | R | R | R | R | Hot |
 | Feature id | RW | | | | | R | Cold |
 | Normal (tangents derived) | W | | | R | R | | Hot |
-| Local anchors, one per body | W | | | R | R | | Hot |
+| Local anchors, one per body (kept from the previous step while sticking) | RW | | | R | R | | Hot |
 | Initial constraint value (step start) | W | | | R | R | | Hot |
 | Penalty, one per row | W | | | R | RW | R | Hot |
 | Multiplier, one per row | W | | | R | RW | R | Hot |
-| Friction and flags | W | | | R | R | | Hot |
+| Friction and flags (includes the stick flag, set by D) | RW | | | R | RW | R | Hot |
 
-N reads the previous step's warm-start data and writes the new multiplier and penalty scaled by the warm-start factors. The solver parameters (alpha, beta, gamma, initial and maximum penalty, iteration counts) are global constants in one small constant buffer, not per-record fields.
+N reads the previous step's warm-start data and writes the new multiplier and penalty scaled by the warm-start factors. If the matched contact was sticking in the previous step, N keeps its old anchors instead of the new ones (this is what holds static friction). The solver parameters (alpha, linear and angular beta, gamma, minimum and maximum penalty, collision margin, stick threshold, iteration counts) are global constants in one small constant buffer, not per-record fields.
 
 ### Findings
 
 These findings change or refine the proposed body arrays in task 3, step 3.
 
-1. **The solver also reads mass and inertia.** The proposal says the solver reads only the pose and inertial arrays, but V needs the mass and the principal inertia of the body it solves. The hot self-read set is pose (28 B of payload), inertial target (28 B) and mass properties (16 B), 72 B in total, plus the constraint-list range. The mass properties join the hot set.
+1. **The solver also reads mass and inertia.** The proposal says the solver reads only the pose and inertial arrays, but V needs the mass and the principal inertia of the body it solves. The hot self-read set is pose (28 B of payload), inertial target (28 B) and mass properties (16 B), 72 B in total, plus the constraint-list range. The mass properties join the hot set. Finding 6 adds the step-start pose (28 B), making it about 100 B.
 2. **The constraint-list range is hot and must not share an array with cold fields.** The proposal groups CSR offsets with sort key, color and sleep state in one "Extras" record. V reads the range in every iteration, so keeping it there would pull cold fields into every solver read.
 3. **The sort key is transient.** S writes it and the radix sort consumes it within the same stage, so it needs no persistent per-body field. It lives in the sort scratch buffers. The remaining Extras (graph color, sleep state) are cold and only touched by C and Z.
-4. **Constraint reads dominate solver traffic.** With the proposal's estimate of 12 contacts per body and 96 to 128 B per contact, one body reads roughly 1.5 to 1.9 KB of contact records and partner poses in V (12 x 96 to 128 B, plus 12 x 32 B), against about 80 B for its own state. The contact record size and layout matter far more than how the body arrays are grouped.
-5. **The previous step needs only compact warm-start data.** Of the contact fields, only the key (bodies, feature id), multipliers and penalties are read from the previous step. Double-buffering full contact records (about 614 MB in the 200k-body example) is more than needed. A compact snapshot of about 48 B per contact, written by U, would give about 422 MB in the same example. This costs an extra write pass and needs a lookup structure for matching, so step 4 should compare both options.
-6. **Ordering constraint.** N must run before P, because P overwrites the pose with the initial guess. The step-start pose is written by P and read only by U and by motion vectors, so it stays cold and separate.
+4. **Constraint reads dominate solver traffic.** With the proposal's estimate of 12 contacts per body and 96 to 128 B per contact, one body reads roughly 1.5 to 1.9 KB of contact records and partner poses in V (12 x 96 to 128 B, plus 12 x 64 B for partner pose and step-start pose, see finding 6), against about 100 B for its own state. The contact record size and layout matter far more than how the body arrays are grouped.
+5. **The warm-start snapshot must carry anchors and the stick flag.** From the previous step N needs the key (bodies, feature id), multipliers and penalties, and also the local anchors and the stick flag: the reference keeps the old anchors of a sticking contact, which is how static friction holds, and the stick flag is set by D. A snapshot without them loses static friction and contacts creep. This makes the compact snapshot about 64 B per contact, not 48 B, giving about 461 MB in the 200k-body example instead of about 422 MB; double-buffering full contact records is about 614 MB. It is still allowed under P3 only if read in index order. It costs an extra write pass and needs a lookup structure for matching, so step 4 should compare both options.
+6. **Ordering constraint.** N must run before P, because P overwrites the pose with the initial guess. The step-start pose is written by P and read by V and D (contact constraints are evaluated from the displacement since the step start, for both bodies of every contact), by U and by motion vectors. It is hot. Step 3 decides whether to interleave it with the pose in one 64 B record (two sectors for both) or keep a separate array; the partner gather in V reads both either way.
 7. **Gap in the proposal.** Rendering needs a per-instance appearance id (material or tint), which no proposed array holds. It fits in the Meta record or in a user-supplied buffer. Step 3 should decide.
 8. **Neighbour reads are gathers.** V reads partner poses by slot id, so with stable slots those reads are scattered. This is the cost that physically reordering bodies would reduce, which is why decision 1 (stable slots versus reordering) needs the benchmark in task 19.
 
-Everything the matrix marks cold for the solver (velocity, shape, group mask, friction, flags, step-start pose, color, sleep state, appearance id) can stay grouped by access phase as proposed.
+9. **Previous velocity is missing from the proposal.** The adaptive warm start needs last step's linear velocity. It is written by U and read by P, the same stages as velocity, so it can share the velocity record (about 16 B). If adaptive warm start is dropped, that must be a deliberate decision, since it breaks parity with the CPU reference.
+10. **Solver constants and joints.** The constant buffer needs separate linear and angular beta (joints use the angular one), the collision margin, the stick threshold and the minimum penalty. Joints are a separate record, see the scope note.
 
-With these changes the body state comes to roughly 215 to 230 B per body, close to the proposal's 216 B. The exact figure is fixed in step 3.
+Everything the matrix marks cold for the solver (velocity, previous velocity, shape, group mask, friction, flags, color, sleep state, appearance id) can stay grouped by access phase as proposed.
+
+With these changes the body state comes to roughly 230 to 245 B per body (the previous velocity adds about 16 B to the proposal's 216 B). The exact figure is fixed in step 3.
 
 ## 2. Packing rules
 
@@ -171,4 +178,6 @@ These rules apply to every GPU buffer. No struct is defined until they are writt
 ### Carried into step 3
 
 - **Appearance id (section 1, finding 7).** Default: it lives in the Meta record. It is read only by R, so under P4 it can sit in a spare lane only if R also reads that record's vector. Step 3 places it.
-- **Compact warm-start snapshot (section 1, finding 5).** At 48 B it is allowed only if it is read in index order (P3). If narrowphase matching gathers it by key, it becomes 64 B, which gives about 461 MB instead of about 422 MB for the 200k-body example. Step 4 decides.
+- **Compact warm-start snapshot (section 1, finding 5).** It is about 64 B because it carries anchors and the stick flag, about 461 MB for the 200k-body example. It is a multiple of 32 B, so it is also safe to gather by key under P3. Step 4 decides between it and full double-buffered contact records.
+- **Step-start pose and previous velocity (findings 6 and 9).** Step 3 places both: interleaved with the pose or separate, and inside the velocity record.
+- **Joint record (scope note).** Step 4 defines it separately from contacts.
