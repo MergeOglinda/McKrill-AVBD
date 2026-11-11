@@ -3,7 +3,7 @@
 GPU-resident Augmented Vertex Block Descent (AVBD) physics for Unity 6.6 or newer, rendered through URP.
 Rigid bodies, joints and soft bodies run entirely on the GPU. Bodies are rows in GPU buffers, never one GameObject each.
 
-> **Status: 0.1.0, package skeleton only.** There is no physics code yet. This version only proves the toolchain: assemblies compile, a compute kernel dispatches, and tests run.
+> **Status: 0.1.0, work in progress.** The CPU reference solver (a C# port of upstream avbd-demo3d, with sequential and graph-colored sweeps) is in and tested against the upstream C++ solver. The GPU solver is not written yet. To watch the reference run, import the **Reference Solver Demo** sample (see below).
 
 ## Requirements
 
@@ -21,18 +21,23 @@ https://github.com/MergeOglinda/McKrill-AVBD.git?path=/Packages/com.mckrill.avbd
 
 Append `#0.1.0` (or another tag) to pin a version.
 
+## Samples
+
+Open **Window > Package Manager > McKrill AVBD > Samples** and import **Reference Solver Demo**. It runs the CPU reference solver live on the upstream demo scenes. See the sample's README for controls.
+
 ## Layout
 
 | Folder | Assembly | Purpose |
 | --- | --- | --- |
 | `Runtime/` | `McKrill.Avbd.Runtime` | Solver core. No URP or Editor references. |
 | `Runtime.URP/` | `McKrill.Avbd.Runtime.URP` | Thin URP render-graph adapter. |
-| `Reference/` | `McKrill.Avbd.Reference` | Burst CPU reference solver used as the test oracle. |
+| `Reference/` | `McKrill.Avbd.Reference` | CPU reference solver (port of upstream avbd-demo3d) used as the test oracle. |
 | `Editor/` | `McKrill.Avbd.Editor` | Editor-only code. |
 | `Shaders/Compute/` | | One `.compute` file per pipeline stage. |
 | `Shaders/Include/` | | Shared `.hlsl` headers, included by package path. |
 | `Shaders/Rendering/` | | URP-compatible draw shaders. |
 | `Tests/` | `McKrill.Avbd.Tests.*` | Edit Mode and Play Mode tests. |
+| `Samples~/` | | Importable samples (not compiled until imported). |
 
 ## License
 

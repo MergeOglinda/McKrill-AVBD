@@ -22,5 +22,12 @@
     "com.unity.burst": "2.0.0",
     "com.unity.collections": "6.6.0",
     "com.unity.test-framework": "1.8.0"
-  }
+  },
+  "samples": [
+    {
+      "displayName": "Reference Solver Demo",
+      "description": "Runs the CPU reference solver live in a scene: upstream demo scenes, sequential versus colored sweep, graph-color tint, contact and joint overlays.",
+      "path": "Samples~/ReferenceSolverDemo"
+    }
+  ]
 }

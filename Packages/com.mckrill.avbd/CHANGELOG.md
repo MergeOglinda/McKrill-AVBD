@@ -15,9 +15,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Upstream-exact quaternion helpers (`AvbdQuat.Mul`, `Conjugate`, `Inverse`, `Rotate`, `Transform`, `DifferenceRaw`) and row/column-safe 3x3 helpers (`AvbdMat3`).
 - Edit Mode tests: golden trajectories from the upstream C++ solver (`UpstreamParityTests`) and behavior, coloring, collision and fracture tests (`ReferenceSolverTests`).
 - `THIRD_PARTY_NOTICES.md` with the upstream MIT attribution.
+- Sample `Reference Solver Demo` (Package Manager > Samples): runs the CPU reference solver live with the upstream scenes, a sequential/colored toggle, graph-color tint, contact and joint overlays, and a drop-box button.
 
 ### Notes
 
 - Gravity is a vector (`AvbdSolverParams.gravity`), default `(0, 0, -10)` to match upstream's z-up demo scenes; use `(0, -10, 0)` for Unity's y-up.
 - `AvbdQuat.Difference` flips the sign when `w < 0`; upstream does not. The solver uses upstream's `DifferenceRaw` unless `AvbdSolverParams.canonicalizeQuatDifference` is set.
-- The reference port has not been compiled or run inside Unity yet; the algorithms were checked against the upstream C++ by reading and by running the upstream code headless to generate the golden data.
+- The reference solver compiles and its Edit Mode tests pass in Unity 6.6. The Reference Solver Demo sample has not been run in a Unity editor yet.
