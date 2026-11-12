@@ -5,3 +5,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("McKrill.Avbd.Editor")]
 [assembly: InternalsVisibleTo("McKrill.Avbd.Tests.Runtime")]
 [assembly: InternalsVisibleTo("McKrill.Avbd.Tests.Editor")]
+[assembly: InternalsVisibleTo("McKrill.Avbd.Tests.Reference")]

@@ -14,9 +14,13 @@ namespace McKrill.Avbd
         public const string ResourcePath = "McKrill.Avbd/AvbdShaderSet";
 
         [SerializeField] ComputeShader smoke;
+        [SerializeField] ComputeShader bodyEdits;
 
         /// <summary>Trivial kernel that writes a known pattern into a buffer. Proves the toolchain.</summary>
         public ComputeShader Smoke => smoke;
+
+        /// <summary>Stage E: clears the per-body arrays and applies edit commands.</summary>
+        public ComputeShader BodyEdits => bodyEdits;
 
         /// <summary>Loads the shader set, or returns null if the asset is missing.</summary>
         public static AvbdShaderSet Load()

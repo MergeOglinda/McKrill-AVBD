@@ -6,14 +6,14 @@ Design spec for the package's GPU buffers. It is written step by step; each sect
 | --- | --- | --- |
 | 1 | Read/write matrix | Done |
 | 2 | Packing rules | Done (this version) |
-| 3 | Body arrays | Not started |
+| 3 | Body arrays | Done for rigid boxes (section 3) |
 | 4 | Other buffers | Not started |
-| 5 | Capacity calculator | Not started |
-| 6 | Slot allocation and edits | Not started |
-| 7 | Growth and overflow policy | Not started |
-| 8 | Buffer owner | Not started |
-| 9 | HLSL/C# layout contract | Not started |
-| 10 | Tests and review | Not started |
+| 5 | Capacity calculator | Done for the body arrays (section 5) |
+| 6 | Slot allocation and edits | Done (section 6) |
+| 7 | Growth and overflow policy | Overflow policy done, growth not started (section 7) |
+| 8 | Buffer owner | Done for the body arrays (section 8) |
+| 9 | HLSL/C# layout contract | Done for the body arrays and edit commands (section 9) |
+| 10 | Tests and review | Tests written for the body arrays; not yet run in Unity (section 10) |
 
 All sizes in this document are estimates from the working design. They are not measured.
 
@@ -56,9 +56,9 @@ Persistent per-body state.
 | Rotation | W | | R | R | | | RW | RW | R | R | | R | Hot |
 | Mass and principal inertia | W | | | | | | | R | | | | | Hot |
 | Inertial target (position, rotation) | | | | | | | W | R | | | | | Hot |
-| Step-start pose | | | | | | | W | R | R | R | | R | Hot |
+| Step-start pose | W | | | | | | W | R | R | R | | R | Hot |
 | Linear and angular velocity | W | | R | | | | R | | | W | R | | Cold |
-| Previous linear velocity (adaptive warm start) | | | | | | | R | | | W | | | Cold |
+| Previous linear velocity (adaptive warm start) | W | | | | | | R | | | W | | | Cold |
 | Shape type | W | | R | R | | | | | | | | R | Cold |
 | Shape dimensions | W | | R | R | | | | | | | | R | Cold |
 | Group mask | W | | R | | | | | | | | | | Cold |
@@ -181,3 +181,100 @@ These rules apply to every GPU buffer. No struct is defined until they are writt
 - **Compact warm-start snapshot (section 1, finding 5).** It is about 64 B because it carries anchors and the stick flag, about 461 MB for the 200k-body example. It is a multiple of 32 B, so it is also safe to gather by key under P3. Step 4 decides between it and full double-buffered contact records.
 - **Step-start pose and previous velocity (findings 6 and 9).** Step 3 places both: interleaved with the pose or separate, and inside the velocity record.
 - **Joint record (scope note).** Step 4 defines it separately from contacts.
+
+## 3. Body arrays
+
+Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Seven arrays, indexed by body slot, 224 B per body in total. Each record follows the packing rules in section 2 (float4 and uint4 words only, unused lanes zero). The C# mirrors are in `Runtime/Layout/BodyRecords.cs`, the HLSL in `Shaders/Include/AvbdBodyRecords.hlsl`.
+
+| Array | Stride | Words | Class | Written by | Read by |
+| --- | --- | --- | --- | --- | --- |
+| State | 64 B | position, rotation, step-start position, step-start rotation | Hot | E (spawn, pose edits), P, V | S, B, N, V, D, U, R |
+| Inertial | 32 B | inertial position, inertial rotation | Hot | P | V |
+| Mass | 16 B | principal moments (xyz), mass (w) | Hot | E | V |
+| Motion | 48 B | linear velocity, angular velocity, previous linear velocity | Cold | E, U | B, P, Z |
+| Shape | 16 B | size (xyz), friction (w) | Cold | E | B, N, R |
+| Meta | 32 B | flags and kind, group mask, appearance id; graph color, sleep counter | Cold | E (first word group), C, Z | B, N, P, R |
+| Range | 16 B | constraint-list offset and count | Hot | G | V |
+
+Decisions made here, where section 1 left them open:
+
+- **Step-start pose is interleaved with the pose** in the 64 B State record, so the partner gather in V and D is one record, not two arrays. The record is two sectors; V writes only the first two words.
+- **Previous linear velocity is in the Motion record** (finding 9). Motion is 48 B. It is read by P and Z by slot through the active list and is cold (once per step), so rule P3 does not require 32 B alignment for it. P3 names V, D and N as the strict gathers.
+- **Friction is in the spare lane of the size vector** (rule P4). Its stages (E, N) are a subset of the size stages (E, B, N, R).
+- **Mass and the three principal moments share one word.** V reads them together.
+- **Appearance id** is in the Meta record (finding 7). Group mask is there too.
+- **Free slots**: the Free flag is set, the appearance id and the graph color are `AVBD_INVALID`, the mass is zero and rotations are identity (rule P9).
+- **Mass 0 means static.** A static body needs no flag. Static colliders in the sense of section 1 (the separate table) are still step 4.
+
+Matrix changes from this step: E also writes the step-start pose (spawn and pose edits, so a teleport leaves no motion streak and a new body has a valid start pose before P runs), and E writes the previous linear velocity (spawn and velocity edits, so the adaptive warm start sees no acceleration). E never writes the inertial target.
+
+## 5. Capacity calculator
+
+`BodyBufferCapacity` (`Runtime/Buffers/BodyBufferCapacity.cs`) holds the cost and the limits of the body arrays.
+
+- Cost: 224 B per body, so 1,000,000 bodies take 224 MB for the body arrays alone.
+- Limit: the largest array is 64 B per body, so the capacity is capped at `int.MaxValue / 64` = 33,554,431 bodies to keep every buffer under 2 GiB. This is far below `0x7FFFFFFF`, so rule P6 holds.
+- Minimum capacity is 1. Capacity is fixed when the buffers are created (section 7).
+- The edit command buffer (128 B per command, 1024 commands by default) is separate and small.
+
+The calculator covers the body arrays only. Contacts, constraint lists and scratch buffers are added with step 4.
+
+## 6. Slot allocation and edit commands
+
+A body is a slot (a row in every array) plus a handle. `BodyHandle` carries the slot and a generation; freeing a slot bumps its generation, so an old handle never edits a newer body that reused the slot. The default handle is invalid.
+
+**Slot allocation** (`BodySlotAllocator`, CPU only): a freed slot is reused before a never-used one, most recently freed first, so live bodies stay packed near the start. `HighWaterMark` is one past the highest slot ever used. Allocation happens when `Spawn` is called, so the caller has a usable handle before the GPU sees anything.
+
+**Edit commands** (`EditCommand`, 128 B, one header word and seven payload words) come in three kinds:
+
+| Kind | Effect |
+| --- | --- |
+| Spawn | Writes every persistent field of the slot. Clears the Free flag. Sets the step-start pose and the previous velocity. Graph color is invalid, sleep counter zero, range empty |
+| Remove | Sets the Free flag, keeps the shape kind, clears the other flags, zeroes the mass and the range, sets the appearance id and graph color to invalid |
+| Set | Overwrites the fields named in a field mask: pose, velocity, shape (size and density), friction, group mask, appearance id, kinematic flag |
+
+Pose and velocity edits also reset the step-start pose and the previous velocity (see section 3). A kinematic transform upload is a pose edit plus a velocity edit. Kinematic bodies have no counterpart in the CPU reference, so their contact behavior is untested against an oracle.
+
+**One command per slot per batch.** The kernel runs one thread per command with no ordering, so two commands for the same slot would race. `BodyEditQueue` therefore merges everything done to a slot in one batch by its final effect, compared with what the GPU holds at the start of the batch:
+
+| GPU slot at batch start | Slot at the end of the batch | Command |
+| --- | --- | --- |
+| Free | Free (spawned and removed inside the batch) | none |
+| Free | Live | Spawn |
+| Live | Free | Remove |
+| Live | Live, a new body spawned into the reused slot | Spawn (overwrites everything) |
+| Live | Live, edited | Set, with the union of the edited fields |
+
+Commands are emitted in the order slots were first touched.
+
+**Rejected input.** A descriptor or edit with a non-finite or out-of-range value throws `ArgumentException` and uses no slot. An edit through an invalid or stale handle returns false and changes nothing. Rotations are normalized on the CPU. Mass properties are computed on the CPU with the same formulas and operation order as upstream, so they match the reference solver exactly.
+
+## 7. Growth and overflow policy
+
+Done so far: **overflow**. Capacity is fixed. `Spawn` on a full buffer returns the invalid handle and increments `OverflowCount`; nothing else changes. Not done: **growth** (reallocating larger buffers and copying the old contents), including the clear after growth that rule P9 requires. Until it is built, capacity must be chosen when the buffers are created.
+
+## 8. Buffer owner (stage E)
+
+`AvbdBodyBuffers` (`Runtime/Buffers/AvbdBodyBuffers.cs`) owns the seven arrays and the command buffer.
+
+- Creating it allocates the arrays and runs the `ClearBodies` kernel over every slot (rule P9; chunked, so more than 65,535 thread groups are covered).
+- `Spawn`, `Remove` and the `Set*` methods only record edits on the CPU. `ApplyEdits()` drains the queue, uploads the commands in chunks of the command batch size and dispatches the `ApplyEdits` kernel once per chunk.
+- The other stages bind the arrays through the read-only properties `State`, `Inertial`, `Mass`, `Motion`, `Shape`, `Meta` and `Range`. Only stage E writes the fields it owns.
+- Nothing is read back during a step. Tests read back synchronously.
+- The owner is single-threaded (main thread) and `IDisposable`.
+
+## 9. HLSL/C# layout contract
+
+One definition per record on each side, field for field: `BodyRecords.cs` and `EditCommand.cs` against `AvbdBodyRecords.hlsl` and `AvbdEditCommand.hlsl`. The constants (flag bits, edit kinds, field bits, `AVBD_INVALID`, group size) are defined in both. Kernels write the records with plain struct assignment for now; accessor functions (rule P10) are added when a second kernel needs the same field. Section 10 lists the tests that keep the two sides in step.
+
+## 10. Tests
+
+| Test | Needs a GPU | Checks |
+| --- | --- | --- |
+| `BodyLayoutTests` | No | Struct sizes equal the strides, rules P3 and P6, flag bits, and a parse of the HLSL includes: the constants and every struct member (type, name, order) equal the C# side |
+| `BodySlotAllocatorTests` | No | Allocation order, reuse, stale handles, double free, exhaustion |
+| `BodyEditQueueTests` | No | Encoding of every field, validation, and every row of the merge table in section 6 |
+| `BodyEditsOracleTests` | No | The behavior of each command on the CPU oracle, and mass properties equal to `AvbdBody` |
+| `BodyEditsGpuTests` | Yes | The arrays after creation, spawn and remove, and 40 random edit batches replayed on the oracle, compared bit for bit |
+
+The CPU oracle is `Reference/Edits/CpuBodyArrays.cs`. It must change together with `AvbdBodyEdits.compute`. The GPU tests have not been run: no Unity editor or GPU was available when they were written.
