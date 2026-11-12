@@ -3,7 +3,7 @@
 GPU-resident Augmented Vertex Block Descent (AVBD) physics for Unity 6.6 or newer, rendered through URP.
 Rigid bodies, joints and soft bodies run entirely on the GPU. Bodies are rows in GPU buffers, never one GameObject each.
 
-> **Status: 0.1.0, work in progress.** The CPU reference solver (a C# port of upstream avbd-demo3d, with sequential and graph-colored sweeps) is in and tested against the upstream C++ solver. The GPU solver is not written yet. To watch the reference run, import the **Reference Solver Demo** sample (see below).
+> **Status: 0.1.0, work in progress.** The CPU reference solver (a C# port of upstream avbd-demo3d, with sequential and graph-colored sweeps) is in and tested against the upstream C++ solver. The GPU solver is being built stage by stage: stage E (body buffers, slot allocation, edit commands) is in, the solver stages are not. To watch the reference run, import the **Reference Solver Demo** sample (see below).
 
 ## Requirements
 
@@ -29,7 +29,7 @@ Open **Window > Package Manager > McKrill AVBD > Samples** and import **Referenc
 
 | Folder | Assembly | Purpose |
 | --- | --- | --- |
-| `Runtime/` | `McKrill.Avbd.Runtime` | Solver core. No URP or Editor references. |
+| `Runtime/` | `McKrill.Avbd.Runtime` | Solver core: GPU body buffers and edit commands today. No URP or Editor references. |
 | `Runtime.URP/` | `McKrill.Avbd.Runtime.URP` | Thin URP render-graph adapter. |
 | `Reference/` | `McKrill.Avbd.Reference` | CPU reference solver (port of upstream avbd-demo3d) used as the test oracle. |
 | `Editor/` | `McKrill.Avbd.Editor` | Editor-only code. |

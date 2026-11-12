@@ -16,9 +16,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Edit Mode tests: golden trajectories from the upstream C++ solver (`UpstreamParityTests`) and behavior, coloring, collision and fracture tests (`ReferenceSolverTests`).
 - `THIRD_PARTY_NOTICES.md` with the upstream MIT attribution.
 - Sample `Reference Solver Demo` (Package Manager > Samples): runs the CPU reference solver live with the upstream scenes, a sequential/colored toggle, graph-color tint, contact and joint overlays, and a drop-box button.
+- Stage E of the GPU solver, for rigid boxes: per-body GPU arrays (`AvbdBodyBuffers`, 224 B per body), slot allocation with stale-handle detection, and an edit queue that merges spawn, remove and property edits into one command per slot. A compute kernel (`AvbdBodyEdits.compute`) clears the arrays and applies the commands. The HLSL and C# record definitions are checked against each other by a test.
+- CPU oracle for stage E (`CpuBodyArrays`) and tests: layout, allocator, edit queue, and a GPU-versus-oracle comparison over random edit streams.
+- Design doc sections 3 and 5-10 (body arrays, capacity, slot allocation and edits, overflow policy, buffer owner, layout contract, tests).
 
 ### Notes
 
+- The stage E code and tests were written without access to a Unity editor or a GPU and have not been run. Growth of the buffers beyond their initial capacity is not implemented yet; `Spawn` returns an invalid handle when the buffers are full.
 - Gravity is a vector (`AvbdSolverParams.gravity`), default `(0, 0, -10)` to match upstream's z-up demo scenes; use `(0, -10, 0)` for Unity's y-up.
 - `AvbdQuat.Difference` flips the sign when `w < 0`; upstream does not. The solver uses upstream's `DifferenceRaw` unless `AvbdSolverParams.canonicalizeQuatDifference` is set.
 - The reference solver compiles and its Edit Mode tests pass in Unity 6.6. The Reference Solver Demo sample has not been run in a Unity editor yet.

@@ -1,0 +1,197 @@
+// Stage E: clears the per-body arrays and applies edit commands (spawn, remove, property change).
+// Semantics are mirrored exactly by Reference/Edits/CpuBodyArrays.cs, which the tests compare against bit for bit.
+
+#pragma kernel ClearBodies
+#pragma kernel ApplyEdits
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdEditCommand.hlsl"
+
+RWStructuredBuffer<BodyStateRecord>    _BodyState;
+RWStructuredBuffer<BodyInertialRecord> _BodyInertial;
+RWStructuredBuffer<BodyMassRecord>     _BodyMass;
+RWStructuredBuffer<BodyMotionRecord>   _BodyMotion;
+RWStructuredBuffer<BodyShapeRecord>    _BodyShape;
+RWStructuredBuffer<BodyMetaRecord>     _BodyMeta;
+RWStructuredBuffer<BodyRangeRecord>    _BodyRange;
+StructuredBuffer<EditCommand>          _Commands;
+
+uint _Capacity;     // number of body slots
+uint _Base;         // first slot (ClearBodies) of this dispatch, so more than 65535 groups can be covered
+uint _CommandCount; // commands in _Commands (ApplyEdits)
+
+// Puts a slot into the free state (rule P9): zeroed data, identity rotations, Free flag, invalid ids.
+void WriteFreeSlot(uint slot)
+{
+    const float4 identity = float4(0, 0, 0, 1);
+
+    BodyStateRecord s;
+    s.position = float4(0, 0, 0, 0);
+    s.rotation = identity;
+    s.startPosition = float4(0, 0, 0, 0);
+    s.startRotation = identity;
+    _BodyState[slot] = s;
+
+    BodyInertialRecord i;
+    i.position = float4(0, 0, 0, 0);
+    i.rotation = identity;
+    _BodyInertial[slot] = i;
+
+    BodyMassRecord m;
+    m.momentMass = float4(0, 0, 0, 0);
+    _BodyMass[slot] = m;
+
+    BodyMotionRecord v;
+    v.linear = float4(0, 0, 0, 0);
+    v.angular = float4(0, 0, 0, 0);
+    v.prevLinear = float4(0, 0, 0, 0);
+    _BodyMotion[slot] = v;
+
+    BodyShapeRecord sh;
+    sh.sizeFriction = float4(0, 0, 0, 0);
+    _BodyShape[slot] = sh;
+
+    BodyMetaRecord meta;
+    meta.ident = uint4(AvbdFreeFlagsWord(AVBD_KIND_BOX << AVBD_BODY_KIND_SHIFT), 0, AVBD_INVALID, 0);
+    meta.state = uint4(AVBD_INVALID, 0, 0, 0);
+    _BodyMeta[slot] = meta;
+
+    BodyRangeRecord r;
+    r.range = uint4(0, 0, 0, 0);
+    _BodyRange[slot] = r;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ClearBodies(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Capacity)
+        return;
+
+    WriteFreeSlot(slot);
+}
+
+void ApplySpawn(uint slot, EditCommand c)
+{
+    BodyStateRecord s;
+    s.position = c.position;
+    s.rotation = c.rotation;
+    s.startPosition = c.position;
+    s.startRotation = c.rotation;
+    _BodyState[slot] = s;
+
+    BodyMassRecord m;
+    m.momentMass = c.momentMass;
+    _BodyMass[slot] = m;
+
+    BodyMotionRecord v;
+    v.linear = c.linear;
+    v.angular = c.angular;
+    v.prevLinear = c.linear;
+    _BodyMotion[slot] = v;
+
+    BodyShapeRecord sh;
+    sh.sizeFriction = c.sizeFriction;
+    _BodyShape[slot] = sh;
+
+    // The slot is live now: clear the Free bit, keep the kind and the Kinematic bit from the command.
+    BodyMetaRecord meta;
+    meta.ident = uint4(c.meta.x & ~AVBD_BODY_FLAG_FREE, c.meta.y, c.meta.z, 0);
+    meta.state = uint4(AVBD_INVALID, 0, 0, 0);
+    _BodyMeta[slot] = meta;
+
+    BodyRangeRecord r;
+    r.range = uint4(0, 0, 0, 0);
+    _BodyRange[slot] = r;
+}
+
+void ApplyRemove(uint slot)
+{
+    BodyMassRecord m;
+    m.momentMass = float4(0, 0, 0, 0);
+    _BodyMass[slot] = m;
+
+    BodyMetaRecord meta = _BodyMeta[slot];
+    meta.ident = uint4(AvbdFreeFlagsWord(meta.ident.x), 0, AVBD_INVALID, 0);
+    meta.state = uint4(AVBD_INVALID, 0, 0, 0);
+    _BodyMeta[slot] = meta;
+
+    BodyRangeRecord r;
+    r.range = uint4(0, 0, 0, 0);
+    _BodyRange[slot] = r;
+}
+
+void ApplySet(uint slot, EditCommand c)
+{
+    uint fields = c.header.z;
+
+    if (fields & AVBD_EDIT_FIELD_POSE)
+    {
+        // A teleport also resets the step-start pose.
+        BodyStateRecord s = _BodyState[slot];
+        s.position = c.position;
+        s.rotation = c.rotation;
+        s.startPosition = c.position;
+        s.startRotation = c.rotation;
+        _BodyState[slot] = s;
+    }
+
+    if (fields & AVBD_EDIT_FIELD_VELOCITY)
+    {
+        // Previous linear velocity follows, so the adaptive warm start sees no acceleration.
+        BodyMotionRecord v;
+        v.linear = c.linear;
+        v.angular = c.angular;
+        v.prevLinear = c.linear;
+        _BodyMotion[slot] = v;
+    }
+
+    if (fields & (AVBD_EDIT_FIELD_SHAPE | AVBD_EDIT_FIELD_FRICTION))
+    {
+        BodyShapeRecord sh = _BodyShape[slot];
+        if (fields & AVBD_EDIT_FIELD_SHAPE)
+            sh.sizeFriction.xyz = c.sizeFriction.xyz;
+        if (fields & AVBD_EDIT_FIELD_FRICTION)
+            sh.sizeFriction.w = c.sizeFriction.w;
+        _BodyShape[slot] = sh;
+    }
+
+    if (fields & AVBD_EDIT_FIELD_SHAPE)
+    {
+        BodyMassRecord m;
+        m.momentMass = c.momentMass;
+        _BodyMass[slot] = m;
+    }
+
+    if (fields & (AVBD_EDIT_FIELD_GROUPMASK | AVBD_EDIT_FIELD_APPEARANCE | AVBD_EDIT_FIELD_KINEMATIC))
+    {
+        BodyMetaRecord meta = _BodyMeta[slot];
+        if (fields & AVBD_EDIT_FIELD_GROUPMASK)
+            meta.ident.y = c.meta.y;
+        if (fields & AVBD_EDIT_FIELD_APPEARANCE)
+            meta.ident.z = c.meta.z;
+        if (fields & AVBD_EDIT_FIELD_KINEMATIC)
+            meta.ident.x = (meta.ident.x & ~AVBD_BODY_FLAG_KINEMATIC) | (c.meta.x & AVBD_BODY_FLAG_KINEMATIC);
+        _BodyMeta[slot] = meta;
+    }
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ApplyEdits(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _CommandCount)
+        return;
+
+    EditCommand c = _Commands[id.x];
+    uint slot = c.header.y;
+    if (slot >= _Capacity)
+        return;
+
+    uint kind = c.header.x;
+    if (kind == AVBD_EDIT_SPAWN)
+        ApplySpawn(slot, c);
+    else if (kind == AVBD_EDIT_REMOVE)
+        ApplyRemove(slot);
+    else if (kind == AVBD_EDIT_SET)
+        ApplySet(slot, c);
+}

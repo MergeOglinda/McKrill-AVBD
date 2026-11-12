@@ -8,6 +8,9 @@
 // Thread group size used by 1D kernels.
 #define AVBD_GROUP_SIZE 64
 
+// No body, no contact, empty slot or no color (packing rule P6). Every valid id stays below 0x7FFFFFFF.
+#define AVBD_INVALID 0xFFFFFFFFu
+
 // Known pattern written by the smoke kernel and checked by the smoke test.
 #define AVBD_SMOKE_PATTERN(i) ((i) * 3u + 7u)
 

@@ -4,7 +4,8 @@
   "references": [
     "McKrill.Avbd.Runtime",
     "UnityEngine.TestRunner",
-    "UnityEditor.TestRunner"
+    "UnityEditor.TestRunner",
+    "Unity.Mathematics"
   ],
   "includePlatforms": [
     "Editor"
