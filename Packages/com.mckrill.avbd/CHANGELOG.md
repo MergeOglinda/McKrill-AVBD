@@ -18,6 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Sample `Reference Solver Demo` (Package Manager > Samples): runs the CPU reference solver live with the upstream scenes, a sequential/colored toggle, graph-color tint, contact and joint overlays, and a drop-box button.
 - Stage E of the GPU solver, for rigid boxes: per-body GPU arrays (`AvbdBodyBuffers`, 224 B per body), slot allocation with stale-handle detection, and an edit queue that merges spawn, remove and property edits into one command per slot. A compute kernel (`AvbdBodyEdits.compute`) clears the arrays and applies the commands. The HLSL and C# record definitions are checked against each other by a test.
 - CPU oracle for stage E (`CpuBodyArrays`) and tests: layout, allocator, edit queue, and a GPU-versus-oracle comparison over random edit streams.
+- Stage P of the GPU solver (predict): `AvbdSolverSettings`, `AvbdSolver` (`Step()` runs the stages that exist), the `AvbdPredict.compute` kernel, and the `CpuPredict` oracle. Tests check the oracle against the reference solver's predict phase and the kernel against the oracle.
 - Design doc sections 3 and 5-10 (body arrays, capacity, slot allocation and edits, overflow policy, buffer owner, layout contract, tests).
 
 ### Notes

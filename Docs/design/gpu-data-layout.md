@@ -278,3 +278,28 @@ One definition per record on each side, field for field: `BodyRecords.cs` and `E
 | `BodyEditsGpuTests` | Yes | The arrays after creation, spawn and remove, and 40 random edit batches replayed on the oracle, compared bit for bit |
 
 The CPU oracle is `Reference/Edits/CpuBodyArrays.cs`. It must change together with `AvbdBodyEdits.compute`. The GPU tests have not been run: no Unity editor or GPU was available when they were written.
+
+## 11. Solver stages
+
+The solver stages run in the order E, P, then per iteration V and D, then U (section 1). They are added one at a time. Every stage has a C# oracle in the Reference assembly that does the same arithmetic on `CpuBodyArrays`, and the GPU kernel is tested against it. Results are compared with a small relative tolerance, not bit for bit, because GPU arithmetic may differ in the last bits (fused multiply-add, reciprocal square root).
+
+### Solver constants
+
+`AvbdSolverSettings` holds the global constants: time step, gravity vector, iterations, alpha, linear and angular beta, gamma, and the minimum and maximum penalty. The kernels read them as plain uniforms (`_SolverParams0`, `_SolverParams1`, `_Gravity`, declared in `AvbdSolverParams.hlsl`), set by `SolverUniforms` before each dispatch. The iteration count is not a uniform: the iteration loop runs on the CPU, one dispatch per pass. The default gravity is `(0, -10, 0)` for Unity's y-up world; upstream's demo scenes are z-up and need `(0, 0, -10)`.
+
+### Stage P: predict
+
+One thread per slot, over `[0, HighWaterMark)`. Free slots, kinematic bodies and bodies with mass 0 are skipped completely: their pose and inertial target are not touched. For every other body:
+
+| Writes | Value |
+| --- | --- |
+| Inertial target | position + v dt + g dt^2; rotation advanced by the angular velocity |
+| Step-start pose | the pose before this stage |
+| Pose | position + v dt + g (w dt^2) with the adaptive weight w; rotation advanced by the angular velocity |
+
+The adaptive weight w is the fraction of gravity the body actually accelerated by last step: clamp(dot(a, g) / |g|^2, 0, 1) with a = (v - previous v) / dt, and 0 if the result is not finite or g is zero. The previous velocity comes from the Motion record. It is set by stage U, and by edits (so a new or just-edited body has w = 0).
+
+Statics keep their stale inertial target because no stage reads it for a static body.
+
+The oracle is `CpuPredict`. With zero iterations the reference solver runs exactly this phase, so `PredictTests` compares the oracle against `ReferenceSolver` directly, and then the GPU kernel against the oracle.
+

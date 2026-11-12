@@ -238,15 +238,21 @@ namespace McKrill.Avbd
             }
         }
 
-        void BindBodyBuffers(int kernel)
+        void BindBodyBuffers(int kernel) => BindTo(shader, kernel);
+
+        /// <summary>
+        /// Binds all seven body arrays to a kernel under the standard names (_BodyState, _BodyInertial, _BodyMass,
+        /// _BodyMotion, _BodyShape, _BodyMeta, _BodyRange). A kernel that does not declare one of them ignores it.
+        /// </summary>
+        internal void BindTo(ComputeShader target, int kernel)
         {
-            shader.SetBuffer(kernel, BodyStateId, state);
-            shader.SetBuffer(kernel, BodyInertialId, inertial);
-            shader.SetBuffer(kernel, BodyMassId, mass);
-            shader.SetBuffer(kernel, BodyMotionId, motion);
-            shader.SetBuffer(kernel, BodyShapeId, shape);
-            shader.SetBuffer(kernel, BodyMetaId, meta);
-            shader.SetBuffer(kernel, BodyRangeId, range);
+            target.SetBuffer(kernel, BodyStateId, state);
+            target.SetBuffer(kernel, BodyInertialId, inertial);
+            target.SetBuffer(kernel, BodyMassId, mass);
+            target.SetBuffer(kernel, BodyMotionId, motion);
+            target.SetBuffer(kernel, BodyShapeId, shape);
+            target.SetBuffer(kernel, BodyMetaId, meta);
+            target.SetBuffer(kernel, BodyRangeId, range);
         }
 
         void ThrowIfDisposed()
