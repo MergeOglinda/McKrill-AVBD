@@ -42,9 +42,9 @@ void WriteFreeSlot(uint slot)
     _BodyMass[slot] = m;
 
     BodyMotionRecord v;
-    v.linear = float4(0, 0, 0, 0);
-    v.angular = float4(0, 0, 0, 0);
-    v.prevLinear = float4(0, 0, 0, 0);
+    v.linearVel = float4(0, 0, 0, 0);
+    v.angularVel = float4(0, 0, 0, 0);
+    v.prevLinearVel = float4(0, 0, 0, 0);
     _BodyMotion[slot] = v;
 
     BodyShapeRecord sh;
@@ -85,9 +85,9 @@ void ApplySpawn(uint slot, EditCommand c)
     _BodyMass[slot] = m;
 
     BodyMotionRecord v;
-    v.linear = c.linear;
-    v.angular = c.angular;
-    v.prevLinear = c.linear;
+    v.linearVel = c.linearVel;
+    v.angularVel = c.angularVel;
+    v.prevLinearVel = c.linearVel;
     _BodyMotion[slot] = v;
 
     BodyShapeRecord sh;
@@ -140,9 +140,9 @@ void ApplySet(uint slot, EditCommand c)
     {
         // Previous linear velocity follows, so the adaptive warm start sees no acceleration.
         BodyMotionRecord v;
-        v.linear = c.linear;
-        v.angular = c.angular;
-        v.prevLinear = c.linear;
+        v.linearVel = c.linearVel;
+        v.angularVel = c.angularVel;
+        v.prevLinearVel = c.linearVel;
         _BodyMotion[slot] = v;
     }
 

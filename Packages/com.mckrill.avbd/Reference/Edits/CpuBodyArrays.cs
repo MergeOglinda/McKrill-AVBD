@@ -44,7 +44,7 @@ namespace McKrill.Avbd.Reference
             State[slot] = new BodyStateRecord { position = float4.zero, rotation = identity, startPosition = float4.zero, startRotation = identity };
             Inertial[slot] = new BodyInertialRecord { position = float4.zero, rotation = identity };
             Mass[slot] = new BodyMassRecord { momentMass = float4.zero };
-            Motion[slot] = new BodyMotionRecord { linear = float4.zero, angular = float4.zero, prevLinear = float4.zero };
+            Motion[slot] = new BodyMotionRecord { linearVel = float4.zero, angularVel = float4.zero, prevLinearVel = float4.zero };
             Shape[slot] = new BodyShapeRecord { sizeFriction = float4.zero };
             Meta[slot] = new BodyMetaRecord
             {
@@ -79,7 +79,7 @@ namespace McKrill.Avbd.Reference
         {
             State[slot] = new BodyStateRecord { position = c.position, rotation = c.rotation, startPosition = c.position, startRotation = c.rotation };
             Mass[slot] = new BodyMassRecord { momentMass = c.momentMass };
-            Motion[slot] = new BodyMotionRecord { linear = c.linear, angular = c.angular, prevLinear = c.linear };
+            Motion[slot] = new BodyMotionRecord { linearVel = c.linearVel, angularVel = c.angularVel, prevLinearVel = c.linearVel };
             Shape[slot] = new BodyShapeRecord { sizeFriction = c.sizeFriction };
             Meta[slot] = new BodyMetaRecord
             {
@@ -115,7 +115,7 @@ namespace McKrill.Avbd.Reference
             }
 
             if ((fields & EditFields.Velocity) != 0)
-                Motion[slot] = new BodyMotionRecord { linear = c.linear, angular = c.angular, prevLinear = c.linear };
+                Motion[slot] = new BodyMotionRecord { linearVel = c.linearVel, angularVel = c.angularVel, prevLinearVel = c.linearVel };
 
             if ((fields & (EditFields.Shape | EditFields.Friction)) != 0)
             {

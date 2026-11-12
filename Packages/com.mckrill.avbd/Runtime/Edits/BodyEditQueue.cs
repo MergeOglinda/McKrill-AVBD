@@ -109,8 +109,8 @@ namespace McKrill.Avbd
                 return false;
 
             Pending p = Touch(handle.Slot);
-            p.command.linear = new float4(linear, 0f);
-            p.command.angular = new float4(angular, 0f);
+            p.command.linearVel = new float4(linear, 0f);
+            p.command.angularVel = new float4(angular, 0f);
             Mark(p, EditFields.Velocity);
             return true;
         }
@@ -236,8 +236,8 @@ namespace McKrill.Avbd
                 header = new uint4((uint)EditKind.Spawn, (uint)slot, (uint)EditFields.All, 0u),
                 position = new float4(d.position, 0f),
                 rotation = q,
-                linear = new float4(d.linearVelocity, 0f),
-                angular = new float4(d.angularVelocity, 0f),
+                linearVel = new float4(d.linearVelocity, 0f),
+                angularVel = new float4(d.angularVelocity, 0f),
                 momentMass = BoxMassProperties.Compute(d.size, d.density),
                 sizeFriction = new float4(d.size, d.friction),
                 meta = new uint4(BodyFlagLayout.Pack(flags, ShapeKind.Box), d.groupMask, d.appearanceId, 0u),

@@ -60,9 +60,9 @@ namespace McKrill.Avbd
         public float4 rotation;
 
         /// <summary>xyz = linear velocity, w unused.</summary>
-        public float4 linear;
+        public float4 linearVel;
 
-        public float4 angular;
+        public float4 angularVel;
 
         /// <summary>xyz = principal moments, w = mass.</summary>
         public float4 momentMass;

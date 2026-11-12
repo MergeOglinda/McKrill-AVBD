@@ -41,9 +41,9 @@ struct BodyMassRecord
 // 48 B, cold.
 struct BodyMotionRecord
 {
-    float4 linear;
-    float4 angular;
-    float4 prevLinear; // last step's linear velocity, for the adaptive warm start
+    float4 linearVel;
+    float4 angularVel;
+    float4 prevLinearVel; // last step's linear velocity, for the adaptive warm start
 };
 
 // 16 B, cold. xyz = full box widths, w = friction.

@@ -56,8 +56,8 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(EditFields.All, c.Fields);
             AssertEqual(new float4(4f, 5f, 6f, 0f), c.position, "position");
             AssertEqual(new float4(0f, 0f, 0f, 1f), c.rotation, "rotation");
-            AssertEqual(new float4(7f, 8f, 9f, 0f), c.linear, "linear");
-            AssertEqual(new float4(0.5f, 0.25f, 0.125f, 0f), c.angular, "angular");
+            AssertEqual(new float4(7f, 8f, 9f, 0f), c.linearVel, "linear");
+            AssertEqual(new float4(0.5f, 0.25f, 0.125f, 0f), c.angularVel, "angular");
             AssertEqual(new float4(1f, 2f, 3f, 0.25f), c.sizeFriction, "sizeFriction");
 
             // Volume 6, density 2: mass 12. Moments follow the box formula.
@@ -192,8 +192,8 @@ namespace McKrill.Avbd.Tests
             EditCommand c = Drain(queue)[0];
 
             Assert.AreEqual(EditFields.Velocity | EditFields.GroupMask | EditFields.Appearance, c.Fields);
-            AssertEqual(new float4(1f, 0f, 0f, 0f), c.linear, "linear");
-            AssertEqual(new float4(0f, 2f, 0f, 0f), c.angular, "angular");
+            AssertEqual(new float4(1f, 0f, 0f, 0f), c.linearVel, "linear");
+            AssertEqual(new float4(0f, 2f, 0f, 0f), c.angularVel, "angular");
             Assert.AreEqual(0x0Fu, c.meta.y);
             Assert.AreEqual(9u, c.meta.z);
         }

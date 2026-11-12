@@ -23,8 +23,8 @@ struct EditCommand
     uint4  header;       // x = kind, y = slot, z = field mask, w unused
     float4 position;     // xyz = position
     float4 rotation;
-    float4 linear;       // xyz = linear velocity
-    float4 angular;
+    float4 linearVel;       // xyz = linear velocity
+    float4 angularVel;
     float4 momentMass;   // xyz = principal moments, w = mass
     float4 sizeFriction; // xyz = box size, w = friction
     uint4  meta;         // x = flags | kind << 24, y = group mask, z = appearance id, w unused

@@ -58,7 +58,7 @@ namespace McKrill.Avbd.Tests
             Assert.IsTrue(Same(new float4(4f, 5f, 6f, 0f), arrays.State[s].position));
             Assert.IsTrue(Same(arrays.State[s].position, arrays.State[s].startPosition), "spawn sets the step-start pose");
             Assert.IsTrue(Same(arrays.State[s].rotation, arrays.State[s].startRotation));
-            Assert.IsTrue(Same(arrays.Motion[s].linear, arrays.Motion[s].prevLinear), "spawn sets the previous velocity");
+            Assert.IsTrue(Same(arrays.Motion[s].linearVel, arrays.Motion[s].prevLinearVel), "spawn sets the previous velocity");
             Assert.AreEqual(12f, arrays.Mass[s].momentMass.w, 1e-5f);
             Assert.IsTrue(Same(new float4(1f, 2f, 3f, 0.5f), arrays.Shape[s].sizeFriction));
             Assert.AreEqual(3u, arrays.Meta[s].ident.y);
@@ -133,9 +133,9 @@ namespace McKrill.Avbd.Tests
             Run(arrays, queue);
 
             int s = h.Slot;
-            Assert.IsTrue(Same(new float4(3f, 0f, 0f, 0f), arrays.Motion[s].linear));
-            Assert.IsTrue(Same(new float4(0f, 4f, 0f, 0f), arrays.Motion[s].angular));
-            Assert.IsTrue(Same(arrays.Motion[s].linear, arrays.Motion[s].prevLinear));
+            Assert.IsTrue(Same(new float4(3f, 0f, 0f, 0f), arrays.Motion[s].linearVel));
+            Assert.IsTrue(Same(new float4(0f, 4f, 0f, 0f), arrays.Motion[s].angularVel));
+            Assert.IsTrue(Same(arrays.Motion[s].linearVel, arrays.Motion[s].prevLinearVel));
         }
 
         [Test]

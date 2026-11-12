@@ -110,9 +110,9 @@ namespace McKrill.Avbd
     [StructLayout(LayoutKind.Sequential)]
     internal struct BodyMotionRecord
     {
-        public float4 linear;
-        public float4 angular;
-        public float4 prevLinear;
+        public float4 linearVel;
+        public float4 angularVel;
+        public float4 prevLinearVel;
     }
 
     /// <summary>Cold. xyz = full box widths, w = friction.</summary>
