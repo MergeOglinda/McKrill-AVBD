@@ -38,7 +38,7 @@ This matrix covers dynamic rigid bodies and their contacts. Soft-body particles 
 | P | Predict | Computes the inertial target and the initial guess |
 | V | Solve | Primal update of each body, once per color per iteration |
 | D | Dual update | Updates multiplier and penalty of each constraint, once per iteration |
-| U | Velocity update | Derives velocity from displacement, applies the speed limit, snapshots warm-start data |
+| U | Velocity update | Derives velocity from displacement, snapshots warm-start data. A speed limit is planned (see section 11, stage U) |
 | Z | Sleep | Updates sleep counters and compacts the active list |
 | R | Render | Culls and bins instances, then draws them |
 
@@ -337,7 +337,41 @@ A step of `AvbdSolver.Step()` is now: apply edits, rebuild constraints if needed
 
 **Encoding.** The stiffness caps follow the flags, not infinity: `HardLinear` or `HardAngular` selects "no stiffness cap" (the penalty maximum), anything else uses the stored finite stiffness. A non-hard angular stiffness of 0 disables the angle row, because the warm start caps its penalty at 0.
 
-**Check.** The oracles are `CpuConstraintInit` and `CpuDual`. `DualTests` compares them with `ReferenceSolver` over a whole step (colored order, 1 and 3 iterations): body poses, C0, penalties, multipliers and the broken flag, on the rope, a fracture scene and random lattices (some joints fracture at once, some never). It then compares the GPU solver's `Step()` with the oracles on the same scenes, including every constraint record read back. Records go to the GPU without the warm start, so the kernel is tested. Comparing a second step with the reference is not possible: the velocity update (stage U) is missing, and a joint that broke would leave the reference's lists and coloring.
+**Check.** The oracles are `CpuConstraintInit` and `CpuDual`. `DualTests` compares them with `ReferenceSolver` over a whole step (colored order, 1 and 3 iterations): body poses, C0, penalties, multipliers and the broken flag, on the rope, a fracture scene and random lattices (some joints fracture at once, some never). It then compares the GPU solver's `Step()` with the oracles on the same scenes, including every constraint record read back. Records go to the GPU without the warm start, so the kernel is tested. Comparing more than one step needs the velocity update; stage U adds it, and `VelocityTests` compares several steps.
+
+### Stage U: velocity update
+
+`AvbdVelocity.compute`, kernel `Velocity`: one thread per slot over `[0, HighWaterMark)`, once per step after the last iteration. A thread reads the pose and the step-start pose and writes only its own Motion record, so there is no ordering and no atomics.
+
+| Body | Previous linear velocity | Velocity |
+| --- | --- | --- |
+| Free slot | untouched | untouched |
+| Live, kinematic or mass 0 | set to the velocity | kept (the user or an edit set it; nothing moved the body) |
+| Live, solved | set to the old velocity | `(x - x_start) / dt` and `QuatDifference(q, q_start) / dt` (BDF1, upstream's quaternion difference, no sign flip) |
+
+The previous velocity is what stage P reads for the adaptive warm start, so a step's `prev` is the velocity before this update. This is the reference solver's loop, which snapshots every body; the only difference is that free slots are skipped.
+
+**Speed limit not implemented.** The stage table lists a speed limit, but upstream has none and the reference solver has none, so adding one now would break the parity tests. It would be one more setting (a uniform) and a clamp after the division, off by default.
+
+**Full step.** `AvbdSolver.Step()` is now complete for the stages that exist: apply edits, rebuild the constraint lists if needed, P, `ConstraintInit`, per iteration a primal sweep and `Dual`, then U. Two behaviors the driver needed:
+
+- **Without constraint buffers** the solver creates an empty `AvbdConstraintBuffers` of its own at the first step. Before, it skipped the primal sweeps, so a body without constraints never reached its inertial target and could not fall. `AvbdSolver` is now `IDisposable`; `Dispose` releases only the buffers it created itself.
+- **Bodies spawned, removed or changed later.** The color buckets and the lists depend on which bodies are solved. `AvbdBodyBuffers.SolvedSetVersion` increases when an applied batch contains a spawn, a remove, a change of shape (mass) or of the kinematic flag, and `Step()` calls `Rebuild()` when the version differs from the one the lists were built for. Before, a body spawned after the last `Rebuild()` was predicted but never solved. Pose, velocity, friction, group and appearance edits do not trigger a rebuild, because they do not change the lists.
+
+**Check.** The oracles are `CpuVelocity` and `CpuStep` (P, D warm start, iterations, U, in the GPU's order). `VelocityTests`:
+
+| Test | Needs a GPU | Checks |
+| --- | --- | --- |
+| Oracle, by hand | No | Velocity from a known displacement, angular velocity of a known rotation, static, kinematic and free slots |
+| `Oracle_Step_MatchesTheReferenceSolver` | No | `CpuStep` against `ReferenceSolver` (colored) over 60 steps on the rope and the spring scene: poses, linear, angular and previous velocity at steps 1, 2, 10, 30 and 60 |
+| `Oracle_Step_FollowsTheClosedFormOfAFreeFall` | No | A body without constraints: `v = n g dt`, `y = y0 + g dt^2 n (n + 1) / 2` |
+| `Gpu_Velocity_MatchesTheOracle_OnRandomBodies` | Yes | The kernel against the oracle on random bodies with statics, kinematic bodies and free slots |
+| `Gpu_Step_*` free fall, late spawn, static and kinematic | Yes | The same closed form through `Step()` without constraint buffers; a body spawned after the first step is solved; static and kinematic bodies keep pose and velocity |
+| `Gpu_Step_MatchesTheReferenceSolver` | Yes | `Step()` against `ReferenceSolver` (colored) over 60 steps on the rope and the spring scene: poses, velocities and previous velocities at the same steps, and no failed solves |
+
+**Tolerances.** Position 2e-3, rotation 2e-4, velocity 1e-2 (relative to max(1, |v|)). They were chosen from a sensitivity run of upstream's C++ solver on both scenes: with every initial position nudged by 1e-6, the largest drift after 60 steps was 3e-5 in position, 6e-6 in rotation and 1.4e-4 in velocity on the rope, and the spring scene did not amplify (1.4e-6 throughout). The bounds are 30 to 70 times that. Rounding differences between the GPU and the CPU are far below the nudge, but this has not been measured on a GPU.
+
+**Limits.** The two scenes have no contacts (the reference creates empty manifolds for the far ground; they affect nothing). A joint that fractures stays in the lists, so the colored order can differ from the reference's after the step in which it breaks (section 12); the parity scenes have no fracture.
 
 ## 12. Constraints (step 4: joints and springs)
 
@@ -372,7 +406,7 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 - Colors come from a greedy first-fit coloring: bodies from the highest slot down, lowest color not used by a colored neighbor. This is the reference's `GraphColoring`, and `ConstraintTopologyTests` checks the two against each other. Fixed bodies and world pins create no edge.
 - Bodies are bucketed by color in one list; the CPU knows each color's range, so a color is one dispatch.
 
-**Both are built on the CPU for now** (`ConstraintTopology`, called by `Rebuild()`), because stages G and C do not exist. `Rebuild()` applies the pending body edits and reads body data back (sizes, poses, mass, flags), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending. Known limits until G and C exist: constraints cannot be removed, removing a body that has constraints is not supported, and a joint that fractures (stage D) stays in the lists and the coloring, so the colored order can differ from the reference's from the next step on (the reference removes a broken joint at the next step's warm start and colors again). The graph color is not written to the Meta record yet (stage C's field).
+**Both are built on the CPU for now** (`ConstraintTopology`, called by `Rebuild()`), because stages G and C do not exist. `Rebuild()` applies the pending body edits and reads body data back (sizes, poses, mass, flags), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending or when the set of solved bodies changed (section 11, stage U). Known limits until G and C exist: constraints cannot be removed, removing a body that has constraints is not supported, and a joint that fractures (stage D) stays in the lists and the coloring, so the colored order can differ from the reference's from the next step on (the reference removes a broken joint at the next step's warm start and colors again). The graph color is not written to the Meta record yet (stage C's field).
 
 ### Tests
 
@@ -384,5 +418,6 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 | `PrimalTests` (GPU) | Yes | The kernel against the oracle on the same scenes; `AddJoint` and `AddSpring` completing the records; a joint with a known closed-form result; static bodies never moving |
 | `DualTests` (oracle) | No | `CpuConstraintInit` and `CpuDual` against `ReferenceSolver` after one step (1 and 3 iterations), a hand-computed dual update, fracture |
 | `DualTests` (GPU) | Yes | `Step()` against the oracles on the rope, the fracture scene and random lattices, including all constraint records; springs untouched by stage D |
+| `VelocityTests` | Both | Stage U and whole steps against the reference solver (section 11, stage U) |
 
-None of the stage V or stage D code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.
+None of the stage V, D or U code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.

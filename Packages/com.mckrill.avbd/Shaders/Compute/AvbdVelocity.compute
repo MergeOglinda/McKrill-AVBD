@@ -1,0 +1,46 @@
+// Stage U: velocity update. Derives each body's velocity from how far it moved during the step (BDF1) and snapshots the
+// linear velocity for the next step's adaptive warm start.
+// Mirrored by Reference/Stages/CpuVelocity.cs, which the tests compare against.
+
+#pragma kernel Velocity
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
+
+StructuredBuffer<BodyStateRecord>   _BodyState;
+RWStructuredBuffer<BodyMotionRecord> _BodyMotion;
+StructuredBuffer<BodyMassRecord>    _BodyMass;
+StructuredBuffer<BodyMetaRecord>    _BodyMeta;
+
+uint _Base;
+uint _Count; // slots to process: [0, _Count)
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Velocity(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    // Free slots hold no body and stay cleared.
+    uint flags = _BodyMeta[slot].ident.x;
+    if (flags & AVBD_BODY_FLAG_FREE)
+        return;
+
+    BodyMotionRecord v = _BodyMotion[slot];
+
+    // Snapshot for the adaptive warm start of the next step. Every live body does it, like the reference solver.
+    v.prevLinearVel = v.linearVel;
+
+    // Only bodies the solver moved get a new velocity. Kinematic and static bodies keep the velocity they were given.
+    if (!(flags & AVBD_BODY_FLAG_KINEMATIC) && _BodyMass[slot].momentMass.w > 0.0)
+    {
+        BodyStateRecord s = _BodyState[slot];
+        float dt = AVBD_DT;
+        v.linearVel = float4((s.position.xyz - s.startPosition.xyz) / dt, 0.0);
+        v.angularVel = float4(AvbdQuatDifference(s.rotation, s.startRotation) / dt, 0.0);
+    }
+
+    _BodyMotion[slot] = v;
+}

@@ -115,6 +115,12 @@ namespace McKrill.Avbd
         /// <summary>True if edits are waiting for <see cref="ApplyEdits()"/>.</summary>
         public bool HasPendingEdits => queue.PendingSlotCount > 0;
 
+        /// <summary>
+        /// Counts the applied batches that changed which bodies the solver solves or how much they weigh: a spawn, a remove, or a
+        /// change of shape or of the kinematic flag. The constraint lists and the color buckets depend on it (see <see cref="AvbdConstraintBuffers"/>).
+        /// </summary>
+        internal int SolvedSetVersion { get; private set; }
+
         public bool IsAlive(BodyHandle handle) => queue.IsAlive(handle);
 
         // ---- buffers for the other stages ---------------------------------------------------------------
@@ -209,6 +215,9 @@ namespace McKrill.Avbd
             if (total == 0)
                 return 0;
 
+            if (ChangesSolvedSet(drained))
+                SolvedSetVersion++;
+
             BindBodyBuffers(applyKernel);
             shader.SetBuffer(applyKernel, CommandsId, commands);
             shader.SetInt(CapacityId, Capacity);
@@ -221,6 +230,20 @@ namespace McKrill.Avbd
                 shader.Dispatch(applyKernel, (count + AvbdConst.GroupSize - 1) / AvbdConst.GroupSize, 1, 1);
             }
             return total;
+        }
+
+        static bool ChangesSolvedSet(List<EditCommand> commands)
+        {
+            const uint structural = (uint)(EditFields.Shape | EditFields.Kinematic);
+            for (int i = 0; i < commands.Count; i++)
+            {
+                uint kind = commands[i].header.x;
+                if (kind == (uint)EditKind.Spawn || kind == (uint)EditKind.Remove)
+                    return true;
+                if (kind == (uint)EditKind.Set && (commands[i].header.z & structural) != 0u)
+                    return true;
+            }
+            return false;
         }
 
         // Puts every slot into the free state (rule P9: new buffers are never assumed to be zeroed).
