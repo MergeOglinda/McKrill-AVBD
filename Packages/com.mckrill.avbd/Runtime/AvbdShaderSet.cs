@@ -16,6 +16,7 @@ namespace McKrill.Avbd
         [SerializeField] ComputeShader smoke;
         [SerializeField] ComputeShader bodyEdits;
         [SerializeField] ComputeShader predict;
+        [SerializeField] ComputeShader primal;
 
         /// <summary>Trivial kernel that writes a known pattern into a buffer. Proves the toolchain.</summary>
         public ComputeShader Smoke => smoke;
@@ -25,6 +26,9 @@ namespace McKrill.Avbd
 
         /// <summary>Stage P: inertial target and adaptive warm start.</summary>
         public ComputeShader Predict => predict;
+
+        /// <summary>Stage V: primal update of each body (6x6 LDL^T solve), one dispatch per color.</summary>
+        public ComputeShader Primal => primal;
 
         /// <summary>Loads the shader set, or returns null if the asset is missing.</summary>
         public static AvbdShaderSet Load()

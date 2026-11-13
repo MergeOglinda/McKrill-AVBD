@@ -175,6 +175,53 @@ namespace McKrill.Avbd.Tests
             AssertStructMatches(commands, "EditCommand", typeof(EditCommand));
         }
 
+        // ---- constraint records -------------------------------------------------------------------------
+
+        [Test]
+        public void ConstraintRecord_HasTheDocumentedSize_AndFollowsRuleP3()
+        {
+            Assert.AreEqual(ConstraintRecordStrides.Constraint, UnsafeUtility.SizeOf<ConstraintRecord>());
+            Assert.AreEqual(160, ConstraintRecordStrides.Constraint);
+            Assert.AreEqual(0, ConstraintRecordStrides.Constraint % 32, "constraints are gathered by id, so the stride must be a multiple of 32 (rule P3)");
+            Assert.Less(ConstraintRecordStrides.Constraint, 2048);
+        }
+
+        [Test]
+        public void ConstraintFlags_AreDistinctSingleBitsInTheLow24_AndPackWithTheKind()
+        {
+            ConstraintFlags[] flags = { ConstraintFlags.HardLinear, ConstraintFlags.HardAngular, ConstraintFlags.Fracturable, ConstraintFlags.Broken };
+            uint seen = 0;
+            foreach (ConstraintFlags flag in flags)
+            {
+                uint bit = (uint)flag;
+                Assert.AreEqual(1, math.countbits(bit), flag + " is not a single bit");
+                Assert.AreEqual(0u, bit & ~ConstraintFlagLayout.FlagsMask, flag + " is outside the low 24 bits");
+                Assert.AreEqual(0u, seen & bit, flag + " overlaps another flag");
+                seen |= bit;
+            }
+
+            uint packed = ConstraintFlagLayout.Pack(ConstraintFlags.HardLinear | ConstraintFlags.Broken, ConstraintKind.Spring);
+            Assert.AreEqual(ConstraintFlags.HardLinear | ConstraintFlags.Broken, ConstraintFlagLayout.FlagsOf(packed));
+            Assert.AreEqual(ConstraintKind.Spring, ConstraintFlagLayout.KindOf(packed));
+        }
+
+        [Test]
+        public void Hlsl_ConstraintDefinitionsMatchTheCSharpMirrors()
+        {
+            Dictionary<string, uint> d = ReadDefines("AvbdConstraintRecords.hlsl");
+
+            Assert.AreEqual((uint)ConstraintFlags.HardLinear, d["AVBD_CONSTRAINT_FLAG_HARD_LIN"]);
+            Assert.AreEqual((uint)ConstraintFlags.HardAngular, d["AVBD_CONSTRAINT_FLAG_HARD_ANG"]);
+            Assert.AreEqual((uint)ConstraintFlags.Fracturable, d["AVBD_CONSTRAINT_FLAG_FRACTURABLE"]);
+            Assert.AreEqual((uint)ConstraintFlags.Broken, d["AVBD_CONSTRAINT_FLAG_BROKEN"]);
+            Assert.AreEqual(ConstraintFlagLayout.FlagsMask, d["AVBD_CONSTRAINT_FLAGS_MASK"]);
+            Assert.AreEqual((uint)ConstraintFlagLayout.KindShift, d["AVBD_CONSTRAINT_KIND_SHIFT"]);
+            Assert.AreEqual((uint)ConstraintKind.Joint, d["AVBD_CONSTRAINT_KIND_JOINT"]);
+            Assert.AreEqual((uint)ConstraintKind.Spring, d["AVBD_CONSTRAINT_KIND_SPRING"]);
+
+            AssertStructMatches(ReadInclude("AvbdConstraintRecords.hlsl"), "ConstraintRecord", typeof(ConstraintRecord));
+        }
+
         static void AssertStructMatches(string hlslSource, string hlslName, Type csharpType)
         {
             Match match = Regex.Match(hlslSource, @"struct\s+" + hlslName + @"\s*\{([^}]*)\}");

@@ -1,0 +1,268 @@
+// Stage V: primal update. One thread solves one body: it assembles the body's 6x6 system from the inertia term and every
+// constraint in its list, solves it with an LDL^T factorization and applies the Newton step (Eqs. 4-6).
+// Dispatched once per graph color and iteration: the bodies of one color share no constraint, so a body writes only its own
+// pose and reads the others' poses from other colors, with no atomics (except the failure counter).
+// Mirrored by Reference/Stages/CpuPrimal.cs, which the tests compare against.
+
+#pragma kernel Primal
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
+
+RWStructuredBuffer<BodyStateRecord>    _BodyState;
+StructuredBuffer<BodyInertialRecord>   _BodyInertial;
+StructuredBuffer<BodyMassRecord>       _BodyMass;
+StructuredBuffer<BodyMetaRecord>       _BodyMeta;
+StructuredBuffer<BodyRangeRecord>      _BodyRange;
+StructuredBuffer<ConstraintRecord>     _Constraints;
+StructuredBuffer<uint>                 _ConstraintList; // constraint ids, grouped per body (see _BodyRange)
+StructuredBuffer<uint>                 _ColorBodies;    // solved body slots, grouped per color
+RWStructuredBuffer<uint>               _Status;         // x = number of failed solves
+
+uint _Base;  // first entry of _ColorBodies to process
+uint _Count; // end of the range: entries [_Base, _Count)
+
+// The 6x6 system of one body, as the blocks the reference uses (all 3x3 blocks are mathematical matrices).
+struct PrimalSystem
+{
+    float3x3 lhsLin;   // linear-linear
+    float3x3 lhsAng;   // angular-angular
+    float3x3 lhsCross; // angular rows, linear columns (only the lower triangle of the full matrix is read)
+    float3 rhsLin;
+    float3 rhsAng;
+};
+
+// Pose of body slot `id`. The body being solved is passed in, the others are read from the state array.
+// A body A of AVBD_INVALID is the world: origin and identity rotation.
+void LoadPose(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos, out float4 rot)
+{
+    if (id == self)
+    {
+        pos = selfPos;
+        rot = selfRot;
+    }
+    else if (id == AVBD_INVALID)
+    {
+        pos = float3(0.0, 0.0, 0.0);
+        rot = float4(0.0, 0.0, 0.0, 1.0);
+    }
+    else
+    {
+        BodyStateRecord s = _BodyState[id];
+        pos = s.position.xyz;
+        rot = s.rotation;
+    }
+}
+
+void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+{
+    float alpha = AVBD_ALPHA;
+    bool hasA = c.ident.x != AVBD_INVALID;
+    bool isA = c.ident.x == slot;
+
+    float3 posA, posB;
+    float4 rotA, rotB;
+    LoadPose(c.ident.x, slot, selfPos, selfRot, posA, rotA);
+    LoadPose(c.ident.y, slot, selfPos, selfRot, posB, rotB);
+
+    float3 rA = c.anchorA.xyz;
+    float3 rB = c.anchorB.xyz;
+    float torqueArm = c.c0Lin.w;
+
+    float3 rWorldA = AvbdQuatRotate(rotA, rA);
+    float3 rWorldB = AvbdQuatRotate(rotB, rB);
+    float3 anchorA = hasA ? rWorldA + posA : rA; // world joint: rA is the fixed world point
+    float3 anchorB = rWorldB + posB;
+
+    float3 penaltyLin = c.penaltyLin.xyz;
+    float3 penaltyAng = c.penaltyAng.xyz;
+
+    // Linear constraint
+    if (dot(penaltyLin, penaltyLin) > 0.0)
+    {
+        float3x3 K = AvbdDiagonal(penaltyLin);
+        float3 C = anchorA - anchorB;
+
+        // Stabilization
+        if (flags & AVBD_CONSTRAINT_FLAG_HARD_LIN)
+            C -= c.c0Lin.xyz * alpha;
+
+        float3 F = penaltyLin * C + c.lambdaLin.xyz;
+
+        // Jacobians for the body being solved.
+        float sgn = isA ? 1.0 : -1.0;
+        float3x3 jLin = sgn * AvbdIdentity3();
+        float3x3 jAng;
+        if (isA)
+            jAng = AvbdSkew(-rWorldA);
+        else
+            jAng = AvbdSkew(rWorldB);
+
+        float3x3 jLinT = transpose(jLin);
+        float3x3 jAngT = transpose(jAng);
+        float3x3 jAngTk = mul(jAngT, K);
+
+        sys.lhsLin += mul(mul(jLinT, K), jLin);
+        sys.lhsAng += mul(jAngTk, jAng);
+        sys.lhsCross += mul(jAngTk, jLin);
+
+        // Diagonal approximation for higher-order terms: the sum over k of F[k] * G(k, r), with G the geometric stiffness of a
+        // ball-socket joint (diag(-r[k]) plus r added to column k), which is -dot(F, r) I + r F^T.
+        float3 r = isA ? rWorldA : -rWorldB;
+        float3x3 H = -dot(F, r) * AvbdIdentity3() + AvbdOuter(r, F);
+        sys.lhsAng += AvbdDiagonalize(H);
+
+        sys.rhsLin += mul(jLinT, F);
+        sys.rhsAng += mul(jAngT, F);
+    }
+
+    // Angular constraint
+    if (dot(penaltyAng, penaltyAng) > 0.0)
+    {
+        float3x3 K = AvbdDiagonal(penaltyAng);
+        float3 C = AvbdQuatDifference(rotA, rotB) * torqueArm; // rotA is the identity for a world joint
+
+        // Stabilization
+        if (flags & AVBD_CONSTRAINT_FLAG_HARD_ANG)
+            C -= c.c0Ang.xyz * alpha;
+
+        float3 F = penaltyAng * C + c.lambdaAng.xyz;
+
+        float sgn = isA ? 1.0 : -1.0;
+        float3x3 jAng = (sgn * torqueArm) * AvbdIdentity3();
+        float3x3 jAngT = transpose(jAng);
+
+        sys.lhsAng += mul(mul(jAngT, K), jAng);
+        sys.rhsAng += mul(jAngT, F);
+    }
+}
+
+void StampSpring(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+{
+    bool isA = c.ident.x == slot;
+
+    float3 posA, posB;
+    float4 rotA, rotB;
+    LoadPose(c.ident.x, slot, selfPos, selfRot, posA, rotA);
+    LoadPose(c.ident.y, slot, selfPos, selfRot, posB, rotB);
+
+    float stiffness = c.anchorA.w;
+    float rest = c.anchorB.w;
+
+    float3 rWorldA = AvbdQuatRotate(rotA, c.anchorA.xyz);
+    float3 rWorldB = AvbdQuatRotate(rotB, c.anchorB.xyz);
+    float3 d = (rWorldA + posA) - (rWorldB + posB);
+    float dLen = length(d);
+    if (dLen <= 1.0e-6)
+        return;
+
+    float3 n = d / dLen;
+    float C = dLen - rest;
+    float f = stiffness * C;
+
+    float3 jLin;
+    float3 jAng;
+    if (isA)
+    {
+        jLin = n;
+        jAng = cross(rWorldA, n);
+    }
+    else
+    {
+        jLin = -n;
+        jAng = -cross(rWorldB, n);
+    }
+
+    sys.lhsLin += AvbdOuter(jLin, jLin) * stiffness;
+    sys.lhsAng += AvbdOuter(jAng, jAng) * stiffness;
+    sys.lhsCross += AvbdOuter(jAng, jLin) * stiffness;
+    sys.rhsLin += jLin * f;
+    sys.rhsAng += jAng * f;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Primal(uint3 id : SV_DispatchThreadID)
+{
+    uint index = _Base + id.x;
+    if (index >= _Count)
+        return;
+
+    uint slot = _ColorBodies[index];
+
+    // The color lists are built on the CPU; a body removed or changed since is skipped.
+    if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
+        return;
+    float4 momentMass = _BodyMass[slot].momentMass;
+    float mass = momentMass.w;
+    if (!(mass > 0.0))
+        return;
+
+    float dt = AVBD_DT;
+    float dtSq = dt * dt;
+
+    BodyStateRecord state = _BodyState[slot];
+    BodyInertialRecord inertial = _BodyInertial[slot];
+    float3 position = state.position.xyz;
+    float4 rotation = state.rotation;
+
+    // Inertia term.
+    PrimalSystem sys;
+    sys.lhsLin = AvbdDiagonal(float3(mass / dtSq, mass / dtSq, mass / dtSq));
+    sys.lhsAng = AvbdDiagonal(float3(momentMass.x / dtSq, momentMass.y / dtSq, momentMass.z / dtSq));
+    sys.lhsCross = float3x3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    sys.rhsLin = (mass / dtSq) * (position - inertial.position.xyz);
+    sys.rhsAng = (momentMass.xyz / dtSq) * AvbdQuatDifference(rotation, inertial.rotation);
+
+    // Every constraint of the body, newest first.
+    uint2 range = _BodyRange[slot].range.xy;
+    for (uint e = 0; e < range.y; e++)
+    {
+        ConstraintRecord c = _Constraints[_ConstraintList[range.x + e]];
+        uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+        uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
+        if (kind == AVBD_CONSTRAINT_KIND_JOINT)
+            StampJoint(c, flags, slot, position, rotation, sys);
+        else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
+            StampSpring(c, slot, position, rotation, sys);
+    }
+
+    // Lower triangle of the symmetric 6x6 matrix, row-major, and the right-hand side -rhs.
+    float a[36];
+    [unroll]
+    for (uint i = 0; i < 36; i++)
+        a[i] = 0.0;
+
+    [unroll]
+    for (uint r = 0; r < 3; r++)
+    {
+        [unroll]
+        for (uint col = 0; col < 3; col++)
+        {
+            a[r * 6 + col] = sys.lhsLin[r][col];
+            a[(3 + r) * 6 + col] = sys.lhsCross[r][col];
+            a[(3 + r) * 6 + 3 + col] = sys.lhsAng[r][col];
+        }
+    }
+
+    float y[6];
+    y[0] = -sys.rhsLin.x;
+    y[1] = -sys.rhsLin.y;
+    y[2] = -sys.rhsLin.z;
+    y[3] = -sys.rhsAng.x;
+    y[4] = -sys.rhsAng.y;
+    y[5] = -sys.rhsAng.z;
+
+    if (AvbdSolveLdlt6(a, y))
+    {
+        state.position = float4(position + float3(y[0], y[1], y[2]), 0.0);
+        state.rotation = AvbdIntegrateAngular(rotation, float3(y[3], y[4], y[5]));
+        _BodyState[slot] = state;
+    }
+    else
+    {
+        uint previous;
+        InterlockedAdd(_Status[0], 1u, previous);
+    }
+}
