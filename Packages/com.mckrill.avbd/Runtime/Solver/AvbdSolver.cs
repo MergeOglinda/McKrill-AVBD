@@ -93,7 +93,7 @@ namespace McKrill.Avbd
             if (constraints == null)
             {
                 // Bodies without joints still need the primal update (inertia and gravity), which runs over the schedule.
-                ownedConstraints = new AvbdConstraintBuffers(bodies, 1);
+                ownedConstraints = new AvbdConstraintBuffers(bodies, 1, shaders);
                 constraints = ownedConstraints;
                 FindConstraintKernels();
             }
@@ -134,9 +134,8 @@ namespace McKrill.Avbd
             shader.SetBuffer(primalKernel, ColorBodiesId, constraints.ColorBodies);
             shader.SetBuffer(primalKernel, StatusId, constraints.Status);
 
-            ConstraintTopology topology = constraints.Topology;
-            for (int color = 0; color < topology.ColorCount; color++)
-                AvbdDispatch.Range(shader, primalKernel, topology.ColorOffsets[color], topology.ColorSize(color));
+            for (int color = 0; color < constraints.ColorCount; color++)
+                AvbdDispatch.Range(shader, primalKernel, constraints.ColorOffset(color), constraints.ColorSize(color));
         }
 
         // Stage D, once per step after stage P: evaluates every joint at the start-of-step pose and warm-starts its variables.

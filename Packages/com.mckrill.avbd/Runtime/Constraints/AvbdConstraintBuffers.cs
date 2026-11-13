@@ -10,8 +10,9 @@ namespace McKrill.Avbd
     /// list and the bodies bucketed by graph color.
     ///
     /// AddJoint and AddSpring only record the constraint on the CPU. <see cref="Rebuild"/> (which <see cref="AvbdSolver.Step"/>
-    /// calls when constraints are pending) applies the pending body edits, completes the records, builds the lists and the coloring
-    /// on the CPU and uploads them. This CPU build is temporary: stages G (lists) and C (coloring) replace it on the GPU.
+    /// calls when constraints are pending) applies the pending body edits, completes the records, builds the per-body lists on the CPU
+    /// and uploads them, then colors the graph and buckets the bodies on the GPU (stage C). The CPU list build is temporary: stage G
+    /// replaces it on the GPU.
     ///
     /// Limits of this version: constraints cannot be removed, and removing a body that has constraints is not supported.
     /// The arrays have a fixed capacity. Methods must be called from the main thread.
@@ -39,6 +40,10 @@ namespace McKrill.Avbd
         readonly ConstraintRecord[] records;
         readonly List<Spec> pending = new List<Spec>();
         readonly ConstraintTopology topology = new ConstraintTopology();
+        readonly AvbdGraphColoring coloring;
+        int[] colorOffsets = new int[1];
+        int colorCount;
+        GraphColoringOrder coloringOrder = GraphColoringOrder.SlotOrder;
 
         GraphicsBuffer recordBuffer;
         GraphicsBuffer listBuffer;
@@ -53,7 +58,8 @@ namespace McKrill.Avbd
 
         /// <param name="bodies">The body arrays the constraints refer to.</param>
         /// <param name="capacity">Number of constraints. Fixed for the lifetime of the object.</param>
-        public AvbdConstraintBuffers(AvbdBodyBuffers bodies, int capacity)
+        /// <param name="shaderSet">The compute shaders; null loads the package's shader set.</param>
+        public AvbdConstraintBuffers(AvbdBodyBuffers bodies, int capacity, AvbdShaderSet shaderSet = null)
         {
             this.bodies = bodies ?? throw new ArgumentNullException(nameof(bodies));
             if (capacity < 1 || capacity > MaxConstraints)
@@ -62,6 +68,11 @@ namespace McKrill.Avbd
                 throw new InvalidOperationException("Compute shaders are not supported on this device.");
 
             records = new ConstraintRecord[capacity];
+
+            AvbdShaderSet shaders = shaderSet != null ? shaderSet : AvbdShaderSet.Load();
+            if (shaders == null)
+                throw new InvalidOperationException("The AvbdShaderSet asset was not found.");
+            coloring = new AvbdGraphColoring(shaders.Coloring);
 
             try
             {
@@ -100,7 +111,27 @@ namespace McKrill.Avbd
         public bool HasPendingChanges => topologyDirty || bodies.StructureVersion != seenStructureVersion;
 
         /// <summary>Number of graph colors of the last rebuild: the primal stage dispatches this many times per iteration.</summary>
-        public int ColorCount => topology.ColorCount;
+        public int ColorCount => colorCount;
+
+        /// <summary>
+        /// Which body colors first (see <see cref="GraphColoringOrder"/>). The default, <see cref="GraphColoringOrder.SlotOrder"/>, gives the
+        /// reference solver's coloring. Changing it recolors at the next <see cref="Rebuild"/>.
+        /// </summary>
+        public GraphColoringOrder ColoringOrder
+        {
+            get => coloringOrder;
+            set
+            {
+                if (value != coloringOrder)
+                {
+                    coloringOrder = value;
+                    topologyDirty = true;
+                }
+            }
+        }
+
+        /// <summary>Rounds the last coloring needed. Fewer is faster; see <see cref="GraphColoringOrder"/>.</summary>
+        public int LastColoringRounds => coloring.LastRounds;
 
         // ---- buffers for the solver stages -----------------------------------------------------------------
 
@@ -111,7 +142,24 @@ namespace McKrill.Avbd
         internal GraphicsBuffer List => listBuffer;
         internal GraphicsBuffer ColorBodies => colorBuffer;
         internal GraphicsBuffer Status => statusBuffer;
-        internal ConstraintTopology Topology => topology;
+        internal ConstraintTopology Topology => topology; // the lists; the coloring is on the GPU (see ColorCount, ColorOffset)
+
+        /// <summary>Start of a color in the bucket array (<see cref="ColorBodies"/>).</summary>
+        internal int ColorOffset(int color) => colorOffsets[color];
+
+        /// <summary>Number of bodies of a color.</summary>
+        internal int ColorSize(int color) => colorOffsets[color + 1] - colorOffsets[color];
+
+        /// <summary>The bucket array read back: the solved body slots grouped by color. Order inside a color is unspecified.</summary>
+        internal uint[] ReadColorBodies()
+        {
+            ThrowIfDisposed();
+            var all = new uint[colorBuffer.count];
+            colorBuffer.GetData(all);
+            var used = new uint[colorOffsets[colorCount]];
+            Array.Copy(all, used, used.Length);
+            return used;
+        }
 
         // ---- adding constraints ----------------------------------------------------------------------------
 
@@ -208,7 +256,7 @@ namespace McKrill.Avbd
 
         /// <summary>
         /// Applies the pending body edits, completes and uploads the new constraints, and rebuilds the per-body lists, the coloring
-        /// and the color buckets. It reads back body data, so call it when the constraint set changes, not every frame.
+        /// and the color buckets. It reads back body data and the coloring's progress, so call it when the constraint set changes, not every frame.
         /// </summary>
         public void Rebuild()
         {
@@ -255,14 +303,15 @@ namespace McKrill.Avbd
             for (int s = 0; s < bodyCount; s++)
                 solved[s] = (meta[s].ident.x & notSolved) == 0u && mass[s].momentMass.w > 0f;
 
-            topology.Build(records, recordCount, solved, bodyCount);
+            topology.Build(records, recordCount, solved, bodyCount, false);
 
             if (bodyCount > 0)
                 bodies.Range.SetData(topology.Ranges, 0, 0, bodyCount);
             if (topology.ListCount > 0)
                 listBuffer.SetData(topology.List, 0, 0, topology.ListCount);
-            if (topology.ColorBodyCount > 0)
-                colorBuffer.SetData(topology.ColorBodies, 0, 0, topology.ColorBodyCount);
+
+            // Stage C: color the graph and bucket the bodies, on the GPU.
+            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, colorBuffer, coloringOrder, out colorOffsets);
 
             topologyDirty = false;
             seenStructureVersion = bodies.StructureVersion;
@@ -331,6 +380,7 @@ namespace McKrill.Avbd
             Release(ref listBuffer);
             Release(ref colorBuffer);
             Release(ref statusBuffer);
+            coloring?.Dispose();
         }
 
         static void Release(ref GraphicsBuffer buffer)

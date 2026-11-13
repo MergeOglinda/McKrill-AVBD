@@ -40,7 +40,8 @@ namespace McKrill.Avbd
 
         /// <param name="records">Constraint records, index = constraint id.</param>
         /// <param name="solved">One flag per body slot below <paramref name="bodyCount"/>.</param>
-        public void Build(ConstraintRecord[] records, int recordCount, bool[] solved, int bodyCount)
+        /// <param name="buildColoring">False builds only the lists; the coloring is then left to stage C on the GPU and the color fields stay empty.</param>
+        public void Build(ConstraintRecord[] records, int recordCount, bool[] solved, int bodyCount, bool buildColoring = true)
         {
             if (records == null) throw new ArgumentNullException(nameof(records));
             if (solved == null) throw new ArgumentNullException(nameof(solved));
@@ -84,11 +85,17 @@ namespace McKrill.Avbd
                 if (solved[b]) List[cursor[b]++] = (uint)i;
             }
 
-            // 3. Greedy first-fit coloring, highest slot first.
             ColorOfBody = new int[bodyCount];
             for (int s = 0; s < bodyCount; s++)
                 ColorOfBody[s] = -1;
+            ColorCount = 0;
+            ColorBodyCount = 0;
+            ColorOffsets = new int[1];
+            ColorBodies = new uint[0];
+            if (!buildColoring)
+                return;
 
+            // 3. Greedy first-fit coloring, highest slot first.
             var stamp = new int[bodyCount + 2]; // stamp[c] == token: color c is used by a neighbor of the body being colored
             int token = 0;
             int colors = 0;
