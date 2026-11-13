@@ -18,6 +18,7 @@ namespace McKrill.Avbd
         [SerializeField] ComputeShader predict;
         [SerializeField] ComputeShader primal;
         [SerializeField] ComputeShader dual;
+        [SerializeField] ComputeShader velocity;
 
         /// <summary>Trivial kernel that writes a known pattern into a buffer. Proves the toolchain.</summary>
         public ComputeShader Smoke => smoke;
@@ -33,6 +34,9 @@ namespace McKrill.Avbd
 
         /// <summary>Stage D: constraint warm start and dual update (multipliers, penalties, fracture).</summary>
         public ComputeShader Dual => dual;
+
+        /// <summary>Stage U: velocity update from the displacement over the step, and the snapshot for the next warm start.</summary>
+        public ComputeShader Velocity => velocity;
 
         /// <summary>Loads the shader set, or returns null if the asset is missing.</summary>
         public static AvbdShaderSet Load()
