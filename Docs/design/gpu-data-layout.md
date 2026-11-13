@@ -339,6 +339,25 @@ A step of `AvbdSolver.Step()` is now: apply edits, rebuild constraints if needed
 
 **Check.** The oracles are `CpuConstraintInit` and `CpuDual`. `DualTests` compares them with `ReferenceSolver` over a whole step (colored order, 1 and 3 iterations): body poses, C0, penalties, multipliers and the broken flag, on the rope, a fracture scene and random lattices (some joints fracture at once, some never). It then compares the GPU solver's `Step()` with the oracles on the same scenes, including every constraint record read back. Records go to the GPU without the warm start, so the kernel is tested. Comparing a second step with the reference is not possible: the velocity update (stage U) is missing, and a joint that broke would leave the reference's lists and coloring.
 
+### Stage U: velocity update and the complete step
+
+`AvbdVelocity.compute` (kernel `Velocity`) runs once at the end of a step, one thread per body slot. For every solved body (not free, not kinematic, mass above zero) it writes `prevLinearVel = linearVel`, then the BDF1 velocities from the displacement of the step:
+
+- `linearVel = (position - startPosition) / dt`
+- `angularVel = (rotation - startRotation) / dt`, with the quaternion difference used by the primal stage: `2 * vec(a * inverse(b))`, no sign canonicalization (the reference's `canonicalizeQuatDifference` stays off).
+
+Static, kinematic and free slots are not touched. The kernel only writes the Motion array, and no other stage writes it while it runs. The oracle is `CpuVelocity`; `CpuStep` chains all the oracles in the order below.
+
+**Step order.** `AvbdSolver.Step()`: apply edits, refresh the constraint schedule if needed, P, `ConstraintInit`, then per iteration the primal sweep (one dispatch per color) and `Dual`, then U. `ConstraintInit` must follow P, because P writes the start-of-step pose that the warm start reads.
+
+**Schedule refresh.** The CPU-built lists and coloring depend on which bodies are solved. `AvbdBodyBuffers.StructureVersion` counts edits that can change that (spawn, remove, shape or kinematic changes). `AvbdConstraintBuffers.HasPendingChanges` is true when constraints were added or the version moved since the last `Rebuild()`, and `Step()` then rebuilds. A body spawned after the previous step is therefore solved in the next one.
+
+**Solver without constraints.** A body without constraints still needs the primal inertia solve. If `AvbdSolver` is created without a constraint set, it makes a private empty one on the first `Step()` (so the solver is `IDisposable`). A set passed in by the caller is not disposed by the solver.
+
+**Check.** `StepParityTests`: the velocity oracle by hand; the kernel against the oracle on random bodies (static, kinematic and removed slots included); `CpuStep` against `ReferenceSolver` (colored, no contacts) over 30 steps of the rope and 120 steps of the spring scene; `AvbdSolver.Step()` against `ReferenceSolver` in lockstep on both scenes, every body every step, plus the exact relation `velocity = (position - startPosition) / dt` and the previous-velocity chain; a free-falling pair without constraints; and bodies spawned and removed between steps. The tolerances for multi-step GPU parity are chosen to be far below any logic error but are estimates (fp32, fused multiply-add); the rope and spring parity tests are the first to loosen if the first run shows small drift.
+
+Not part of this stage: collisions in the GPU step, GPU-built lists and coloring, growth of the buffers.
+
 ## 12. Constraints (step 4: joints and springs)
 
 Contacts are still open. Joints and springs share one record, a constraint, with the kind in the high 8 bits of the flags word (rule P7).
@@ -384,5 +403,7 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 | `PrimalTests` (GPU) | Yes | The kernel against the oracle on the same scenes; `AddJoint` and `AddSpring` completing the records; a joint with a known closed-form result; static bodies never moving |
 | `DualTests` (oracle) | No | `CpuConstraintInit` and `CpuDual` against `ReferenceSolver` after one step (1 and 3 iterations), a hand-computed dual update, fracture |
 | `DualTests` (GPU) | Yes | `Step()` against the oracles on the rope, the fracture scene and random lattices, including all constraint records; springs untouched by stage D |
+| `StepParityTests` (oracle) | No | `CpuVelocity` by hand; `CpuStep` against `ReferenceSolver` over many steps of the rope and spring scenes |
+| `StepParityTests` (GPU) | Yes | The velocity kernel against the oracle; `Step()` against `ReferenceSolver` in lockstep on the rope and spring scenes; no constraints; spawn and remove between steps |
 
-None of the stage V or stage D code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.
+None of the stage V, D or U code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.

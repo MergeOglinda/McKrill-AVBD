@@ -4,19 +4,21 @@ namespace McKrill.Avbd
 {
     /// <summary>
     /// Runs the solver stages on the GPU for the bodies of one <see cref="AvbdBodyBuffers"/>.
-    /// The solver does not own the buffers; dispose them separately.
-    /// Stages are added one at a time; <see cref="Step"/> runs the ones that exist.
-    /// Joints and springs come from an optional <see cref="AvbdConstraintBuffers"/>.
+    /// The solver does not own the body or constraint buffers you pass in; dispose them separately.
+    /// Joints and springs come from an optional <see cref="AvbdConstraintBuffers"/>. Without one, <see cref="Step"/> creates a private empty
+    /// set (which only schedules the bodies), so dispose the solver when you step it without passing constraints.
     /// </summary>
-    public sealed class AvbdSolver
+    public sealed class AvbdSolver : System.IDisposable
     {
         readonly AvbdBodyBuffers bodies;
         readonly AvbdShaderSet shaders;
-        readonly AvbdConstraintBuffers constraints;
+        AvbdConstraintBuffers constraints;
+        AvbdConstraintBuffers ownedConstraints; // created by Step when none was passed in
         readonly int predictKernel;
-        readonly int primalKernel;
-        readonly int initKernel;
-        readonly int dualKernel;
+        readonly int velocityKernel;
+        int primalKernel;
+        int initKernel;
+        int dualKernel;
         AvbdSolverSettings settings;
 
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
@@ -40,17 +42,32 @@ namespace McKrill.Avbd
 
             predictKernel = shaders.Predict.FindKernel("Predict");
 
-            if (constraints != null)
-            {
-                if (shaders.Primal == null)
-                    throw new System.InvalidOperationException("The AvbdShaderSet has no primal shader.");
-                primalKernel = shaders.Primal.FindKernel("Primal");
+            if (shaders.Velocity == null)
+                throw new System.InvalidOperationException("The AvbdShaderSet has no velocity shader.");
+            velocityKernel = shaders.Velocity.FindKernel("Velocity");
 
-                if (shaders.Dual == null)
-                    throw new System.InvalidOperationException("The AvbdShaderSet has no dual shader.");
-                initKernel = shaders.Dual.FindKernel("ConstraintInit");
-                dualKernel = shaders.Dual.FindKernel("Dual");
-            }
+            if (constraints != null)
+                FindConstraintKernels();
+        }
+
+        // The kernels of the constraint stages (V and D).
+        void FindConstraintKernels()
+        {
+            if (shaders.Primal == null)
+                throw new System.InvalidOperationException("The AvbdShaderSet has no primal shader.");
+            primalKernel = shaders.Primal.FindKernel("Primal");
+
+            if (shaders.Dual == null)
+                throw new System.InvalidOperationException("The AvbdShaderSet has no dual shader.");
+            initKernel = shaders.Dual.FindKernel("ConstraintInit");
+            dualKernel = shaders.Dual.FindKernel("Dual");
+        }
+
+        /// <summary>Releases the private constraint buffers that <see cref="Step"/> created, if any. Safe to call more than once.</summary>
+        public void Dispose()
+        {
+            ownedConstraints?.Dispose();
+            ownedConstraints = null;
         }
 
         /// <summary>Solver constants. Takes effect at the next step. Throws ArgumentException for out-of-range values.</summary>
@@ -65,26 +82,32 @@ namespace McKrill.Avbd
         }
 
         /// <summary>
-        /// Applies pending body edits (stage E) and constraint changes, then runs the solver stages that exist:
-        /// predict (P), the constraint warm start (D), then per iteration a primal sweep (V) and the dual update (D).
-        /// The velocity stage (U) is not implemented yet.
+        /// One time step: applies pending body edits (stage E) and rebuilds the constraint schedule if the constraints or the set of solved
+        /// bodies changed, then runs predict (P), the constraint warm start (D), per iteration a primal sweep (V) and the dual update (D),
+        /// and finally the velocity update (U). Collisions are not implemented yet.
         /// </summary>
         public void Step()
         {
             bodies.ApplyEdits();
-            if (constraints != null && constraints.HasPendingChanges)
+
+            if (constraints == null)
+            {
+                // Bodies without joints still need the primal update (inertia and gravity), which runs over the schedule.
+                ownedConstraints = new AvbdConstraintBuffers(bodies, 1);
+                constraints = ownedConstraints;
+                FindConstraintKernels();
+            }
+            if (constraints.HasPendingChanges)
                 constraints.Rebuild();
 
             DispatchPredict();
-            if (constraints != null)
+            DispatchConstraintInit();
+            for (int it = 0; it < settings.iterations; it++)
             {
-                DispatchConstraintInit();
-                for (int it = 0; it < settings.iterations; it++)
-                {
-                    DispatchPrimalSweep();
-                    DispatchDual();
-                }
+                DispatchPrimalSweep();
+                DispatchDual();
             }
+            DispatchVelocity();
         }
 
         // Stage P over every slot that has ever been used.
@@ -139,6 +162,15 @@ namespace McKrill.Avbd
             bodies.BindTo(shader, kernel);
             shader.SetBuffer(kernel, RecordsId, constraints.Records);
             AvbdDispatch.Linear(shader, kernel, constraints.RecordCount);
+        }
+
+        // Stage U over every slot that has ever been used.
+        internal void DispatchVelocity()
+        {
+            ComputeShader shader = shaders.Velocity;
+            SolverUniforms.Bind(shader, settings);
+            bodies.BindTo(shader, velocityKernel);
+            AvbdDispatch.Linear(shader, velocityKernel, bodies.HighWaterMark);
         }
     }
 }

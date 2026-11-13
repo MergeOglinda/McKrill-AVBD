@@ -1,0 +1,42 @@
+// Stage U: velocity update (BDF1, Eq. 12). After the last iteration, the velocity of every solved body is the displacement of the
+// step divided by dt: v = (x - x-) / dt, w = (q - q-) / dt, with the rotation difference of upstream's "quat - quat" (no sign flip).
+// The previous linear velocity is kept for the adaptive warm start of the next step (stage P).
+// Free slots, kinematic bodies and static bodies (mass 0) are skipped, like in stage P.
+// Mirrored by Reference/Stages/CpuVelocity.cs, which the tests compare against.
+
+#pragma kernel Velocity
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
+
+StructuredBuffer<BodyStateRecord>   _BodyState;
+RWStructuredBuffer<BodyMotionRecord> _BodyMotion;
+StructuredBuffer<BodyMassRecord>    _BodyMass;
+StructuredBuffer<BodyMetaRecord>    _BodyMeta;
+
+uint _Base;
+uint _Count; // slots to process: [0, _Count)
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Velocity(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    uint flags = _BodyMeta[slot].ident.x;
+    if (flags & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
+        return;
+    if (!(_BodyMass[slot].momentMass.w > 0.0))
+        return;
+
+    float dt = AVBD_DT;
+    BodyStateRecord s = _BodyState[slot];
+    BodyMotionRecord v = _BodyMotion[slot];
+
+    v.prevLinearVel = v.linearVel;
+    v.linearVel = float4((s.position.xyz - s.startPosition.xyz) / dt, 0.0);
+    v.angularVel = float4(AvbdQuatDifference(s.rotation, s.startRotation) / dt, 0.0);
+    _BodyMotion[slot] = v;
+}

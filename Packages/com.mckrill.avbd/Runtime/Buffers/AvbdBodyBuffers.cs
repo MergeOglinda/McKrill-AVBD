@@ -194,6 +194,12 @@ namespace McKrill.Avbd
 
         // ---- stage E ----------------------------------------------------------------------------------
 
+        /// <summary>
+        /// Counts applied edits that change the set of solved bodies: spawns, removals, and changes of shape (mass) or of the kinematic flag.
+        /// Moving a body or changing its velocity does not count. <see cref="AvbdConstraintBuffers"/> rebuilds its schedule when this changes.
+        /// </summary>
+        internal int StructureVersion { get; private set; }
+
         /// <summary>Uploads the recorded edits and runs the edit kernel. Returns the number of commands applied.</summary>
         public int ApplyEdits() => ApplyEdits(null);
 
@@ -208,6 +214,18 @@ namespace McKrill.Avbd
                 applied.AddRange(drained);
             if (total == 0)
                 return 0;
+
+            // Anything that can change which bodies the solver updates or how they are joined invalidates the constraint schedule.
+            const uint structural = (uint)EditFields.Shape | (uint)EditFields.Kinematic;
+            for (int i = 0; i < drained.Count; i++)
+            {
+                uint kind = drained[i].header.x;
+                if (kind == (uint)EditKind.Spawn || kind == (uint)EditKind.Remove || (drained[i].header.z & structural) != 0u)
+                {
+                    StructureVersion++;
+                    break;
+                }
+            }
 
             BindBodyBuffers(applyKernel);
             shader.SetBuffer(applyKernel, CommandsId, commands);

@@ -48,6 +48,7 @@ namespace McKrill.Avbd
         int recordCount;   // records in the CPU array
         int uploadedCount; // records already on the GPU
         bool topologyDirty;
+        int seenStructureVersion = -1; // never equal to a real version: the first Rebuild is always needed
         bool disposed;
 
         /// <param name="bodies">The body arrays the constraints refer to.</param>
@@ -92,8 +93,11 @@ namespace McKrill.Avbd
         /// <summary>Add calls that failed because every slot was in use.</summary>
         public int OverflowCount { get; private set; }
 
-        /// <summary>True if constraints were added since the last <see cref="Rebuild"/>.</summary>
-        public bool HasPendingChanges => topologyDirty;
+        /// <summary>
+        /// True if constraints were added, or the set of solved bodies changed (a body was spawned, removed, given a mass or made
+        /// kinematic), since the last <see cref="Rebuild"/>. Edits that are still queued on the bodies count after <c>ApplyEdits</c>.
+        /// </summary>
+        public bool HasPendingChanges => topologyDirty || bodies.StructureVersion != seenStructureVersion;
 
         /// <summary>Number of graph colors of the last rebuild: the primal stage dispatches this many times per iteration.</summary>
         public int ColorCount => topology.ColorCount;
@@ -261,6 +265,7 @@ namespace McKrill.Avbd
                 colorBuffer.SetData(topology.ColorBodies, 0, 0, topology.ColorBodyCount);
 
             topologyDirty = false;
+            seenStructureVersion = bodies.StructureVersion;
         }
 
         static float TorqueArm(BodyShapeRecord[] shape, uint slotA, uint slotB)
