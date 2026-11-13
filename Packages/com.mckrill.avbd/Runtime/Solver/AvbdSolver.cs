@@ -15,6 +15,8 @@ namespace McKrill.Avbd
         readonly AvbdConstraintBuffers constraints;
         readonly int predictKernel;
         readonly int primalKernel;
+        readonly int initKernel;
+        readonly int dualKernel;
         AvbdSolverSettings settings;
 
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
@@ -43,6 +45,11 @@ namespace McKrill.Avbd
                 if (shaders.Primal == null)
                     throw new System.InvalidOperationException("The AvbdShaderSet has no primal shader.");
                 primalKernel = shaders.Primal.FindKernel("Primal");
+
+                if (shaders.Dual == null)
+                    throw new System.InvalidOperationException("The AvbdShaderSet has no dual shader.");
+                initKernel = shaders.Dual.FindKernel("ConstraintInit");
+                dualKernel = shaders.Dual.FindKernel("Dual");
             }
         }
 
@@ -59,7 +66,8 @@ namespace McKrill.Avbd
 
         /// <summary>
         /// Applies pending body edits (stage E) and constraint changes, then runs the solver stages that exist:
-        /// predict (P), then the primal sweeps (V) of every iteration. The dual and velocity stages (D, U) are not implemented yet.
+        /// predict (P), the constraint warm start (D), then per iteration a primal sweep (V) and the dual update (D).
+        /// The velocity stage (U) is not implemented yet.
         /// </summary>
         public void Step()
         {
@@ -70,8 +78,12 @@ namespace McKrill.Avbd
             DispatchPredict();
             if (constraints != null)
             {
+                DispatchConstraintInit();
                 for (int it = 0; it < settings.iterations; it++)
+                {
                     DispatchPrimalSweep();
+                    DispatchDual();
+                }
             }
         }
 
@@ -102,6 +114,31 @@ namespace McKrill.Avbd
             ConstraintTopology topology = constraints.Topology;
             for (int color = 0; color < topology.ColorCount; color++)
                 AvbdDispatch.Range(shader, primalKernel, topology.ColorOffsets[color], topology.ColorSize(color));
+        }
+
+        // Stage D, once per step after stage P: evaluates every joint at the start-of-step pose and warm-starts its variables.
+        internal void DispatchConstraintInit()
+        {
+            DispatchConstraintKernel(initKernel);
+        }
+
+        // Stage D, after every primal sweep: multiplier, penalty and fracture update of every joint.
+        internal void DispatchDual()
+        {
+            DispatchConstraintKernel(dualKernel);
+        }
+
+        // One thread per constraint. Constraints are independent, so there is no coloring and one dispatch covers them all.
+        void DispatchConstraintKernel(int kernel)
+        {
+            if (constraints == null || constraints.RecordCount == 0)
+                return;
+
+            ComputeShader shader = shaders.Dual;
+            SolverUniforms.Bind(shader, settings);
+            bodies.BindTo(shader, kernel);
+            shader.SetBuffer(kernel, RecordsId, constraints.Records);
+            AvbdDispatch.Linear(shader, kernel, constraints.RecordCount);
         }
     }
 }

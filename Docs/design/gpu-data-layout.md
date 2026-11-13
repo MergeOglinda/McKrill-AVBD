@@ -322,6 +322,23 @@ The oracle is `CpuPrimal` (it reuses `Mat6.TrySolveLDLT` of the reference). `Pri
 
 Not part of this stage: the dual update, the warm start kernel, the velocity update, contacts, and GPU-built lists and coloring.
 
+### Stage D: constraint warm start and dual update
+
+`AvbdDual.compute` has two kernels, both one thread per constraint over the constraint records. A thread writes only its own record and reads body poses that no stage writes meanwhile, so there is no coloring, no ordering inside a dispatch and no atomics. Springs and broken joints are skipped.
+
+| Kernel | When | What |
+| --- | --- | --- |
+| `ConstraintInit` | Once per step, after stage P | Evaluates each joint at the **start-of-step** pose (the state record's start fields, written by P) and stores C0. Warm-starts the multipliers (`lambda * alpha * gamma`) and penalties (`clamp(penalty * gamma, min, max)`), then caps the penalties of non-hard rows at the stiffness. The reference's `Joint.Initialize` |
+| `Dual` | After every primal sweep | For each row with a non-zero penalty: a hard row is stabilized (`C -= C0 * alpha`) and stores `lambda = penalty * C + lambda`; the penalty then grows by `|C| * beta` up to the stiffness (the maximum penalty for a hard row). Then the fracture test. The reference's `Joint.UpdateDual` |
+
+A step of `AvbdSolver.Step()` is now: apply edits, rebuild constraints if needed, P, `ConstraintInit`, then per iteration the primal sweep (one dispatch per color) and `Dual` (one dispatch).
+
+**Flags.** `Broken` is owned by `Dual`: when a fracturable joint's angular multiplier exceeds the threshold (`|lambdaAng|^2 > fracture^2`, tested for every fracturable joint, whatever its penalty), the kernel zeroes its penalties and multipliers and sets the flag. A broken joint has zero penalty, so the primal stage adds nothing for it, and both stage D kernels skip it. It stays in the lists and the coloring (see section 12). `Fracturable` is a flag plus a finite threshold; a joint without it never breaks.
+
+**Encoding.** The stiffness caps follow the flags, not infinity: `HardLinear` or `HardAngular` selects "no stiffness cap" (the penalty maximum), anything else uses the stored finite stiffness. A non-hard angular stiffness of 0 disables the angle row, because the warm start caps its penalty at 0.
+
+**Check.** The oracles are `CpuConstraintInit` and `CpuDual`. `DualTests` compares them with `ReferenceSolver` over a whole step (colored order, 1 and 3 iterations): body poses, C0, penalties, multipliers and the broken flag, on the rope, a fracture scene and random lattices (some joints fracture at once, some never). It then compares the GPU solver's `Step()` with the oracles on the same scenes, including every constraint record read back. Records go to the GPU without the warm start, so the kernel is tested. Comparing a second step with the reference is not possible: the velocity update (stage U) is missing, and a joint that broke would leave the reference's lists and coloring.
+
 ## 12. Constraints (step 4: joints and springs)
 
 Contacts are still open. Joints and springs share one record, a constraint, with the kind in the high 8 bits of the flags word (rule P7).
@@ -355,7 +372,7 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 - Colors come from a greedy first-fit coloring: bodies from the highest slot down, lowest color not used by a colored neighbor. This is the reference's `GraphColoring`, and `ConstraintTopologyTests` checks the two against each other. Fixed bodies and world pins create no edge.
 - Bodies are bucketed by color in one list; the CPU knows each color's range, so a color is one dispatch.
 
-**Both are built on the CPU for now** (`ConstraintTopology`, called by `Rebuild()`), because stages G and C do not exist. `Rebuild()` applies the pending body edits and reads body data back (sizes, poses, mass, flags), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending. Known limits until G and C exist: constraints cannot be removed, removing a body that has constraints is not supported, and a joint that fractures (stage D) stays in the lists and the coloring, so the colored order can differ from the reference's after a fracture. The graph color is not written to the Meta record yet (stage C's field).
+**Both are built on the CPU for now** (`ConstraintTopology`, called by `Rebuild()`), because stages G and C do not exist. `Rebuild()` applies the pending body edits and reads body data back (sizes, poses, mass, flags), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending. Known limits until G and C exist: constraints cannot be removed, removing a body that has constraints is not supported, and a joint that fractures (stage D) stays in the lists and the coloring, so the colored order can differ from the reference's from the next step on (the reference removes a broken joint at the next step's warm start and colors again). The graph color is not written to the Meta record yet (stage C's field).
 
 ### Tests
 
@@ -365,5 +382,7 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 | `ConstraintTopologyTests` | No | Lists and coloring against `ReferenceSolver` on the rope, the spring scene and 12 random scenes; fixed bodies; stiffness encoding |
 | `PrimalTests` (oracle) | No | `CpuPrimal` against `ReferenceSolver` after one colored iteration, including C0 of every joint |
 | `PrimalTests` (GPU) | Yes | The kernel against the oracle on the same scenes; `AddJoint` and `AddSpring` completing the records; a joint with a known closed-form result; static bodies never moving |
+| `DualTests` (oracle) | No | `CpuConstraintInit` and `CpuDual` against `ReferenceSolver` after one step (1 and 3 iterations), a hand-computed dual update, fracture |
+| `DualTests` (GPU) | Yes | `Step()` against the oracles on the rope, the fracture scene and random lattices, including all constraint records; springs untouched by stage D |
 
-None of the stage V code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.
+None of the stage V or stage D code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.

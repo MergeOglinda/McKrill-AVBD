@@ -144,7 +144,8 @@ namespace McKrill.Avbd.Tests
                     switch (rng.Next(4))
                     {
                         case 0: s.AddJoint(bodies[i], bodies[j], rA, rB); break;
-                        case 1: s.AddJoint(bodies[i], bodies[j], rA, rB, float.PositiveInfinity, float.PositiveInfinity); break;
+                        case 1: s.AddJoint(bodies[i], bodies[j], rA, rB, float.PositiveInfinity, float.PositiveInfinity,
+                            rng.Next(3) == 0 ? 0.5f : float.PositiveInfinity); break; // fracture: far below the random multipliers, or never
                         case 2: s.AddJoint(bodies[i], bodies[j], rA, rB, 5000f, 2000f); break;
                         default: s.AddSpring(bodies[i], bodies[j], rA, rB, F(rng, 50f, 500f), F(rng, 1f, 3f)); break;
                     }

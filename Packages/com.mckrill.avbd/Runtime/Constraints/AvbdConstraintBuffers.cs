@@ -100,6 +100,9 @@ namespace McKrill.Avbd
 
         // ---- buffers for the solver stages -----------------------------------------------------------------
 
+        /// <summary>Constraints on the GPU: those added before the last <see cref="Rebuild"/>.</summary>
+        internal int RecordCount => uploadedCount;
+
         internal GraphicsBuffer Records => recordBuffer;
         internal GraphicsBuffer List => listBuffer;
         internal GraphicsBuffer ColorBodies => colorBuffer;

@@ -1,0 +1,175 @@
+// Stage D: the constraints' own variables (multiplier, penalty, constraint value C0, broken flag).
+//
+// ConstraintInit  Once per step, after stage P. Evaluates each joint at the start-of-step pose (C0) and warm-starts the multipliers
+//                 and penalties (Eq. 19). The reference solver's Joint.Initialize.
+// Dual            After every primal sweep. Updates the multiplier of hard constraints, ramps the penalty (Eqs. 11 and 16) and breaks
+//                 joints whose angular multiplier exceeds the fracture threshold. The reference solver's Joint.UpdateDual.
+//
+// One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
+// ordering, coloring or atomics are needed. Springs have no state and are skipped.
+// Mirrored by Reference/Stages/CpuConstraintInit.cs and CpuDual.cs, which the tests compare against.
+
+#pragma kernel ConstraintInit
+#pragma kernel Dual
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
+
+StructuredBuffer<BodyStateRecord>      _BodyState;
+RWStructuredBuffer<ConstraintRecord>   _Constraints;
+
+uint _Base;  // first constraint to process
+uint _Count; // end of the range: constraints [_Base, _Count)
+
+// Pose of body slot `id`: the start-of-step pose or the current pose. A body of AVBD_INVALID is the world.
+void LoadPose(uint id, bool atStart, out float3 pos, out float4 rot)
+{
+    if (id == AVBD_INVALID)
+    {
+        pos = float3(0.0, 0.0, 0.0);
+        rot = float4(0.0, 0.0, 0.0, 1.0);
+    }
+    else
+    {
+        BodyStateRecord s = _BodyState[id];
+        pos = atStart ? s.startPosition.xyz : s.position.xyz;
+        rot = atStart ? s.startRotation : s.rotation;
+    }
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ConstraintInit(uint3 id : SV_DispatchThreadID)
+{
+    uint index = _Base + id.x;
+    if (index >= _Count)
+        return;
+
+    ConstraintRecord c = _Constraints[index];
+    uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+    uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
+    if (kind != AVBD_CONSTRAINT_KIND_JOINT || (flags & AVBD_CONSTRAINT_FLAG_BROKEN))
+        return;
+
+    bool hasA = c.ident.x != AVBD_INVALID;
+
+    float3 posA, posB;
+    float4 rotA, rotB;
+    LoadPose(c.ident.x, true, posA, rotA);
+    LoadPose(c.ident.y, true, posB, rotB);
+
+    float3 anchorA = hasA ? AvbdQuatRotate(rotA, c.anchorA.xyz) + posA : c.anchorA.xyz; // world joint: a fixed world point
+    float3 anchorB = AvbdQuatRotate(rotB, c.anchorB.xyz) + posB;
+
+    // Constraint function at the start of the step, C(x-). The w lanes (torque arm, fracture threshold) stay.
+    float torqueArm = c.c0Lin.w;
+    c.c0Lin.xyz = anchorA - anchorB;
+    c.c0Ang.xyz = AvbdQuatDifference(rotA, rotB) * torqueArm;
+
+    // Warm start the multipliers and penalties (Eq. 19); penalties are clamped to a safe range.
+    float3 lambdaLin = c.lambdaLin.xyz * AVBD_ALPHA * AVBD_GAMMA;
+    float3 lambdaAng = c.lambdaAng.xyz * AVBD_ALPHA * AVBD_GAMMA;
+    float3 penaltyLin = clamp(c.penaltyLin.xyz * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+    float3 penaltyAng = clamp(c.penaltyAng.xyz * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+
+    // Clamp to the material stiffness. A hard constraint has no cap here: its penalty is already limited by the maximum.
+    if (!(flags & AVBD_CONSTRAINT_FLAG_HARD_LIN))
+        penaltyLin = min(penaltyLin, c.anchorA.www);
+    if (!(flags & AVBD_CONSTRAINT_FLAG_HARD_ANG))
+        penaltyAng = min(penaltyAng, c.anchorB.www);
+
+    c.lambdaLin.xyz = lambdaLin;
+    c.lambdaAng.xyz = lambdaAng;
+    c.penaltyLin.xyz = penaltyLin;
+    c.penaltyAng.xyz = penaltyAng;
+    _Constraints[index] = c;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Dual(uint3 id : SV_DispatchThreadID)
+{
+    uint index = _Base + id.x;
+    if (index >= _Count)
+        return;
+
+    ConstraintRecord c = _Constraints[index];
+    uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+    uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
+    if (kind != AVBD_CONSTRAINT_KIND_JOINT || (flags & AVBD_CONSTRAINT_FLAG_BROKEN))
+        return;
+
+    float alpha = AVBD_ALPHA;
+    bool hasA = c.ident.x != AVBD_INVALID;
+
+    float3 posA, posB;
+    float4 rotA, rotB;
+    LoadPose(c.ident.x, false, posA, rotA);
+    LoadPose(c.ident.y, false, posB, rotB);
+
+    float3 anchorA = hasA ? AvbdQuatRotate(rotA, c.anchorA.xyz) + posA : c.anchorA.xyz;
+    float3 anchorB = AvbdQuatRotate(rotB, c.anchorB.xyz) + posB;
+
+    float3 penaltyLin = c.penaltyLin.xyz;
+    float3 penaltyAng = c.penaltyAng.xyz;
+    float3 lambdaLin = c.lambdaLin.xyz;
+    float3 lambdaAng = c.lambdaAng.xyz;
+
+    // Linear constraint
+    if (dot(penaltyLin, penaltyLin) > 0.0)
+    {
+        float3 C = anchorA - anchorB;
+        float cap = AVBD_PENALTY_MAX; // a hard constraint is limited by the maximum penalty only
+
+        if (flags & AVBD_CONSTRAINT_FLAG_HARD_LIN)
+        {
+            // Stabilization
+            C -= c.c0Lin.xyz * alpha;
+
+            // Store the updated force as the multiplier.
+            lambdaLin = penaltyLin * C + lambdaLin;
+        }
+        else
+        {
+            cap = min(c.anchorA.w, AVBD_PENALTY_MAX);
+        }
+
+        // Ramp the penalty, clamped to the material stiffness (Eq. 16).
+        penaltyLin = min(penaltyLin + abs(C) * AVBD_BETA_LIN, float3(cap, cap, cap));
+    }
+
+    // Angular constraint
+    if (dot(penaltyAng, penaltyAng) > 0.0)
+    {
+        float3 C = AvbdQuatDifference(rotA, rotB) * c.c0Lin.w; // times the torque arm; rotA is the identity for a world joint
+        float cap = AVBD_PENALTY_MAX;
+
+        if (flags & AVBD_CONSTRAINT_FLAG_HARD_ANG)
+        {
+            C -= c.c0Ang.xyz * alpha;
+            lambdaAng = penaltyAng * C + lambdaAng;
+        }
+        else
+        {
+            cap = min(c.anchorB.w, AVBD_PENALTY_MAX);
+        }
+
+        penaltyAng = min(penaltyAng + abs(C) * AVBD_BETA_ANG, float3(cap, cap, cap));
+    }
+
+    // Fracture test
+    if ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && dot(lambdaAng, lambdaAng) > c.c0Ang.w * c.c0Ang.w)
+    {
+        penaltyLin = float3(0.0, 0.0, 0.0);
+        penaltyAng = float3(0.0, 0.0, 0.0);
+        lambdaLin = float3(0.0, 0.0, 0.0);
+        lambdaAng = float3(0.0, 0.0, 0.0);
+        c.ident.z |= AVBD_CONSTRAINT_FLAG_BROKEN;
+    }
+
+    c.penaltyLin.xyz = penaltyLin;
+    c.penaltyAng.xyz = penaltyAng;
+    c.lambdaLin.xyz = lambdaLin;
+    c.lambdaAng.xyz = lambdaAng;
+    _Constraints[index] = c;
+}

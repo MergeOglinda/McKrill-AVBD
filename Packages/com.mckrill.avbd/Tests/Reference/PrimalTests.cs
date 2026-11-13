@@ -240,16 +240,17 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
-        public void Gpu_Step_BalancesInertiaAgainstAPenaltyJoint()
+        public void Gpu_Step_BalancesInertiaAgainstAPenaltyJoint_AndUpdatesItsDualVariables()
         {
             RequireCompute();
             using (var buffers = new AvbdBodyBuffers(16))
             using (var constraints = new AvbdConstraintBuffers(buffers, 8))
             {
                 AvbdSolverSettings settings = AvbdSolverSettings.Default; // gravity (0, -10, 0), dt = 1/60
+                settings.iterations = 1;
 
-                // A unit box (mass 1) at the pin point. The joint warm start (stage D) does not exist yet, so the record carries
-                // its penalty directly. With rB = 0 the joint has no torque arm, so the problem is a 1D spring on y.
+                // A unit box (mass 1) at the pin point, hard joint with a starting penalty of 1e4. With rB = 0 the joint has no torque
+                // arm, so the problem is a 1D spring on y.
                 BodyHandle ball = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 5f, 0f)));
                 buffers.ApplyEdits();
                 ConstraintRecord pin = ConstraintRecordFactory.Joint(
@@ -262,13 +263,26 @@ namespace McKrill.Avbd.Tests
 
                 var state = new BodyStateRecord[16];
                 buffers.State.GetData(state);
+                var records = new ConstraintRecord[8];
+                constraints.Records.GetData(records);
 
+                // The warm start scales the penalty by gamma: K = 1e4 * 0.999 = 9990.
                 // Minimizing m/(2 dt^2) (y - yInertial)^2 + K/2 (y - 5)^2 with yInertial = 5 - g dt^2 gives
-                // y = 5 - (m/dt^2)(g dt^2) / (m/dt^2 + K) = 5 - 10 / 13600. Falling freely it would be 5 - 10 / 3600.
-                Assert.AreEqual(5f - 10f / 13600f, state[ball.Slot].position.y, 1e-4f);
+                // y = 5 - (m/dt^2)(g dt^2) / (m/dt^2 + K) = 5 - 10 / 13590. Falling freely it would be 5 - 10 / 3600.
+                float expectedY = 5f - 10f / 13590f;
+                Assert.AreEqual(expectedY, state[ball.Slot].position.y, 1e-4f);
                 Assert.AreEqual(0f, state[ball.Slot].position.x, 1e-4f);
                 Assert.AreEqual(0f, state[ball.Slot].position.z, 1e-4f);
                 Assert.AreEqual(0, constraints.ReadSolveFailures());
+
+                // The dual update afterwards: C = pin - position = (0, 10 / 13590, 0), no stabilization (C0 = 0),
+                // lambda = K C, and the penalty grows by |C| * betaLin on the axis that has an error.
+                float c = 10f / 13590f;
+                Assert.AreEqual(9990f * c, records[0].lambdaLin.y, 3e-2f); // C is a difference of numbers near 5: fp32 error ~5e-7 times K
+                Assert.AreEqual(0f, records[0].lambdaLin.x, 1e-3f);
+                Assert.AreEqual(9990f + c * 1e4f, records[0].penaltyLin.y, 0.1f);
+                Assert.AreEqual(9990f, records[0].penaltyLin.x, 0.1f);
+                Assert.AreEqual(0f, records[0].penaltyAng.x, "no angle constraint");
             }
         }
 
