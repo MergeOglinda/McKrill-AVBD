@@ -7,7 +7,7 @@ Design spec for the package's GPU buffers. It is written step by step; each sect
 | 1 | Read/write matrix | Done |
 | 2 | Packing rules | Done (this version) |
 | 3 | Body arrays | Done for rigid boxes (section 3) |
-| 4 | Other buffers | Not started |
+| 4 | Other buffers | Joints and springs done (section 12); contacts and the other buffers not started |
 | 5 | Capacity calculator | Done for the body arrays (section 5) |
 | 6 | Slot allocation and edits | Done (section 6) |
 | 7 | Growth and overflow policy | Overflow policy done, growth not started (section 7) |
@@ -278,3 +278,111 @@ One definition per record on each side, field for field: `BodyRecords.cs` and `E
 | `BodyEditsGpuTests` | Yes | The arrays after creation, spawn and remove, and 40 random edit batches replayed on the oracle, compared bit for bit |
 
 The CPU oracle is `Reference/Edits/CpuBodyArrays.cs`. It must change together with `AvbdBodyEdits.compute`. The GPU tests have not been run: no Unity editor or GPU was available when they were written.
+
+## 11. Solver stages
+
+The solver stages run in the order E, P, then per iteration V and D, then U (section 1). They are added one at a time. Every stage has a C# oracle in the Reference assembly that does the same arithmetic on `CpuBodyArrays`, and the GPU kernel is tested against it. Results are compared with a small relative tolerance, not bit for bit, because GPU arithmetic may differ in the last bits (fused multiply-add, reciprocal square root).
+
+### Solver constants
+
+`AvbdSolverSettings` holds the global constants: time step, gravity vector, iterations, alpha, linear and angular beta, gamma, and the minimum and maximum penalty. The kernels read them as plain uniforms (`_SolverParams0`, `_SolverParams1`, `_Gravity`, declared in `AvbdSolverParams.hlsl`), set by `SolverUniforms` before each dispatch. The iteration count is not a uniform: the iteration loop runs on the CPU, one dispatch per pass. The default gravity is `(0, -10, 0)` for Unity's y-up world; upstream's demo scenes are z-up and need `(0, 0, -10)`.
+
+### Stage P: predict
+
+One thread per slot, over `[0, HighWaterMark)`. Free slots, kinematic bodies and bodies with mass 0 are skipped completely: their pose and inertial target are not touched. For every other body:
+
+| Writes | Value |
+| --- | --- |
+| Inertial target | position + v dt + g dt^2; rotation advanced by the angular velocity |
+| Step-start pose | the pose before this stage |
+| Pose | position + v dt + g (w dt^2) with the adaptive weight w; rotation advanced by the angular velocity |
+
+The adaptive weight w is the fraction of gravity the body actually accelerated by last step: clamp(dot(a, g) / |g|^2, 0, 1) with a = (v - previous v) / dt, and 0 if the result is not finite or g is zero. The previous velocity comes from the Motion record. It is set by stage U, and by edits (so a new or just-edited body has w = 0).
+
+Statics keep their stale inertial target because no stage reads it for a static body.
+
+The oracle is `CpuPredict`. With zero iterations the reference solver runs exactly this phase, so `PredictTests` compares the oracle against `ReferenceSolver` directly, and then the GPU kernel against the oracle.
+
+### Stage V: primal update
+
+One thread per solved body, one dispatch per graph color, repeated every iteration, so a sweep is `colors` dispatches in order. A body is solved if it is not free, not kinematic and has mass above zero; every other body is a fixed anchor. A body writes only its own pose, and every neighbour it reads belongs to another color, so the kernel needs no atomics, except a counter of failed solves (`Status`, word 0).
+
+For the body it solves, the kernel builds the 6x6 system exactly like the reference solver:
+
+| Part | Value |
+| --- | --- |
+| Inertia | `lhsLin = diag(m / dt^2)`, `lhsAng = diag(I / dt^2)`, `rhsLin = (m / dt^2)(x - x_inertial)`, `rhsAng = (I / dt^2)(q - q_inertial)` (upstream's quaternion difference, no sign flip) |
+| Constraints | every entry of the body's list adds its terms, newest constraint first (section 12) |
+| Solve | 6x6 LDL^T without pivoting, reading only the lower triangle. A pivot not above 1e-20 (or NaN) fails the solve: the body keeps its pose and the failure counter increments |
+| Update | `x += dx.lin`, `q = normalize(q + 0.5 (dx.ang, 0) q)` |
+
+The joint terms are the reference's: linear rows with a Jacobian of plus or minus identity and a skew-symmetric angular part, the diagonal geometric-stiffness term, and the optional angle row scaled by the torque arm. The geometric-stiffness sum is written in closed form, `H = -dot(F, r) I + r F^T`, which equals the reference's three-term sum (checked numerically). Springs skip the update when the anchors are closer than 1e-6.
+
+The oracle is `CpuPrimal` (it reuses `Mat6.TrySolveLDLT` of the reference). `PrimalTests` checks it against `ReferenceSolver` in `Colored` mode with one iteration, which produces exactly the predict phase, the constraint warm start and one primal sweep as far as the body poses go. The GPU kernel is then compared with the oracle on the rope, the spring scene and random lattices of boxes with joints, springs and world pins. This needs the per-step constraint warm start (C0 and the decayed multipliers and penalties), which is the reference's `Joint.Initialize`. Its oracle (`CpuConstraintInit`) exists so the tests can prepare records; its kernel is part of stage D.
+
+Not part of this stage: the dual update, the warm start kernel, the velocity update, contacts, and GPU-built lists and coloring.
+
+### Stage D: constraint warm start and dual update
+
+`AvbdDual.compute` has two kernels, both one thread per constraint over the constraint records. A thread writes only its own record and reads body poses that no stage writes meanwhile, so there is no coloring, no ordering inside a dispatch and no atomics. Springs and broken joints are skipped.
+
+| Kernel | When | What |
+| --- | --- | --- |
+| `ConstraintInit` | Once per step, after stage P | Evaluates each joint at the **start-of-step** pose (the state record's start fields, written by P) and stores C0. Warm-starts the multipliers (`lambda * alpha * gamma`) and penalties (`clamp(penalty * gamma, min, max)`), then caps the penalties of non-hard rows at the stiffness. The reference's `Joint.Initialize` |
+| `Dual` | After every primal sweep | For each row with a non-zero penalty: a hard row is stabilized (`C -= C0 * alpha`) and stores `lambda = penalty * C + lambda`; the penalty then grows by `|C| * beta` up to the stiffness (the maximum penalty for a hard row). Then the fracture test. The reference's `Joint.UpdateDual` |
+
+A step of `AvbdSolver.Step()` is now: apply edits, rebuild constraints if needed, P, `ConstraintInit`, then per iteration the primal sweep (one dispatch per color) and `Dual` (one dispatch).
+
+**Flags.** `Broken` is owned by `Dual`: when a fracturable joint's angular multiplier exceeds the threshold (`|lambdaAng|^2 > fracture^2`, tested for every fracturable joint, whatever its penalty), the kernel zeroes its penalties and multipliers and sets the flag. A broken joint has zero penalty, so the primal stage adds nothing for it, and both stage D kernels skip it. It stays in the lists and the coloring (see section 12). `Fracturable` is a flag plus a finite threshold; a joint without it never breaks.
+
+**Encoding.** The stiffness caps follow the flags, not infinity: `HardLinear` or `HardAngular` selects "no stiffness cap" (the penalty maximum), anything else uses the stored finite stiffness. A non-hard angular stiffness of 0 disables the angle row, because the warm start caps its penalty at 0.
+
+**Check.** The oracles are `CpuConstraintInit` and `CpuDual`. `DualTests` compares them with `ReferenceSolver` over a whole step (colored order, 1 and 3 iterations): body poses, C0, penalties, multipliers and the broken flag, on the rope, a fracture scene and random lattices (some joints fracture at once, some never). It then compares the GPU solver's `Step()` with the oracles on the same scenes, including every constraint record read back. Records go to the GPU without the warm start, so the kernel is tested. Comparing a second step with the reference is not possible: the velocity update (stage U) is missing, and a joint that broke would leave the reference's lists and coloring.
+
+## 12. Constraints (step 4: joints and springs)
+
+Contacts are still open. Joints and springs share one record, a constraint, with the kind in the high 8 bits of the flags word (rule P7).
+
+### Record
+
+`ConstraintRecord` is 160 B, ten words (`Runtime/Layout/ConstraintRecords.cs`, `Shaders/Include/AvbdConstraintRecords.hlsl`). It is gathered by id, so it is a multiple of 32 B (rule P3). V and D read nearly every field of it, so there is no hot/cold split (rule P5).
+
+| Word | Type | Content |
+| --- | --- | --- |
+| 0 | `uint4` | body A (`AVBD_INVALID` = the world), body B, flags and kind, unused |
+| 1 | `float4` | anchor on A (a world point if A is the world); joint: linear stiffness, spring: stiffness |
+| 2 | `float4` | anchor on B; joint: angular stiffness, spring: rest length |
+| 3 | `float4` | linear constraint at the step start (C0); torque arm |
+| 4 | `float4` | angular constraint at the step start; fracture threshold |
+| 5, 6 | `float4` | penalty of the linear and the angular rows |
+| 7, 8 | `float4` | multiplier of the linear and the angular rows |
+| 9 | `float4` | reserved, zero |
+
+The spare lanes follow rule P4: stiffness shares a word with the anchor and torque arm with C0 (read by the same stages). A spring uses words 0 to 2 only, so a spring wastes 112 B; a separate smaller spring record is an option for later.
+
+Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is created) and `Broken` (owner: stage D). **Infinite stiffness is a flag.** The reference solver uses `+infinity` for a hard constraint and tests it with `isinf`; GPU fast-math is not guaranteed to keep infinity, so the record holds a flag and stores 0 as the stiffness. The behaviors stay the same: a hard constraint has no stiffness cap in the warm start (its penalty is limited by the maximum penalty), a hard constraint uses stabilization and stores its multiplier, and the dual step caps the penalty at the maximum penalty. Fracture works the same way (a flag and a finite threshold, instead of an infinite one).
+
+### Lists and colors
+
+`AvbdConstraintBuffers` (`Runtime/Constraints`) owns four buffers: the records, the per-body lists, the bodies bucketed by color, and the status words. Per-body ranges (offset, count) go into the body arrays' Range array, whose owner is stage G.
+
+- The list is a scalar `uint` buffer (the P1 exception) of constraint ids, grouped by body. Bit 31 is reserved to tag contact entries later (rule P6).
+- Only solved bodies get a list. A constraint between a solved body and a fixed one is listed for the solved body only.
+- Entries are newest constraint first, so the floating-point sums run in the reference's order.
+- Colors come from a greedy first-fit coloring: bodies from the highest slot down, lowest color not used by a colored neighbor. This is the reference's `GraphColoring`, and `ConstraintTopologyTests` checks the two against each other. Fixed bodies and world pins create no edge.
+- Bodies are bucketed by color in one list; the CPU knows each color's range, so a color is one dispatch.
+
+**Both are built on the CPU for now** (`ConstraintTopology`, called by `Rebuild()`), because stages G and C do not exist. `Rebuild()` applies the pending body edits and reads body data back (sizes, poses, mass, flags), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending. Known limits until G and C exist: constraints cannot be removed, removing a body that has constraints is not supported, and a joint that fractures (stage D) stays in the lists and the coloring, so the colored order can differ from the reference's from the next step on (the reference removes a broken joint at the next step's warm start and colors again). The graph color is not written to the Meta record yet (stage C's field).
+
+### Tests
+
+| Test | Needs a GPU | Checks |
+| --- | --- | --- |
+| `BodyLayoutTests` (constraint cases) | No | Record size and rule P3, flag bits, HLSL constants and struct members against the C# mirror |
+| `ConstraintTopologyTests` | No | Lists and coloring against `ReferenceSolver` on the rope, the spring scene and 12 random scenes; fixed bodies; stiffness encoding |
+| `PrimalTests` (oracle) | No | `CpuPrimal` against `ReferenceSolver` after one colored iteration, including C0 of every joint |
+| `PrimalTests` (GPU) | Yes | The kernel against the oracle on the same scenes; `AddJoint` and `AddSpring` completing the records; a joint with a known closed-form result; static bodies never moving |
+| `DualTests` (oracle) | No | `CpuConstraintInit` and `CpuDual` against `ReferenceSolver` after one step (1 and 3 iterations), a hand-computed dual update, fracture |
+| `DualTests` (GPU) | Yes | `Step()` against the oracles on the rope, the fracture scene and random lattices, including all constraint records; springs untouched by stage D |
+
+None of the stage V or stage D code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.

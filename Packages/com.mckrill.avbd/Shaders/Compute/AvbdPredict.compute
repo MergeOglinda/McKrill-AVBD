@@ -1,0 +1,68 @@
+// Stage P: predict. For every dynamic body, computes the inertial target and the adaptively warm-started pose.
+// Mirrored by Reference/Stages/CpuPredict.cs, which the tests compare against.
+
+#pragma kernel Predict
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
+
+RWStructuredBuffer<BodyStateRecord>    _BodyState;
+RWStructuredBuffer<BodyInertialRecord> _BodyInertial;
+StructuredBuffer<BodyMassRecord>       _BodyMass;
+StructuredBuffer<BodyMotionRecord>     _BodyMotion;
+StructuredBuffer<BodyMetaRecord>       _BodyMeta;
+
+uint _Base;
+uint _Count; // slots to process: [0, _Count)
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Predict(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    // Free slots, kinematic bodies and static bodies (mass 0) are not predicted and keep their pose.
+    uint flags = _BodyMeta[slot].ident.x;
+    if (flags & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
+        return;
+    float mass = _BodyMass[slot].momentMass.w;
+    if (!(mass > 0.0))
+        return;
+
+    float dt = AVBD_DT;
+    float3 gravity = AVBD_GRAVITY;
+
+    BodyStateRecord s = _BodyState[slot];
+    BodyMotionRecord v = _BodyMotion[slot];
+    float3 position = s.position.xyz;
+    float3 linearVel = v.linearVel.xyz;
+    float3 angularVel = v.angularVel.xyz;
+
+    // Inertial target (Eq. 2).
+    float3 inertialPos = position + linearVel * dt;
+    inertialPos += gravity * (dt * dt);
+    float4 predictedRot = AvbdIntegrateAngular(s.rotation, angularVel * dt);
+
+    BodyInertialRecord inertial;
+    inertial.position = float4(inertialPos, 0.0);
+    inertial.rotation = predictedRot;
+    _BodyInertial[slot] = inertial;
+
+    // Adaptive warm start: the fraction of gravity the body actually accelerated by last step.
+    float3 accel = (linearVel - v.prevLinearVel.xyz) / dt;
+    float gravityLength = length(gravity);
+    float accelWeight = gravityLength > 0.0
+        ? clamp(dot(accel, gravity) / (gravityLength * gravityLength), 0.0, 1.0)
+        : 0.0;
+    if (!isfinite(accelWeight))
+        accelWeight = 0.0;
+
+    // Save the pose at the start of the step (x-) and write the warm-started pose.
+    s.startPosition = s.position;
+    s.startRotation = s.rotation;
+    s.position = float4(position + linearVel * dt + gravity * (accelWeight * dt * dt), 0.0);
+    s.rotation = predictedRot;
+    _BodyState[slot] = s;
+}

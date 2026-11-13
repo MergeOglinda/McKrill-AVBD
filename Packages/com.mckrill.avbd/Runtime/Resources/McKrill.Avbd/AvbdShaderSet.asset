@@ -14,3 +14,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   smoke: {fileID: 7200000, guid: 48041c8a742f4a59bffd65bedaee88d5, type: 3}
   bodyEdits: {fileID: 7200000, guid: a0733f00531a4475b118082fe30a64c4, type: 3}
+  predict: {fileID: 7200000, guid: 03e4bf368d0346169979f045ee0029b5, type: 3}
+  primal: {fileID: 7200000, guid: bbf247cc4bf546b7af79aba0d782ea20, type: 3}
+  dual: {fileID: 7200000, guid: 86236da9f1c84ec7ba00fd8b63314f39, type: 3}
