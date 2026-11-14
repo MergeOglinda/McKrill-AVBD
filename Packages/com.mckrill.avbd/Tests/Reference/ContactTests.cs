@@ -46,8 +46,8 @@ namespace McKrill.Avbd.Tests
             AssertList(t, 1, new[] { c10, c21, c21 + 1, 0u }, new[] { 0u, 2u, 2u, 0u });
             AssertList(t, 2, new[] { c21, c21 + 1 }, new[] { 1u, 1u });
 
-            // The contacts make the graph a triangle: three colors.
-            Assert.AreEqual(3, t.ColorCount);
+            // The edges are 0-1 (the joint and a contact) and 1-2 (a contact); pair (2, 0) has none. A path needs two colors.
+            Assert.AreEqual(2, t.ColorCount);
         }
 
         [Test]

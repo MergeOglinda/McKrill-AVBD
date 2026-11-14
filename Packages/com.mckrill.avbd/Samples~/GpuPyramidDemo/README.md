@@ -2,12 +2,10 @@
 
 A pyramid of boxes on the GPU solver. Click to shoot a box from the camera into it.
 
-The demo uses only the package's public API: `AvbdBodyBuffers` holds the bodies and `AvbdSolver.Step()` advances them.
-It contains no collision code, because collisions (broadphase, narrowphase, contact solve) belong inside `AvbdSolver.Step()`.
-
-**Until those stages are part of `Step()`, the boxes fall through the ground and through each other.** The demo is written
-for the solver with contacts; with the stages that exist today you can check the controls, the UI and the free fall, not the stack.
-For a pyramid that stands today, use the *Reference Solver Demo* (CPU reference solver, scene *Pyramid*).
+The demo uses only the package's public API: `AvbdBodyBuffers` holds the bodies, `AvbdConstraintBuffers` is created with room for contacts,
+and `AvbdSolver.Step()` advances them. It contains no collision code. The solver finds contacts by testing every pair of bodies (no broadphase yet),
+which is why the pyramid is limited to 10 layers: the package supports at most 512 bodies with contacts, and the ground, 385 blocks and up to 100 shots fit.
+Beyond that the number of shots that can be alive shrinks to fit.
 
 ## Run it
 
@@ -38,7 +36,7 @@ Input is read through IMGUI events, so it works with the Input Manager and with 
 | Size | Edge length of the next shot, a cube, 0.2 to 2 m |
 | Mass | Mass of the next shot, 0.1 to 200 kg on a log scale. The density follows from mass and size |
 | Iterations | Solver iterations per step (1 to 30; default 10, upstream's value) |
-| Pyramid layers | 7 to 12 layers, which is 140 to 650 blocks. Takes effect on *Reset* |
+| Pyramid layers | 7 to 10 layers, which is 140 to 385 blocks. Takes effect on *Reset* |
 | Pause, Step, Clear shots, Reset | As named. *Clear shots* removes every shot and leaves the pyramid |
 
 A warning appears when a shot travels farther than its own size in one step (speed times 1/60 s above the size). Collision detection
