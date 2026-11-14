@@ -19,6 +19,7 @@ namespace McKrill.Avbd
         [SerializeField] ComputeShader primal;
         [SerializeField] ComputeShader dual;
         [SerializeField] ComputeShader velocity;
+        [SerializeField] ComputeShader coloring;
 
         /// <summary>Trivial kernel that writes a known pattern into a buffer. Proves the toolchain.</summary>
         public ComputeShader Smoke => smoke;
@@ -37,6 +38,9 @@ namespace McKrill.Avbd
 
         /// <summary>Stage U: velocity update from the displacement over the step, and the snapshot for the next warm start.</summary>
         public ComputeShader Velocity => velocity;
+
+        /// <summary>Stage C: graph coloring of the solved bodies and bucketing by color.</summary>
+        public ComputeShader Coloring => coloring;
 
         /// <summary>Loads the shader set, or returns null if the asset is missing.</summary>
         public static AvbdShaderSet Load()

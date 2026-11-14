@@ -222,6 +222,28 @@ namespace McKrill.Avbd.Tests
             AssertStructMatches(ReadInclude("AvbdConstraintRecords.hlsl"), "ConstraintRecord", typeof(ConstraintRecord));
         }
 
+        [Test]
+        public void Hlsl_ColoringConstantsMatchTheCSharpMirrors()
+        {
+            Dictionary<string, uint> d = ReadDefines("AvbdColoringParams.hlsl");
+
+            Assert.AreEqual((uint)AvbdGraphColoring.MaxColors, d["AVBD_COLOR_MAX"]);
+            Assert.AreEqual(AvbdGraphColoring.Pending, d["AVBD_COLOR_PENDING"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.ControlWords, d["AVBD_COLOR_CONTROL_WORDS"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.CountsOffset, d["AVBD_COLOR_COUNTS_OFFSET"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.CursorsOffset, d["AVBD_COLOR_CURSORS_OFFSET"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.WorkWords, d["AVBD_COLOR_WORK_WORDS"]);
+            Assert.AreEqual((uint)GraphColoringOrder.SlotOrder, d["AVBD_COLOR_ORDER_SLOT"]);
+            Assert.AreEqual((uint)GraphColoringOrder.Hashed, d["AVBD_COLOR_ORDER_HASHED"]);
+
+            // The three sections of the work buffer follow each other without a gap, and a color is never confused with a marker.
+            Assert.AreEqual(AvbdGraphColoring.ControlWords, AvbdGraphColoring.CountsOffset);
+            Assert.AreEqual(AvbdGraphColoring.CountsOffset + AvbdGraphColoring.MaxColors, AvbdGraphColoring.CursorsOffset);
+            Assert.AreEqual(AvbdGraphColoring.CursorsOffset + AvbdGraphColoring.MaxColors, AvbdGraphColoring.WorkWords);
+            Assert.Greater(AvbdGraphColoring.Pending, (uint)AvbdGraphColoring.MaxColors);
+            Assert.AreNotEqual(AvbdConst.Invalid, AvbdGraphColoring.Pending);
+        }
+
         static void AssertStructMatches(string hlslSource, string hlslName, Type csharpType)
         {
             Match match = Regex.Match(hlslSource, @"struct\s+" + hlslName + @"\s*\{([^}]*)\}");

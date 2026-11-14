@@ -18,3 +18,4 @@ MonoBehaviour:
   primal: {fileID: 7200000, guid: bbf247cc4bf546b7af79aba0d782ea20, type: 3}
   dual: {fileID: 7200000, guid: 86236da9f1c84ec7ba00fd8b63314f39, type: 3}
   velocity: {fileID: 7200000, guid: 27fc1e8e8aa04cdc9e0b05fe5ca825d5, type: 3}
+  coloring: {fileID: 7200000, guid: 934e866465c346b187a165391c854c2b, type: 3}

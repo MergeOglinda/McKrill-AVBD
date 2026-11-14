@@ -71,7 +71,7 @@ namespace McKrill.Avbd
         /// <summary>
         /// Runs one whole step. Applies pending body edits (stage E) and constraint changes, then runs predict (P), the constraint
         /// warm start (D), per iteration a primal sweep (V) and the dual update (D), and finally the velocity update (U).
-        /// Stages S, B, N, G, C (on the GPU), Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
+        /// The constraint lists are built on the CPU and the graph is colored on the GPU (stage C); stages S, B, N, G, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
         /// Must be called from the main thread. The previous step's results are the next step's input, so call it once per time step.
         /// </summary>
         public void Step()
@@ -79,7 +79,7 @@ namespace McKrill.Avbd
             bodies.ApplyEdits();
             if (constraints == null)
             {
-                constraints = new AvbdConstraintBuffers(bodies, 1);
+                constraints = new AvbdConstraintBuffers(bodies, 1, shaders);
                 ownsConstraints = true;
             }
             if (constraints.NeedsRebuild)
@@ -137,9 +137,8 @@ namespace McKrill.Avbd
             shader.SetBuffer(primalKernel, ColorBodiesId, constraints.ColorBodies);
             shader.SetBuffer(primalKernel, StatusId, constraints.Status);
 
-            ConstraintTopology topology = constraints.Topology;
-            for (int color = 0; color < topology.ColorCount; color++)
-                AvbdDispatch.Range(shader, primalKernel, topology.ColorOffsets[color], topology.ColorSize(color));
+            for (int color = 0; color < constraints.ColorCount; color++)
+                AvbdDispatch.Range(shader, primalKernel, constraints.ColorOffset(color), constraints.ColorSize(color));
         }
 
         // Stage D, once per step after stage P: evaluates every joint at the start-of-step pose and warm-starts its variables.
