@@ -545,6 +545,10 @@ Slots are pushed only by `NpRetire` and `Narrowphase` and popped only by `NpAllo
 
 `RefreshContactTopology` reads the contact count and the pair of every slot back (a stall), builds the per-body lists on the CPU (contacts first in each list, **ordered by pair** (body A, then body B) whichever slots the pairs hold, then joints and springs newest first, which is the reference's order of constraints in the first step) and runs the GPU coloring (stage C) with the contacts in the graph. **This readback goes away with stage G** (lists built on the GPU from the slot table). With contacts the coloring changes every step; `SlotOrder` gives the reference's coloring.
 
+### Fractured joints
+
+Stage D marks a joint that fractured with the `Broken` flag. Without contacts nothing reads it back and the joint stays in the lists (section 12). With contacts, `PrepareContacts` reads the flags of the joint records back before the narrow phase, if any joint is fracturable. For each new broken joint the CPU copy gets the flag, the pair's exclusion bit is recomputed without it (a pair stays excluded while another intact joint joins it), and the lists and the coloring built in the same step leave the joint out. The step that sees the fracture therefore already collides the two bodies, like the reference solver, which removes a broken joint and creates a manifold in the same step. `AvbdConstraintBuffers.BrokenCount` is the number of joints seen broken. Cost: one readback of the joint records per step.
+
 ### Limits
 
 - The pool has a fixed number of slots (`contactCapacity`, at most `MaxContactManifolds` = 500,000, which is 640 MB of contact records). A new touching pair that finds no free slot has no contacts until one is free; `AvbdConstraintBuffers.ReadContacts()` reports it (`Overflow`). The broadphase's bins have the same kind of limit (`AvbdBroadphase.Overflowed`): the solver gives them 8 candidates per slot (+1024) and 1 static candidate per slot (+1024).

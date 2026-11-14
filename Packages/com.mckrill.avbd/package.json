@@ -33,6 +33,11 @@
       "displayName": "GPU Pyramid Demo",
       "description": "A pyramid of 140 or more boxes on the GPU solver. Shoot boxes from the camera and adjust their speed, size and mass in the panel. Needs the contact stages in AvbdSolver.Step().",
       "path": "Samples~/GpuPyramidDemo"
+    },
+    {
+      "displayName": "GPU Fracture Wall Demo",
+      "description": "A brick wall of 225 or more blocks, on an immobile bottom row, held together by joints that fracture, on the GPU solver. Shoot boxes at it and set the joints' stiffness, the fracture threshold and the blocks' density in the panel.",
+      "path": "Samples~/FractureWallDemo"
     }
   ]
 }
