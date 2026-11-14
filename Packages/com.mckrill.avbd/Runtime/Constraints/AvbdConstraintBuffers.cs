@@ -85,7 +85,6 @@ namespace McKrill.Avbd
         int uploadedCount; // records already on the GPU
         bool topologyDirty;
         int builtSolvedSetVersion;
-        int excludedRecords; // joints and springs already in the exclusion bits
         int fracturableRecords; // joints that can fracture: only then are the flags read back
         ConstraintRecord[] flagScratch = new ConstraintRecord[0];
         bool disposed;
@@ -187,14 +186,12 @@ namespace McKrill.Avbd
 
         /// <summary>Index of the first contact record in <see cref="Records"/>: the capacity of the joints and springs.</summary>
         internal int ContactBase => records.Length;
+
         /// <summary>
         /// Number of joints that have fractured, as of the start of the last step (with contacts). Always 0 without contacts: only the contact
         /// path reads the joints' state back (see <see cref="PrepareContacts"/>).
         /// </summary>
         public int BrokenCount { get; private set; }
-
-        /// <summary>Contacts per pair as of the last <see cref="RefreshContactTopology"/>, indexed like <see cref="ContactLayout.PairIndex"/>.</summary>
-        internal uint[] PairCounts => pairCounts;
 
         /// <summary>Size of the pair hash table of stage N: a power of two, at least twice the number of slots.</summary>
         internal int PairTableSize => tableSize;
@@ -428,9 +425,12 @@ namespace McKrill.Avbd
                 fracturableRecords++;
         }
 
-        // Fracture happens on the GPU (stage D sets the Broken flag). With contacts the step reads the flags back before the narrow phase,
-        // so a fractured joint leaves the lists and the coloring and stops excluding its pair from collisions, like the reference solver,
-        // which removes a broken joint. Costs one readback of the joint records per step, only if some joint can fracture.
+        // Fracture happens on the GPU (stage D sets the Broken flag). With contacts the step reads the flags back after the broadphase and
+        // before the narrow phase, and the lists that RefreshContactTopology builds right after leave a fractured joint out (so does the
+        // coloring). The broadphase of the next step then no longer finds the pair constrained and makes it a candidate. That is the
+        // reference solver's timing: a joint that broke in step k is still attached in the broadphase of step k + 1, where its
+        // initialize() removes it, and the pair is a candidate from step k + 2. Costs one readback of the joint records per step, and only
+        // if some joint can fracture.
         void SyncFracturedJoints()
         {
             int count = Math.Min(recordCount, uploadedCount); // only records that are on the GPU
@@ -441,38 +441,13 @@ namespace McKrill.Avbd
                 flagScratch = new ConstraintRecord[records.Length];
             recordBuffer.GetData(flagScratch, 0, 0, count);
 
-            bool changed = false;
             for (int i = 0; i < count; i++)
             {
                 if (ConstraintTopology.IsBroken(records[i]) || !ConstraintTopology.IsBroken(flagScratch[i]))
                     continue;
                 records[i].ident.z |= (uint)ConstraintFlags.Broken;
                 BrokenCount++;
-                changed = true;
             }
-
-            if (changed)
-                UploadExcludedPairs();
-        }
-
-        // Sets the exclusion bit of the pair of every joint and spring: like the reference solver, no manifold is created between bodies
-        // that a force already joins (a fractured joint no longer does). (Ignore-collision pairs are not supported yet.)
-        void UploadExcludedPairs()
-        {
-            Array.Clear(pairExcluded, 0, pairExcluded.Length);
-            for (int i = 0; i < recordCount; i++)
-            {
-                if (ConstraintTopology.IsBroken(records[i]))
-                    continue;
-                uint a = records[i].ident.x;
-                uint b = records[i].ident.y;
-                if (a == AvbdConst.Invalid || a >= (uint)contactBodies || b >= (uint)contactBodies)
-                    continue;
-                long pair = ContactLayout.PairIndex((int)a, (int)b);
-                pairExcluded[pair >> 5] |= 1u << (int)(pair & 31);
-            }
-            pairExcludedBuffer.SetData(pairExcluded);
-            excludedRecords = recordCount;
         }
 
         /// <summary>

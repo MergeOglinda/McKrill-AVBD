@@ -218,7 +218,7 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
-        public void Gpu_SkipsPairsJoinedByAJointOrSpring_EvenABrokenOne_ButNotByAContact()
+        public void Gpu_SkipsPairsJoinedByAJointOrSpring_UntilTheListsDropABrokenOne_ButNotByAContact()
         {
             RequireCompute();
             using (var buffers = new AvbdBodyBuffers(16))
@@ -246,7 +246,9 @@ namespace McKrill.Avbd.Tests
                 };
                 AssertSameSets(expected, got, "joined pairs are left out");
 
-                // A fractured joint still excludes its pair, like AvbdBody.ConstrainedTo (nothing removes a broken joint yet).
+                // A joint that fractured on the GPU still excludes its pair until the lists are rebuilt without it: the broadphase reads the
+                // lists. With contacts the step does that (AvbdConstraintBuffers reads the broken flags back and RefreshContactTopology
+                // drops the joint), which is the reference solver's timing (it removes a broken joint one step after it broke).
                 var records = new ConstraintRecord[constraints.Records.count];
                 constraints.Records.GetData(records);
                 records[0].ident.z |= (uint)ConstraintFlags.Broken;

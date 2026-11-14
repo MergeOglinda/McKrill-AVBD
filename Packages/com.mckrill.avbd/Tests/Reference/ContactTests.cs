@@ -402,7 +402,7 @@ namespace McKrill.Avbd.Tests
             settings.gravity = float3.zero;
 
             using (var buffers = new AvbdBodyBuffers(Capacity))
-            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, 4))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, ContactSlots))
             {
                 // Two overlapping boxes joined at the middle of the overlap, with a rigid angle lock that breaks at once; b spins.
                 BodyHandle a = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 0f, 0f)));
@@ -411,18 +411,22 @@ namespace McKrill.Avbd.Tests
                 BodyHandle b = buffers.Spawn(spinning);
                 constraints.AddJoint(a, b, new float3(0.45f, 0f, 0f), new float3(-0.45f, 0f, 0f), float.PositiveInfinity, float.PositiveInfinity, 1e-3f);
                 var solver = new AvbdSolver(buffers, settings, null, constraints);
-                long pair = ContactLayout.PairIndex(a.Slot, b.Slot);
 
                 solver.Step();
-                Assert.AreEqual(0u, constraints.PairCounts[pair], "the joint keeps the pair from colliding while it holds");
+                Assert.AreEqual(0u, constraints.ReadContacts().CountOf(a.Slot, b.Slot), "the joint keeps the pair from colliding while it holds");
 
-                // The step reads the broken flags before its narrow phase, so the step that sees the fracture already collides the pair.
+                // The joint breaks on the GPU in some step k. In step k + 1 the broadphase still finds the pair joined (the reference solver
+                // removes a broken joint at the initialize of that step), and the step reads the broken flag back and drops the joint from
+                // the lists. From step k + 2 the pair is a candidate.
                 for (int i = 0; i < 10 && constraints.BrokenCount == 0; i++)
                     solver.Step();
                 Assert.AreEqual(1, constraints.BrokenCount, "the joint fractured");
-                Assert.Greater(constraints.PairCounts[pair], 0u, "the boxes still overlap and now collide");
+                Assert.AreEqual(0u, constraints.ReadContacts().CountOf(a.Slot, b.Slot), "the step that sees the fracture still has the pair joined");
+
                 solver.Step();
-                Assert.Greater(constraints.PairCounts[pair], 0u, "and keep colliding");
+                Assert.Greater(constraints.ReadContacts().CountOf(a.Slot, b.Slot), 0u, "the boxes still overlap and now collide");
+                solver.Step();
+                Assert.Greater(constraints.ReadContacts().CountOf(a.Slot, b.Slot), 0u, "and keep colliding");
             }
         }
 

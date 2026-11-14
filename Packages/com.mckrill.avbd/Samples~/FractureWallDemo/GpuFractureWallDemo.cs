@@ -14,8 +14,8 @@ namespace McKrill.Avbd.Samples
     /// joint after it was added. A fractured joint leaves the solver, and its two blocks collide again like any other pair.
     ///
     /// The simulation runs entirely through the package's public API: <see cref="AvbdBodyBuffers"/> holds the bodies,
-    /// <see cref="AvbdSolver.Step"/> advances them. Collisions are part of that step: the solver tests every pair of bodies
-    /// (no broadphase yet, so at most 512 bodies) and solves the contacts, so this demo contains no collision code.
+    /// <see cref="AvbdSolver.Step"/> advances them. Collisions are part of that step: the broadphase finds the touching pairs, the narrow
+    /// phase keeps a manifold for each, and the solver solves the contacts, so this demo contains no collision code.
     ///
     /// Drawing is the simple part: each frame the poses are read back from the GPU and copied to one cube per body. That is a
     /// stall and a per-body GameObject, fine for a few hundred boxes and not what the package's own renderer will do.
@@ -79,8 +79,8 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(0.1f)] float moveSpeed = 8f;
         [SerializeField, Min(0.01f)] float lookSensitivity = 0.2f;
 
-        // Contacts are tested for every pair of bodies and the package supports 512 bodies with contacts (AvbdConstraintBuffers.MaxContactBodies).
-        // The largest wall is 22 x 18 = 396 blocks; with the ground and 100 shots that fits. The smallest, 15 x 15, is 225 blocks.
+        // The wall sizes: 15 x 15 = 225 blocks at least, 22 x 18 = 396 at most. The limit is the cost of the constraint lists, which are
+        // still built on the CPU every step (stage G moves them to the GPU).
         const int MinColumns = 15;
         const int MaxColumns = 22;
         const int MinRows = 15;
@@ -253,8 +253,8 @@ namespace McKrill.Avbd.Samples
             columns = Mathf.Clamp(columns, MinColumns, MaxColumns);
             rows = Mathf.Clamp(rows, MinRows, MaxRows);
             int blocks = BlockCount(columns, rows);
-            // Bodies with contacts: the ground, the blocks and the shots. Fewer shots stay alive if they would not fit.
-            maxShots = Mathf.Clamp(maxShots, 1, AvbdConstraintBuffers.MaxContactBodies - 1 - blocks - 8);
+            // Bodies: the ground, the blocks and the shots.
+            maxShots = Mathf.Max(maxShots, 1);
             int capacity = 1 + blocks + maxShots + 8;
             bodies = new AvbdBodyBuffers(capacity);
             if (bodies.State.stride != UnsafeUtility.SizeOf<BodyStateRecord>())
@@ -263,9 +263,11 @@ namespace McKrill.Avbd.Samples
 
             AvbdSolverSettings settings = AvbdSolverSettings.Default; // 60 Hz, gravity (0, -10, 0): Unity's y-up
             settings.iterations = iterations;
-            // Up to three joints per block (the one beside it, two under it). Every body takes part in contacts: the solver tests every pair of
-            // bodies, except the pairs a joint joins.
-            constraints = new AvbdConstraintBuffers(bodies, blocks * 3 + 8, null, capacity);
+            // Up to three joints per block (the one beside it, two under it). Manifold slots: a block touches about six others and a shot can
+            // lie on or inside a dozen, so this has room to spare (pairs a joint joins make no manifold); a pair that finds no slot just gets
+            // no contacts until one is free.
+            int manifoldSlots = Mathf.Min(blocks * 8 + maxShots * 16 + 256, AvbdConstraintBuffers.MaxContactManifolds);
+            constraints = new AvbdConstraintBuffers(bodies, blocks * 3 + 8, null, manifoldSlots);
             solver = new AvbdSolver(bodies, settings, null, constraints);
 
             // Ground: a static slab whose top face is the plane y = 0.

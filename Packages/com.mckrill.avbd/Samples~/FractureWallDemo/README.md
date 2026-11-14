@@ -42,11 +42,11 @@ The panel also shows how many joints have broken, out of all.
 
 - Blocks are 1 x 0.5 x 0.5 m in a running bond: odd rows are shifted by half a block, so every block rests on two blocks of the row under it. The wall stands on a static ground slab whose top is the plane y = 0. **The bottom row is immobile** (static bodies, no mass); the blocks of the row above are joined to it, and its blocks have no joints to each other.
 - Every block has a ball-socket joint to the block on its left and to the two blocks under it, at the middle of the face they share. Each joint has a **rigid angle lock**. The fracture test looks at the angular multiplier, and only a rigid angle lock stores a multiplier, so the angle lock is not an option in the panel.
-- A joint breaks the step its angular multiplier exceeds the threshold. A broken joint is removed from the solver's lists and its two blocks collide with each other again, like any other pair. Blocks that were joined do not collide while the joint holds.
+- A joint breaks in the step its angular multiplier exceeds the threshold. The next step removes it from the solver's lists, and from the step after that its two blocks collide with each other again, like any other pair (the reference solver's timing). Blocks that were joined do not collide while the joint holds.
 - **The threshold has no calibrated unit.** The multiplier depends on the joint's penalty and on the constraint's torque arm, so the number to enter is found by trying: if nothing breaks, lower it or shoot a heavier, faster box; if the wall breaks apart by itself, raise it. The default is 100.
 
 ## Limits
 
-- Contacts are tested for every pair of bodies, so at most 512 bodies take part (the ground, the wall and the shots). The largest wall (396 blocks) leaves room for 100 shots.
+- The wall is limited to 396 blocks only because the constraint lists are still built on the CPU every step (stage G moves them to the GPU).
 - Each step reads the joints' state and the contact counts back from the GPU to rebuild the constraint lists. That is a stall, fine at this size.
 - The demo reads the poses back every frame and draws one cube per body, as the pyramid demo does.
