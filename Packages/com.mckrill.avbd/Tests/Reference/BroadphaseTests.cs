@@ -372,7 +372,7 @@ namespace McKrill.Avbd.Tests
 
             using (var buffers = new AvbdBodyBuffers(Capacity))
             using (var constraints = new AvbdConstraintBuffers(buffers, 8))
-            using (var solver = new AvbdSolver(buffers, AvbdSolverSettings.Default, null, constraints))
+            using (var solver = new AvbdSolver(buffers, ZUpSettings(), null, constraints))
             {
                 Fill(buffers, constraints, scene);
                 Assert.IsFalse(solver.BroadphaseEnabled);
@@ -409,7 +409,7 @@ namespace McKrill.Avbd.Tests
 
             using (var buffers = new AvbdBodyBuffers(Capacity))
             using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, scene.bodyCount))
-            using (var solver = new AvbdSolver(buffers, AvbdSolverSettings.Default, null, constraints))
+            using (var solver = new AvbdSolver(buffers, ZUpSettings(), null, constraints))
             {
                 Fill(buffers, constraints, scene);
                 solver.EnableBroadphase(BigBin, BigBin);
@@ -543,6 +543,14 @@ namespace McKrill.Avbd.Tests
         }
 
         static float Range(System.Random rng, float min, float max) => min + (float)rng.NextDouble() * (max - min);
+
+        // The upstream scenes are z-up; the default settings have a y-up gravity, under which the pyramid would fall sideways past the ground.
+        static AvbdSolverSettings ZUpSettings()
+        {
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            settings.gravity = new float3(0f, 0f, -10f);
+            return settings;
+        }
 
         static ComputeShader RequireShader()
         {
