@@ -67,6 +67,22 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(2, t.ColorCount, "the two solved bodies are neighbors; the static one is not colored");
         }
 
+        [Test]
+        public void Topology_LeavesAFracturedJointOut()
+        {
+            ConstraintRecord broken = ConstraintRecordFactory.Joint(0u, 1u, float3.zero, float3.zero, float.PositiveInfinity, float.PositiveInfinity, 1f, 1f);
+            broken.ident.z |= (uint)ConstraintFlags.Broken;
+            ConstraintRecord intact = ConstraintRecordFactory.Joint(1u, 2u, float3.zero, float3.zero, float.PositiveInfinity, float.PositiveInfinity, 1f, 1f);
+
+            var t = new ConstraintTopology();
+            t.Build(new[] { broken, intact }, 2, new[] { true, true, true }, 3);
+
+            Assert.AreEqual(0, (int)t.Ranges[0].range.y, "the fractured joint is not listed");
+            AssertList(t, 1, new[] { 1u }, new[] { 2u });
+            AssertList(t, 2, new[] { 1u }, new[] { 1u });
+            Assert.AreEqual(2, t.ColorCount, "only the intact joint is an edge");
+        }
+
         static void AssertList(ConstraintTopology t, int body, uint[] ids, uint[] others)
         {
             int offset = (int)t.Ranges[body].range.x;
@@ -350,6 +366,38 @@ namespace McKrill.Avbd.Tests
             var one = new ConstraintRecord[1];
             constraints.Records.GetData(one, 0, index, 1);
             return one[0];
+        }
+
+        [Test]
+        public void Gpu_Step_AFracturedJointStopsExcludingItsPairFromCollisions()
+        {
+            RequireCompute();
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            settings.gravity = float3.zero;
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, 4))
+            {
+                // Two overlapping boxes joined at the middle of the overlap, with a rigid angle lock that breaks at once; b spins.
+                BodyHandle a = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 0f, 0f)));
+                BodyDescriptor spinning = BodyDescriptor.Box(new float3(1f), 1f, new float3(0.9f, 0f, 0f));
+                spinning.angularVelocity = new float3(0f, 0f, 5f);
+                BodyHandle b = buffers.Spawn(spinning);
+                constraints.AddJoint(a, b, new float3(0.45f, 0f, 0f), new float3(-0.45f, 0f, 0f), float.PositiveInfinity, float.PositiveInfinity, 1e-3f);
+                var solver = new AvbdSolver(buffers, settings, null, constraints);
+                long pair = ContactLayout.PairIndex(a.Slot, b.Slot);
+
+                solver.Step();
+                Assert.AreEqual(0u, constraints.PairCounts[pair], "the joint keeps the pair from colliding while it holds");
+
+                // The step reads the broken flags before its narrow phase, so the step that sees the fracture already collides the pair.
+                for (int i = 0; i < 10 && constraints.BrokenCount == 0; i++)
+                    solver.Step();
+                Assert.AreEqual(1, constraints.BrokenCount, "the joint fractured");
+                Assert.Greater(constraints.PairCounts[pair], 0u, "the boxes still overlap and now collide");
+                solver.Step();
+                Assert.Greater(constraints.PairCounts[pair], 0u, "and keep colliding");
+            }
         }
 
         [Test]

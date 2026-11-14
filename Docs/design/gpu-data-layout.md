@@ -534,6 +534,10 @@ Three extra buffers: `_PairCounts` (`uint` per pair), `_PairExcluded` (a bit per
 
 `RefreshContactTopology` reads the pair counts back (a stall), builds the per-body lists on the CPU (contacts first in each list, pairs ascending, then joints and springs newest first, which is the reference's order of constraints in the first step) and runs the GPU coloring (stage C) with the contacts in the graph. **This readback goes away with stage G** (lists built on the GPU from the pair counts). With contacts the coloring changes every step; `SlotOrder` gives the reference's coloring.
 
+### Fractured joints
+
+Stage D marks a joint that fractured with the `Broken` flag. Without contacts nothing reads it back and the joint stays in the lists (section 12). With contacts, `PrepareContacts` reads the flags of the joint records back before the narrow phase, if any joint is fracturable. For each new broken joint the CPU copy gets the flag, the pair's exclusion bit is recomputed without it (a pair stays excluded while another intact joint joins it), and the lists and the coloring built in the same step leave the joint out. The step that sees the fracture therefore already collides the two bodies, like the reference solver, which removes a broken joint and creates a manifold in the same step. `AvbdConstraintBuffers.BrokenCount` is the number of joints seen broken. Cost: one readback of the joint records per step.
+
 ### Limits
 
 - At most 512 bodies take part in contacts; the buffers are sized at construction (`contactBodies`). Slots at or above it have no contacts.

@@ -45,6 +45,8 @@ namespace McKrill.Avbd.Reference
             Array.Clear(excluded, 0, excluded.Length);
             for (int i = 0; i < jointCount; i++)
             {
+                if (ConstraintTopology.IsBroken(constraints[i]))
+                    continue; // a fractured joint no longer joins the pair
                 uint a = constraints[i].ident.x;
                 uint b = constraints[i].ident.y;
                 if (a == AvbdConst.Invalid || a >= (uint)ContactBodies || b >= (uint)ContactBodies)
