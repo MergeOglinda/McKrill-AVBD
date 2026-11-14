@@ -193,7 +193,7 @@ namespace McKrill.Avbd.Reference
                 solved[s] = IsSolved(bodies, s);
 
             var topology = new ConstraintTopology();
-            topology.Build(constraints, jointCount, solved, bodyCount, PairCounts, Math.Min(bodyCount, ContactBodies), ContactBase);
+            topology.Build(constraints, jointCount, solved, bodyCount, true, PairCounts, Math.Min(bodyCount, ContactBodies), ContactBase);
             Array.Copy(topology.Ranges, bodies.Range, bodyCount);
             return topology;
         }

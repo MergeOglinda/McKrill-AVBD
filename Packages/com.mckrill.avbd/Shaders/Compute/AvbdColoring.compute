@@ -1,0 +1,183 @@
+// Stage C: graph coloring of the solved bodies, and bucketing of the bodies by color.
+//
+// The graph has one node per solved body (not free, not kinematic, mass above zero) and one edge per constraint between two solved
+// bodies. Fixed bodies and world pins create no edge. The adjacency comes from the per-body constraint lists (stage G).
+//
+// Algorithm: Jones-Plassmann. Every body has a priority (a total order). A body colors itself once every neighbor of higher priority
+// has a color, taking the lowest color none of its neighbors has. Bodies that are ready color in the same round; a round is one
+// dispatch. The result does not depend on the order in which the threads of a round run: a body only ever sees final colors of
+// its higher-priority neighbors, and its lower-priority neighbors cannot have a color before it has one. With the slot order as the
+// priority this is exactly the sequential greedy first-fit coloring of the reference solver.
+//
+// The color is stored in Meta.state.x. A solved body without a color holds AVBD_COLOR_PENDING, a body that is not solved holds
+// AVBD_INVALID.
+//
+// Kernels, in the order the host runs them:
+//   ColorReset   zeroes the work buffer
+//   ColorInit    marks the bodies: PENDING (solved) or INVALID
+//   ColorBegin   zeroes the counter of bodies left (one thread, before the last round of a batch)
+//   ColorRound   one coloring round; counts the bodies that are still without a color
+//   ColorCount   counts the bodies of each color
+//   ColorBucket  writes the body slots into the color buckets (the host has put the start of each color into the cursors)
+// Mirrored by Reference/Stages/CpuGraphColoring.cs, which the tests compare against.
+
+#pragma kernel ColorReset
+#pragma kernel ColorBegin
+#pragma kernel ColorInit
+#pragma kernel ColorRound
+#pragma kernel ColorCount
+#pragma kernel ColorBucket
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdColoringParams.hlsl"
+
+RWStructuredBuffer<BodyMetaRecord>  _BodyMeta;
+StructuredBuffer<BodyMassRecord>    _BodyMass;
+StructuredBuffer<BodyRangeRecord>   _BodyRange;
+StructuredBuffer<ConstraintRecord>  _Constraints;
+StructuredBuffer<uint>              _ConstraintList;
+RWStructuredBuffer<uint>            _ColorBodies;
+RWStructuredBuffer<uint>            _ColorWork;
+
+uint _Base;
+uint _Count; // end of the range: items [_Base, _Count)
+uint _Order; // AVBD_COLOR_ORDER_*
+
+uint HashSlot(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+// True if body `other` colors before body `self`. A strict total order: equal hashes are broken by the slot.
+bool ColorsBefore(uint other, uint self)
+{
+    if (_Order == AVBD_COLOR_ORDER_SLOT)
+        return other > self;
+
+    uint hashOther = HashSlot(other);
+    uint hashSelf = HashSlot(self);
+    return hashOther != hashSelf ? hashOther > hashSelf : other > self;
+}
+
+// The other body of constraint `entry` of body `slot`, or AVBD_INVALID for a world pin.
+uint OtherBody(uint slot, uint entry)
+{
+    uint4 ident = _Constraints[_ConstraintList[entry]].ident;
+    return ident.x == slot ? ident.y : ident.x;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorReset(uint3 id : SV_DispatchThreadID)
+{
+    uint word = _Base + id.x;
+    if (word < AVBD_COLOR_WORK_WORDS)
+        _ColorWork[word] = 0u;
+}
+
+[numthreads(1, 1, 1)]
+void ColorBegin(uint3 id : SV_DispatchThreadID)
+{
+    _ColorWork[0] = 0u;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorInit(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    bool solved = !(_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) && _BodyMass[slot].momentMass.w > 0.0;
+    _BodyMeta[slot].state.x = solved ? AVBD_COLOR_PENDING : AVBD_INVALID;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorRound(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+    if (_BodyMeta[slot].state.x != AVBD_COLOR_PENDING)
+        return;
+
+    uint2 range = _BodyRange[slot].range.xy;
+
+    // Wait for every neighbor that colors before this body. A neighbor that is not solved holds AVBD_INVALID and does not count.
+    for (uint e = 0; e < range.y; e++)
+    {
+        uint other = OtherBody(slot, range.x + e);
+        if (other == AVBD_INVALID)
+            continue;
+        if (_BodyMeta[other].state.x == AVBD_COLOR_PENDING && ColorsBefore(other, slot))
+        {
+            uint previous;
+            InterlockedAdd(_ColorWork[0], 1u, previous);
+            return;
+        }
+    }
+
+    // Lowest color that no neighbor has, looking at 32 colors at a time. Neighbors without a color hold values above the last color.
+    uint color = AVBD_COLOR_MAX;
+    for (uint window = 0; window < AVBD_COLOR_MAX / 32 && color == AVBD_COLOR_MAX; window++)
+    {
+        uint low = window * 32u;
+        uint used = 0u;
+        for (uint f = 0; f < range.y; f++)
+        {
+            uint other = OtherBody(slot, range.x + f);
+            if (other == AVBD_INVALID)
+                continue;
+            uint c = _BodyMeta[other].state.x;
+            if (c >= low && c < low + 32u)
+                used |= 1u << (c - low);
+        }
+        if (used != 0xFFFFFFFFu)
+            color = low + firstbitlow(~used);
+    }
+
+    if (color == AVBD_COLOR_MAX)
+    {
+        uint previous;
+        InterlockedAdd(_ColorWork[1], 1u, previous);
+        color = AVBD_COLOR_MAX - 1u;
+    }
+
+    _BodyMeta[slot].state.x = color;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorCount(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    uint color = _BodyMeta[slot].state.x;
+    if (color < AVBD_COLOR_MAX)
+    {
+        uint previous;
+        InterlockedAdd(_ColorWork[AVBD_COLOR_COUNTS_OFFSET + color], 1u, previous);
+    }
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorBucket(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    uint color = _BodyMeta[slot].state.x;
+    if (color < AVBD_COLOR_MAX)
+    {
+        uint entry;
+        InterlockedAdd(_ColorWork[AVBD_COLOR_CURSORS_OFFSET + color], 1u, entry);
+        _ColorBodies[entry] = slot;
+    }
+}

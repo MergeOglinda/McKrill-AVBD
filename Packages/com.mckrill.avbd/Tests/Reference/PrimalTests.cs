@@ -154,11 +154,20 @@ namespace McKrill.Avbd.Tests
                     Assert.AreEqual(i, constraints.AddRecord(scene.constraints[i]));
                 constraints.Rebuild();
 
-                ConstraintTopology topology = constraints.Topology;
-                Assert.AreEqual(expectedTopology.ColorCount, topology.ColorCount, what + ": colors");
-                CollectionAssert.AreEqual(
-                    new ArraySegment<uint>(expectedTopology.ColorBodies, 0, expectedTopology.ColorBodyCount),
-                    new ArraySegment<uint>(topology.ColorBodies, 0, topology.ColorBodyCount), what + ": color buckets");
+                // Stage C ran on the GPU: the same colors, and the same bodies in each color (their order inside a color is unspecified).
+                Assert.AreEqual(expectedTopology.ColorCount, constraints.ColorCount, what + ": colors");
+                uint[] gpuColorBodies = constraints.ReadColorBodies();
+                for (int c = 0; c < expectedTopology.ColorCount; c++)
+                {
+                    Assert.AreEqual(expectedTopology.ColorSize(c), constraints.ColorSize(c), what + ": size of color " + c);
+                    var expectedSlots = new uint[expectedTopology.ColorSize(c)];
+                    var gpuSlots = new uint[constraints.ColorSize(c)];
+                    Array.Copy(expectedTopology.ColorBodies, expectedTopology.ColorOffsets[c], expectedSlots, 0, expectedSlots.Length);
+                    Array.Copy(gpuColorBodies, constraints.ColorOffset(c), gpuSlots, 0, gpuSlots.Length);
+                    Array.Sort(expectedSlots);
+                    Array.Sort(gpuSlots);
+                    CollectionAssert.AreEqual(expectedSlots, gpuSlots, what + ": bodies of color " + c);
+                }
 
                 var gpuRanges = new BodyRangeRecord[Capacity];
                 buffers.Range.GetData(gpuRanges);

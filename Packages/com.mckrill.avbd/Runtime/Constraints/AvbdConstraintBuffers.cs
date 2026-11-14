@@ -10,13 +10,14 @@ namespace McKrill.Avbd
     /// list and the bodies bucketed by graph color.
     ///
     /// AddJoint and AddSpring only record the constraint on the CPU. <see cref="Rebuild"/> (which <see cref="AvbdSolver.Step"/>
-    /// calls when constraints are pending) applies the pending body edits, completes the records, builds the lists and the coloring
-    /// on the CPU and uploads them. This CPU build is temporary: stages G (lists) and C (coloring) replace it on the GPU.
+    /// calls when constraints are pending) applies the pending body edits, completes the records, builds the per-body lists on the CPU
+    /// and uploads them, then colors the graph and buckets the bodies on the GPU (stage C). The CPU list build is temporary: stage G
+    /// replaces it on the GPU.
     ///
     /// Contacts without a broadphase: with a nonzero <c>contactBodies</c> the object also owns the contact region of the record array and the
     /// per-pair arrays of stage N (see <see cref="ContactLayout"/>). Every pair of the first <c>contactBodies</c> body slots is a candidate,
     /// so memory and narrow-phase work grow with the square of the number of bodies. After the narrow phase, <see cref="RefreshContactTopology"/>
-    /// reads the contact count of every pair back and rebuilds the lists and the coloring, because they change every step. That readback is
+    /// reads the contact count of every pair back and rebuilds the lists (on the CPU) and the coloring (stage C, on the GPU), because they change every step. That readback is
     /// temporary, like the CPU build of the lists: stages G and C and a broadphase replace it.
     ///
     /// Limits of this version: constraints cannot be removed, and removing a body that has constraints is not supported.
@@ -48,6 +49,10 @@ namespace McKrill.Avbd
         readonly ConstraintRecord[] records;
         readonly List<Spec> pending = new List<Spec>();
         readonly ConstraintTopology topology = new ConstraintTopology();
+        readonly AvbdGraphColoring coloring;
+        int[] colorOffsets = new int[1];
+        int colorCount;
+        GraphColoringOrder coloringOrder = GraphColoringOrder.SlotOrder;
 
         GraphicsBuffer recordBuffer;
         GraphicsBuffer listBuffer;
@@ -75,9 +80,10 @@ namespace McKrill.Avbd
 
         /// <param name="bodies">The body arrays the constraints refer to.</param>
         /// <param name="capacity">Number of joints and springs. Fixed for the lifetime of the object.</param>
+        /// <param name="shaderSet">The compute shaders; null loads the package's shader set.</param>
         /// <param name="contactBodies">Number of body slots (from slot 0) that collide with each other, or 0 for no contacts.
         /// At most <see cref="MaxContactBodies"/>. Bodies in higher slots do not collide.</param>
-        public AvbdConstraintBuffers(AvbdBodyBuffers bodies, int capacity, int contactBodies = 0)
+        public AvbdConstraintBuffers(AvbdBodyBuffers bodies, int capacity, AvbdShaderSet shaderSet = null, int contactBodies = 0)
         {
             this.bodies = bodies ?? throw new ArgumentNullException(nameof(bodies));
             if (capacity < 1 || capacity > MaxConstraints)
@@ -94,6 +100,11 @@ namespace McKrill.Avbd
             pairExcluded = new uint[Math.Max(1, (contactPairs + 31) / 32)];
             dirtyBits = new uint[Math.Max(1, (contactBodies + 31) / 32)];
             records = new ConstraintRecord[capacity];
+
+            AvbdShaderSet shaders = shaderSet != null ? shaderSet : AvbdShaderSet.Load();
+            if (shaders == null)
+                throw new InvalidOperationException("The AvbdShaderSet asset was not found.");
+            coloring = new AvbdGraphColoring(shaders.Coloring);
 
             try
             {
@@ -160,7 +171,27 @@ namespace McKrill.Avbd
         internal int ContactBase => records.Length;
 
         /// <summary>Number of graph colors of the last rebuild: the primal stage dispatches this many times per iteration.</summary>
-        public int ColorCount => topology.ColorCount;
+        public int ColorCount => colorCount;
+
+        /// <summary>
+        /// Which body colors first (see <see cref="GraphColoringOrder"/>). The default, <see cref="GraphColoringOrder.SlotOrder"/>, gives the
+        /// reference solver's coloring. Changing it recolors at the next <see cref="Rebuild"/>.
+        /// </summary>
+        public GraphColoringOrder ColoringOrder
+        {
+            get => coloringOrder;
+            set
+            {
+                if (value != coloringOrder)
+                {
+                    coloringOrder = value;
+                    topologyDirty = true;
+                }
+            }
+        }
+
+        /// <summary>Rounds the last coloring needed. Fewer is faster; see <see cref="GraphColoringOrder"/>.</summary>
+        public int LastColoringRounds => coloring.LastRounds;
 
         // ---- buffers for the solver stages -----------------------------------------------------------------
 
@@ -174,7 +205,24 @@ namespace McKrill.Avbd
         internal GraphicsBuffer PairCountsBuffer => pairCountBuffer;
         internal GraphicsBuffer PairExcludedBuffer => pairExcludedBuffer;
         internal GraphicsBuffer DirtySlotsBuffer => dirtyBuffer;
-        internal ConstraintTopology Topology => topology;
+        internal ConstraintTopology Topology => topology; // the lists; the coloring is on the GPU (see ColorCount, ColorOffset)
+
+        /// <summary>Start of a color in the bucket array (<see cref="ColorBodies"/>).</summary>
+        internal int ColorOffset(int color) => colorOffsets[color];
+
+        /// <summary>Number of bodies of a color.</summary>
+        internal int ColorSize(int color) => colorOffsets[color + 1] - colorOffsets[color];
+
+        /// <summary>The bucket array read back: the solved body slots grouped by color. Order inside a color is unspecified.</summary>
+        internal uint[] ReadColorBodies()
+        {
+            ThrowIfDisposed();
+            var all = new uint[colorBuffer.count];
+            colorBuffer.GetData(all);
+            var used = new uint[colorOffsets[colorCount]];
+            Array.Copy(all, used, used.Length);
+            return used;
+        }
 
         // ---- adding constraints ----------------------------------------------------------------------------
 
@@ -322,14 +370,15 @@ namespace McKrill.Avbd
             if (contactBodies > 0 && recordCount > excludedRecords)
                 UploadExcludedPairs();
 
-            topology.Build(records, recordCount, solved, bodyCount, contactBodies > 0 ? pairCounts : null, ContactBodiesInUse, ContactBase);
+            topology.Build(records, recordCount, solved, bodyCount, false, contactBodies > 0 ? pairCounts : null, ContactBodiesInUse, ContactBase);
 
             if (bodyCount > 0)
                 bodies.Range.SetData(topology.Ranges, 0, 0, bodyCount);
             if (topology.ListCount > 0)
                 listBuffer.SetData(topology.List, 0, 0, topology.ListCount);
-            if (topology.ColorBodyCount > 0)
-                colorBuffer.SetData(topology.ColorBodies, 0, 0, topology.ColorBodyCount);
+
+            // Stage C: color the graph and bucket the bodies, on the GPU.
+            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, colorBuffer, coloringOrder, out colorOffsets);
 
             topologyDirty = false;
             builtSolvedSetVersion = bodies.SolvedSetVersion;
@@ -393,7 +442,7 @@ namespace McKrill.Avbd
             if (pairs > 0)
                 pairCountBuffer.GetData(pairCounts, 0, 0, pairs);
 
-            topology.Build(records, recordCount, solved, bodyCount, pairCounts, inUse, ContactBase);
+            topology.Build(records, recordCount, solved, bodyCount, false, pairCounts, inUse, ContactBase);
 
             if (bodyCount > 0)
                 bodies.Range.SetData(topology.Ranges, 0, 0, bodyCount);
@@ -401,8 +450,9 @@ namespace McKrill.Avbd
                 throw new InvalidOperationException("The constraint list needs " + topology.ListCount + " entries; the buffer has " + listBuffer.count + ".");
             if (topology.ListCount > 0)
                 listBuffer.SetData(topology.List, 0, 0, topology.ListCount);
-            if (topology.ColorBodyCount > 0)
-                colorBuffer.SetData(topology.ColorBodies, 0, 0, topology.ColorBodyCount);
+
+            // Stage C on the GPU colors the bodies with the contacts in the graph.
+            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, colorBuffer, coloringOrder, out colorOffsets);
         }
 
         static float TorqueArm(BodyShapeRecord[] shape, uint slotA, uint slotB)
@@ -471,6 +521,7 @@ namespace McKrill.Avbd
             Release(ref pairCountBuffer);
             Release(ref pairExcludedBuffer);
             Release(ref dirtyBuffer);
+            coloring?.Dispose();
         }
 
         static void Release(ref GraphicsBuffer buffer)
