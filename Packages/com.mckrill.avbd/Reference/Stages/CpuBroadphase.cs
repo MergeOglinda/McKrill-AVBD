@@ -8,7 +8,7 @@ namespace McKrill.Avbd.Reference
     /// with the same rules as the shader (and as the reference solver's broadphase, minus the pairs of two static bodies):
     ///   a pair needs at least one solved body (not free, not kinematic, mass above zero),
     ///   the bounding spheres (center = position, radius = |size| / 2) touch: |dp|^2 &lt;= (rA + rB)^2,
-    ///   no joint or spring joins the two bodies (a broken one still does, and contacts do not count: this is the narrowphase's exclusion),
+    ///   no joint or spring joins the two bodies (a broken one, as far as the records say, no longer does, and contacts do not count: this is the narrowphase's exclusion),
     ///   body A is the higher slot; the kind is dynamic-dynamic if both are solved, else dynamic-static.
     /// A body at a non-finite position makes no pairs. The GPU's pair order is unspecified, so a pair set is a set of keys.
     /// </summary>
@@ -67,6 +67,8 @@ namespace McKrill.Avbd.Reference
                     continue;
                 if (ConstraintFlagLayout.KindOf(constraints[i].ident.z) == ConstraintKind.Contact)
                     continue;
+                if (ConstraintTopology.IsBroken(constraints[i]))
+                    continue; // the reference solver removes a broken joint at the next step's initialize
                 joined.Add(Key(System.Math.Max(a, b), System.Math.Min(a, b), PairKind.DynamicDynamic));
             }
 
