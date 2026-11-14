@@ -65,6 +65,9 @@ namespace McKrill.Avbd.Reference
                     case ConstraintKind.Spring:
                         StampSpring(bodies, c, (uint)slot, position, rotation, ref sys);
                         break;
+                    case ConstraintKind.Contact:
+                        StampContact(bodies, c, (uint)slot, position, rotation, settings, ref sys);
+                        break;
                 }
             }
 
@@ -174,6 +177,17 @@ namespace McKrill.Avbd.Reference
                 sys.lhsAng += math.mul(math.mul(jAngT, K), jAng);
                 sys.rhsAng += math.mul(jAngT, F);
             }
+        }
+
+        // One contact point: both bodies' displacements from the start of the step enter the constraint value.
+        static void StampContact(
+            CpuBodyArrays bodies, in ConstraintRecord c, uint slot, float3 selfPos, quaternion selfRot, in AvbdSolverSettings settings, ref AvbdPrimalSystem sys)
+        {
+            LoadPose(bodies, c.ident.x, slot, selfPos, selfRot, out float3 posA, out quaternion rotA);
+            LoadPose(bodies, c.ident.y, slot, selfPos, selfRot, out float3 posB, out quaternion rotB);
+
+            CpuContactMath.Eval e = CpuContactMath.EvaluateAt(bodies, c, posA, rotA, posB, rotB, settings.alpha);
+            CpuContactMath.Stamp(e, c.penaltyLin.xyz, c.ident.x == slot, ref sys);
         }
 
         static void StampSpring(CpuBodyArrays bodies, in ConstraintRecord c, uint slot, float3 selfPos, quaternion selfRot, ref AvbdPrimalSystem sys)

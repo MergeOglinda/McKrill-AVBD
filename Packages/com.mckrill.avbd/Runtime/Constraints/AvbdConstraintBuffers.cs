@@ -13,6 +13,12 @@ namespace McKrill.Avbd
     /// calls when constraints are pending) applies the pending body edits, completes the records, builds the lists and the coloring
     /// on the CPU and uploads them. This CPU build is temporary: stages G (lists) and C (coloring) replace it on the GPU.
     ///
+    /// Contacts without a broadphase: with a nonzero <c>contactBodies</c> the object also owns the contact region of the record array and the
+    /// per-pair arrays of stage N (see <see cref="ContactLayout"/>). Every pair of the first <c>contactBodies</c> body slots is a candidate,
+    /// so memory and narrow-phase work grow with the square of the number of bodies. After the narrow phase, <see cref="RefreshContactTopology"/>
+    /// reads the contact count of every pair back and rebuilds the lists and the coloring, because they change every step. That readback is
+    /// temporary, like the CPU build of the lists: stages G and C and a broadphase replace it.
+    ///
     /// Limits of this version: constraints cannot be removed, and removing a body that has constraints is not supported.
     /// The arrays have a fixed capacity. Methods must be called from the main thread.
     /// </summary>
@@ -20,6 +26,9 @@ namespace McKrill.Avbd
     {
         /// <summary>Largest constraint count: keeps constraint ids below the tag bit (rule P6) and the buffer below 2 GB.</summary>
         public const int MaxConstraints = 10_000_000;
+
+        /// <summary>Most body slots that can collide. The contact region grows with the square of it: 512 slots take 167 MB.</summary>
+        public const int MaxContactBodies = 512;
 
         const int StatusWords = 4;
 
@@ -44,29 +53,55 @@ namespace McKrill.Avbd
         GraphicsBuffer listBuffer;
         GraphicsBuffer colorBuffer;
         GraphicsBuffer statusBuffer;
+        GraphicsBuffer pairCountBuffer;    // contacts per pair, written by stage N
+        GraphicsBuffer pairExcludedBuffer; // bit per pair: joined by a joint or a spring
+        GraphicsBuffer dirtyBuffer;        // bit per body slot: spawned or removed since the last narrow phase
+
+        readonly int contactBodies;
+        readonly int contactPairs;
+        readonly uint[] pairCounts;     // last read back
+        readonly uint[] pairExcluded;
+        readonly uint[] dirtyBits;
+        readonly HashSet<int> dirtySlots = new HashSet<int>();
+        bool dirtyUploaded;
+        bool[] solved = new bool[0];
 
         int recordCount;   // records in the CPU array
         int uploadedCount; // records already on the GPU
         bool topologyDirty;
         int builtSolvedSetVersion;
+        int excludedRecords; // joints and springs already in the exclusion bits
         bool disposed;
 
         /// <param name="bodies">The body arrays the constraints refer to.</param>
-        /// <param name="capacity">Number of constraints. Fixed for the lifetime of the object.</param>
-        public AvbdConstraintBuffers(AvbdBodyBuffers bodies, int capacity)
+        /// <param name="capacity">Number of joints and springs. Fixed for the lifetime of the object.</param>
+        /// <param name="contactBodies">Number of body slots (from slot 0) that collide with each other, or 0 for no contacts.
+        /// At most <see cref="MaxContactBodies"/>. Bodies in higher slots do not collide.</param>
+        public AvbdConstraintBuffers(AvbdBodyBuffers bodies, int capacity, int contactBodies = 0)
         {
             this.bodies = bodies ?? throw new ArgumentNullException(nameof(bodies));
             if (capacity < 1 || capacity > MaxConstraints)
                 throw new ArgumentOutOfRangeException(nameof(capacity), "Constraint capacity must be between 1 and " + MaxConstraints + ".");
+            if (contactBodies != 0 && (contactBodies < 2 || contactBodies > MaxContactBodies || contactBodies > bodies.Capacity))
+                throw new ArgumentOutOfRangeException(nameof(contactBodies), "contactBodies must be 0, or between 2 and " + MaxContactBodies + " and not more than the body capacity.");
             if (!SystemInfo.supportsComputeShaders)
                 throw new InvalidOperationException("Compute shaders are not supported on this device.");
 
+            this.contactBodies = contactBodies;
+            contactPairs = (int)ContactLayout.PairCount(contactBodies);
+            int contactRecords = contactPairs * ContactLayout.MaxContactsPerPair;
+            pairCounts = new uint[Math.Max(1, contactPairs)];
+            pairExcluded = new uint[Math.Max(1, (contactPairs + 31) / 32)];
+            dirtyBits = new uint[Math.Max(1, (contactBodies + 31) / 32)];
             records = new ConstraintRecord[capacity];
 
             try
             {
-                recordBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity, ConstraintRecordStrides.Constraint);
-                listBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity * 2, sizeof(uint));
+                recordBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity + contactRecords, ConstraintRecordStrides.Constraint);
+                listBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (capacity + contactRecords) * 2, sizeof(uint));
+                pairCountBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, pairCounts.Length, sizeof(uint));
+                pairExcludedBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, pairExcluded.Length, sizeof(uint));
+                dirtyBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, dirtyBits.Length, sizeof(uint));
                 colorBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodies.Capacity, sizeof(uint));
                 statusBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, StatusWords, sizeof(uint));
             }
@@ -76,9 +111,13 @@ namespace McKrill.Avbd
                 throw;
             }
 
-            // Rule P9: nothing is assumed to be zeroed.
-            recordBuffer.SetData(records);
-            listBuffer.SetData(new uint[capacity * 2]);
+            // Rule P9: nothing is assumed to be zeroed. The contact region of the records is the exception: a contact record is read only
+            // if the pair's count says it exists, and the counts are initialized here.
+            recordBuffer.SetData(records, 0, 0, capacity);
+            listBuffer.SetData(new uint[(capacity + contactRecords) * 2]);
+            pairCountBuffer.SetData(pairCounts);
+            pairExcludedBuffer.SetData(pairExcluded);
+            dirtyBuffer.SetData(dirtyBits);
             colorBuffer.SetData(new uint[bodies.Capacity]);
             ClearStatus();
         }
@@ -102,6 +141,24 @@ namespace McKrill.Avbd
         /// </summary>
         internal bool NeedsRebuild => topologyDirty || builtSolvedSetVersion != bodies.SolvedSetVersion;
 
+        /// <summary>True if the object owns a contact region (it was created with contactBodies above 0).</summary>
+        public bool HasContacts => contactBodies > 0;
+
+        /// <summary>Number of body slots, from slot 0, that collide with each other.</summary>
+        public int ContactBodies => contactBodies;
+
+        /// <summary>Contacts per pair as of the last <see cref="RefreshContactTopology"/>, indexed like <see cref="ContactLayout.PairIndex"/>.</summary>
+        internal uint[] PairCounts => pairCounts;
+
+        /// <summary>Number of body slots the narrow phase covers now: the used slots, up to <see cref="ContactBodies"/>.</summary>
+        internal int ContactBodiesInUse => Math.Min(bodies.HighWaterMark, contactBodies);
+
+        /// <summary>Number of pairs the narrow phase covers now.</summary>
+        internal int ContactPairsInUse => (int)ContactLayout.PairCount(ContactBodiesInUse);
+
+        /// <summary>Index of the first contact record in <see cref="Records"/>: the capacity of the joints and springs.</summary>
+        internal int ContactBase => records.Length;
+
         /// <summary>Number of graph colors of the last rebuild: the primal stage dispatches this many times per iteration.</summary>
         public int ColorCount => topology.ColorCount;
 
@@ -114,6 +171,9 @@ namespace McKrill.Avbd
         internal GraphicsBuffer List => listBuffer;
         internal GraphicsBuffer ColorBodies => colorBuffer;
         internal GraphicsBuffer Status => statusBuffer;
+        internal GraphicsBuffer PairCountsBuffer => pairCountBuffer;
+        internal GraphicsBuffer PairExcludedBuffer => pairExcludedBuffer;
+        internal GraphicsBuffer DirtySlotsBuffer => dirtyBuffer;
         internal ConstraintTopology Topology => topology;
 
         // ---- adding constraints ----------------------------------------------------------------------------
@@ -253,12 +313,16 @@ namespace McKrill.Avbd
             var mass = new BodyMassRecord[capacity];
             bodies.Meta.GetData(meta);
             bodies.Mass.GetData(mass);
-            var solved = new bool[bodyCount];
+            if (solved.Length < bodyCount)
+                solved = new bool[bodyCount];
             const uint notSolved = (uint)BodyFlags.Free | (uint)BodyFlags.Kinematic;
             for (int s = 0; s < bodyCount; s++)
                 solved[s] = (meta[s].ident.x & notSolved) == 0u && mass[s].momentMass.w > 0f;
 
-            topology.Build(records, recordCount, solved, bodyCount);
+            if (contactBodies > 0 && recordCount > excludedRecords)
+                UploadExcludedPairs();
+
+            topology.Build(records, recordCount, solved, bodyCount, contactBodies > 0 ? pairCounts : null, ContactBodiesInUse, ContactBase);
 
             if (bodyCount > 0)
                 bodies.Range.SetData(topology.Ranges, 0, 0, bodyCount);
@@ -269,6 +333,76 @@ namespace McKrill.Avbd
 
             topologyDirty = false;
             builtSolvedSetVersion = bodies.SolvedSetVersion;
+        }
+
+        // Sets the exclusion bit of the pair of every joint and spring: like the reference solver, no manifold is created between bodies
+        // that a force already joins. (Ignore-collision pairs are not supported yet.)
+        void UploadExcludedPairs()
+        {
+            Array.Clear(pairExcluded, 0, pairExcluded.Length);
+            for (int i = 0; i < recordCount; i++)
+            {
+                uint a = records[i].ident.x;
+                uint b = records[i].ident.y;
+                if (a == AvbdConst.Invalid || a >= (uint)contactBodies || b >= (uint)contactBodies)
+                    continue;
+                long pair = ContactLayout.PairIndex((int)a, (int)b);
+                pairExcluded[pair >> 5] |= 1u << (int)(pair & 31);
+            }
+            pairExcludedBuffer.SetData(pairExcluded);
+            excludedRecords = recordCount;
+        }
+
+        /// <summary>
+        /// Before the narrow phase: tells it which body slots were spawned or removed since the last step, so that a recycled slot does
+        /// not inherit the contacts of the body that had it. Does nothing without contacts.
+        /// </summary>
+        internal void PrepareContacts()
+        {
+            ThrowIfDisposed();
+            if (contactBodies == 0)
+                return;
+
+            dirtySlots.Clear();
+            bodies.TakeStructuralSlots(dirtySlots);
+            if (dirtySlots.Count == 0 && !dirtyUploaded)
+                return;
+
+            Array.Clear(dirtyBits, 0, dirtyBits.Length);
+            foreach (int slot in dirtySlots)
+                if (slot < contactBodies)
+                    dirtyBits[slot >> 5] |= 1u << (slot & 31);
+            dirtyBuffer.SetData(dirtyBits);
+            dirtyUploaded = dirtySlots.Count > 0;
+        }
+
+        /// <summary>
+        /// After the narrow phase: reads the contact count of every pair back and rebuilds the lists, the coloring and the color buckets
+        /// with the contacts in them. Stalls until the GPU has finished the narrow phase. Call <see cref="Rebuild"/> first if constraints
+        /// were added or the set of solved bodies changed.
+        /// </summary>
+        internal void RefreshContactTopology()
+        {
+            ThrowIfDisposed();
+            if (contactBodies == 0)
+                return;
+
+            int bodyCount = bodies.HighWaterMark;
+            int inUse = ContactBodiesInUse;
+            int pairs = (int)ContactLayout.PairCount(inUse);
+            if (pairs > 0)
+                pairCountBuffer.GetData(pairCounts, 0, 0, pairs);
+
+            topology.Build(records, recordCount, solved, bodyCount, pairCounts, inUse, ContactBase);
+
+            if (bodyCount > 0)
+                bodies.Range.SetData(topology.Ranges, 0, 0, bodyCount);
+            if (topology.ListCount > listBuffer.count)
+                throw new InvalidOperationException("The constraint list needs " + topology.ListCount + " entries; the buffer has " + listBuffer.count + ".");
+            if (topology.ListCount > 0)
+                listBuffer.SetData(topology.List, 0, 0, topology.ListCount);
+            if (topology.ColorBodyCount > 0)
+                colorBuffer.SetData(topology.ColorBodies, 0, 0, topology.ColorBodyCount);
         }
 
         static float TorqueArm(BodyShapeRecord[] shape, uint slotA, uint slotB)
@@ -334,6 +468,9 @@ namespace McKrill.Avbd
             Release(ref listBuffer);
             Release(ref colorBuffer);
             Release(ref statusBuffer);
+            Release(ref pairCountBuffer);
+            Release(ref pairExcludedBuffer);
+            Release(ref dirtyBuffer);
         }
 
         static void Release(ref GraphicsBuffer buffer)

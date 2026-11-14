@@ -12,6 +12,11 @@ namespace McKrill.Avbd
     /// Both orders match the reference solver so that the colored sweep is the same sequence of updates:
     /// a body's list is newest constraint first, and coloring visits bodies from the highest slot down, giving each the lowest
     /// color not used by a colored neighbor.
+    ///
+    /// Contacts are constraints too. They are not in the record array on the CPU: the narrow phase writes them on the GPU, in the dense
+    /// pair layout of <see cref="ContactLayout"/>, and only the count of each pair is known here. They come first in a body's list
+    /// (the reference solver creates manifolds after the joints and springs, so they are the newest forces), pairs in ascending order and
+    /// the contacts of a pair in order, which is also the order in which the reference solver's first step stamps them.
     /// </summary>
     internal sealed class ConstraintTopology
     {
@@ -20,6 +25,9 @@ namespace McKrill.Avbd
 
         /// <summary>Constraint indices, grouped by body, newest first inside a group. Valid up to <see cref="ListCount"/>.</summary>
         public uint[] List = new uint[0];
+
+        /// <summary>For every entry of <see cref="List"/>, the other body of the constraint (AVBD_INVALID for the world).</summary>
+        public uint[] ListOther = new uint[0];
 
         public int ListCount;
 
@@ -38,17 +46,36 @@ namespace McKrill.Avbd
 
         public int ColorSize(int color) => ColorOffsets[color + 1] - ColorOffsets[color];
 
+        uint[] contactA = new uint[0];
+        uint[] contactB = new uint[0];
+        uint[] contactId = new uint[0];
+        int contactCount;
+
         /// <param name="records">Constraint records, index = constraint id.</param>
         /// <param name="solved">One flag per body slot below <paramref name="bodyCount"/>.</param>
-        public void Build(ConstraintRecord[] records, int recordCount, bool[] solved, int bodyCount)
+        /// <param name="pairCounts">Contacts of each pair of the first <paramref name="contactBodies"/> slots, indexed as <see cref="ContactLayout.PairIndex"/>, or null for no contacts.</param>
+        /// <param name="contactBodies">Number of slots the pair counts cover (at most <paramref name="bodyCount"/>).</param>
+        /// <param name="contactBase">Constraint id of the first contact record.</param>
+        public void Build(ConstraintRecord[] records, int recordCount, bool[] solved, int bodyCount,
+            uint[] pairCounts = null, int contactBodies = 0, int contactBase = 0)
         {
             if (records == null) throw new ArgumentNullException(nameof(records));
             if (solved == null) throw new ArgumentNullException(nameof(solved));
             if (recordCount < 0 || recordCount > records.Length) throw new ArgumentOutOfRangeException(nameof(recordCount));
             if (bodyCount < 0 || bodyCount > solved.Length) throw new ArgumentOutOfRangeException(nameof(bodyCount));
+            if (contactBodies < 0 || contactBodies > bodyCount) throw new ArgumentOutOfRangeException(nameof(contactBodies));
+            if (pairCounts != null && pairCounts.Length < ContactLayout.PairCount(contactBodies))
+                throw new ArgumentException("pairCounts has fewer entries than there are pairs of contactBodies bodies.", nameof(pairCounts));
+
+            CollectContacts(pairCounts, contactBodies, contactBase, solved);
 
             // 1. List sizes. Constraints on bodies that are not solved are left out: nothing reads them.
             var counts = new int[bodyCount];
+            for (int i = 0; i < contactCount; i++)
+            {
+                if (solved[contactA[i]]) counts[contactA[i]]++;
+                if (solved[contactB[i]]) counts[contactB[i]]++;
+            }
             for (int i = 0; i < recordCount; i++)
             {
                 uint a = records[i].ident.x;
@@ -73,15 +100,23 @@ namespace McKrill.Avbd
                 total += counts[s];
             }
 
-            // 2. Fill the lists, newest constraint first.
+            // 2. Fill the lists, newest constraint first: the contacts, then the joints and springs from the last one added.
             List = new uint[total];
+            ListOther = new uint[total];
             ListCount = total;
+            for (int i = 0; i < contactCount; i++)
+            {
+                uint a = contactA[i];
+                uint b = contactB[i];
+                if (solved[a]) { ListOther[cursor[a]] = b; List[cursor[a]++] = contactId[i]; }
+                if (solved[b]) { ListOther[cursor[b]] = a; List[cursor[b]++] = contactId[i]; }
+            }
             for (int i = recordCount - 1; i >= 0; i--)
             {
                 uint a = records[i].ident.x;
                 uint b = records[i].ident.y;
-                if (a != AvbdConst.Invalid && solved[a]) List[cursor[a]++] = (uint)i;
-                if (solved[b]) List[cursor[b]++] = (uint)i;
+                if (a != AvbdConst.Invalid && solved[a]) { ListOther[cursor[a]] = b; List[cursor[a]++] = (uint)i; }
+                if (solved[b]) { ListOther[cursor[b]] = a; List[cursor[b]++] = (uint)i; }
             }
 
             // 3. Greedy first-fit coloring, highest slot first.
@@ -102,8 +137,7 @@ namespace McKrill.Avbd
                 int count = (int)Ranges[s].range.y;
                 for (int e = 0; e < count; e++)
                 {
-                    ConstraintRecord c = records[List[offset + e]];
-                    uint other = c.ident.x == (uint)s ? c.ident.y : c.ident.x;
+                    uint other = ListOther[offset + e];
                     if (other == AvbdConst.Invalid || !solved[other] || ColorOfBody[other] < 0)
                         continue;
                     stamp[ColorOfBody[other]] = token;
@@ -134,6 +168,43 @@ namespace McKrill.Avbd
             for (int s = bodyCount - 1; s >= 0; s--)
                 if (ColorOfBody[s] >= 0)
                     ColorBodies[next[ColorOfBody[s]]++] = (uint)s;
+        }
+
+        // Lists the contacts of the pairs that have any, in pair order, as (body A, body B, constraint id). Pairs of two bodies that are not solved are
+        // skipped (the narrow phase writes none).
+        void CollectContacts(uint[] pairCounts, int contactBodies, int contactBase, bool[] solved)
+        {
+            contactCount = 0;
+            if (pairCounts == null)
+                return;
+
+            long pair = 0;
+            for (int hi = 1; hi < contactBodies; hi++)
+            {
+                for (int lo = 0; lo < hi; lo++, pair++)
+                {
+                    uint n = pairCounts[pair];
+                    if (n == 0u || (!solved[hi] && !solved[lo]))
+                        continue;
+                    if (n > ContactLayout.MaxContactsPerPair)
+                        throw new InvalidOperationException("Pair " + pair + " reports " + n + " contacts; the most a pair can have is " + ContactLayout.MaxContactsPerPair + ".");
+
+                    if (contactCount + (int)n > contactA.Length)
+                    {
+                        int size = Math.Max(64, Math.Max(contactA.Length * 2, contactCount + (int)n));
+                        Array.Resize(ref contactA, size);
+                        Array.Resize(ref contactB, size);
+                        Array.Resize(ref contactId, size);
+                    }
+                    for (int k = 0; k < (int)n; k++)
+                    {
+                        contactA[contactCount] = (uint)hi;
+                        contactB[contactCount] = (uint)lo;
+                        contactId[contactCount] = (uint)(contactBase + pair * ContactLayout.MaxContactsPerPair + k);
+                        contactCount++;
+                    }
+                }
+            }
         }
     }
 }

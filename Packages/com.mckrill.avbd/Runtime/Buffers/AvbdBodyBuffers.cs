@@ -42,6 +42,7 @@ namespace McKrill.Avbd
         readonly int applyKernel;
         readonly int commandBatchSize;
         readonly List<EditCommand> drained = new List<EditCommand>();
+        readonly HashSet<int> structuralSlots = new HashSet<int>();
 
         GraphicsBuffer state;
         GraphicsBuffer inertial;
@@ -122,6 +123,16 @@ namespace McKrill.Avbd
         internal int SolvedSetVersion { get; private set; }
 
         public bool IsAlive(BodyHandle handle) => queue.IsAlive(handle);
+
+        /// <summary>
+        /// Moves the slots that were spawned or removed since the last call into <paramref name="into"/> (which is not cleared first) and
+        /// forgets them. The narrow phase uses it to drop the contact history of a recycled slot.
+        /// </summary>
+        internal void TakeStructuralSlots(HashSet<int> into)
+        {
+            into.UnionWith(structuralSlots);
+            structuralSlots.Clear();
+        }
 
         // ---- buffers for the other stages ---------------------------------------------------------------
         // Read-only by convention: only stage E writes the fields it owns (design doc, section 1).
@@ -217,6 +228,12 @@ namespace McKrill.Avbd
 
             if (ChangesSolvedSet(drained))
                 SolvedSetVersion++;
+            for (int i = 0; i < drained.Count; i++)
+            {
+                uint kind = drained[i].header.x;
+                if (kind == (uint)EditKind.Spawn || kind == (uint)EditKind.Remove)
+                    structuralSlots.Add(drained[i].Slot);
+            }
 
             BindBodyBuffers(applyKernel);
             shader.SetBuffer(applyKernel, CommandsId, commands);
