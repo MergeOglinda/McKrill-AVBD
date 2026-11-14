@@ -1,0 +1,264 @@
+// Stage B: broadphase. Finds the pairs of bodies whose bounding spheres overlap, with a hashed uniform grid.
+//
+// A body's bounding sphere is centered on its position and has the radius |size| / 2 (half the box diagonal), which is what the
+// reference solver's broadphase uses: two bodies are a pair when |dp|^2 <= (rA + rB)^2 and no constraint joins them.
+//
+// Bodies are "solved" (not free, not kinematic, mass above zero) or "static" (live, but not solved: mass 0 or kinematic).
+//   dynamic-dynamic pairs   found with the grid: every solved body sits in the cell of its position, and a body looks at its own cell
+//                           and the 26 around it. The cell size is a little more than twice the largest radius, so a pair is never missed.
+//   dynamic-static pairs    every solved body is tested against every static body (a compacted list). Fine for a few large static
+//                           bodies such as a ground slab; a grid of static colliders is for later.
+//   static-static pairs     are not generated.
+//
+// Pairs go into two bins of one buffer (pair kinds). Body A of a pair is the one with the higher slot, like the reference solver's pair
+// loop. Pairs joined by a joint or spring are left out, like AvbdBody.ConstrainedTo and the narrowphase's _PairExcluded.
+// The order of pairs inside a bin is unspecified and varies between runs (atomic append).
+//
+// Kernels, in the order the host runs them:
+//   BpReset          zeroes the control words
+//   BpClearGrid      empties the grid cells
+//   BpBounds         largest radius of the solved bodies, and the list of static bodies
+//   BpInsert         puts every solved body into the grid (a linked list per cell, built with an atomic exchange)
+//   BpPairsDynamic   dynamic-dynamic pairs
+//   BpPairsStatic    dynamic-static pairs
+// Mirrored by Reference/Stages/CpuBroadphase.cs, which the tests compare against.
+
+#pragma kernel BpReset
+#pragma kernel BpClearGrid
+#pragma kernel BpBounds
+#pragma kernel BpInsert
+#pragma kernel BpPairsDynamic
+#pragma kernel BpPairsStatic
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBroadphaseParams.hlsl"
+
+StructuredBuffer<BodyStateRecord>   _BodyState;
+StructuredBuffer<BodyMassRecord>    _BodyMass;
+StructuredBuffer<BodyShapeRecord>   _BodyShape;
+StructuredBuffer<BodyMetaRecord>    _BodyMeta;
+StructuredBuffer<BodyRangeRecord>   _BodyRange;
+StructuredBuffer<ConstraintRecord>  _Constraints;
+StructuredBuffer<uint>              _ConstraintList;
+
+RWStructuredBuffer<uint>            _BpControl;
+RWStructuredBuffer<uint>            _GridHead;   // per grid cell: the first body of its list, or AVBD_INVALID
+RWStructuredBuffer<uint>            _GridNext;   // per body: the next body in its cell's list
+RWStructuredBuffer<uint4>           _BodyCell;   // per body: xyz = cell coordinates (int bits), w = grid cell index, or AVBD_INVALID if not in the grid
+RWStructuredBuffer<uint>            _StaticList;
+RWStructuredBuffer<PairRecord>      _Pairs;      // bin 0 (dynamic-dynamic) at [0, _DynamicPairCapacity), then bin 1 (dynamic-static)
+
+uint _Base;
+uint _Count;               // end of the range: items [_Base, _Count)
+uint _GridMask;            // number of grid cells (a power of two) minus one
+uint _DynamicPairCapacity;
+uint _StaticPairCapacity;
+
+#define CLASS_FREE   0u
+#define CLASS_SOLVED 1u
+#define CLASS_STATIC 2u
+
+uint Classify(uint slot)
+{
+    uint flags = _BodyMeta[slot].ident.x;
+    if (flags & AVBD_BODY_FLAG_FREE)
+        return CLASS_FREE;
+    if (!(flags & AVBD_BODY_FLAG_KINEMATIC) && _BodyMass[slot].momentMass.w > 0.0)
+        return CLASS_SOLVED;
+    return CLASS_STATIC;
+}
+
+float Radius(uint slot)
+{
+    return length(_BodyShape[slot].sizeFriction.xyz * 0.5);
+}
+
+float CellSize()
+{
+    return max(2.0 * asfloat(_BpControl[AVBD_BP_MAX_RADIUS]) * AVBD_BP_CELL_MARGIN, 1.0e-4);
+}
+
+int3 CellOf(float3 position, float cellSize)
+{
+    return (int3)clamp(floor(position / cellSize), -1.0e9, 1.0e9);
+}
+
+uint HashCell(int3 cell)
+{
+    uint h = ((uint)cell.x * 73856093u) ^ ((uint)cell.y * 19349663u) ^ ((uint)cell.z * 83492791u);
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    return h & _GridMask;
+}
+
+bool IsFinite3(float3 v)
+{
+    return all(isfinite(v));
+}
+
+// True if a joint or a spring joins `solvedBody` and `other`. The list of a solved body holds every constraint on it, including the ones
+// to static bodies. Contacts (kind CONTACT, written by the narrowphase) are in the lists too and do not count: a pair with a contact is
+// exactly a pair that must stay a candidate. A fractured joint still counts, like in the narrowphase's exclusion (_PairExcluded).
+bool Constrained(uint solvedBody, uint other)
+{
+    uint2 range = _BodyRange[solvedBody].range.xy;
+    for (uint e = 0; e < range.y; e++)
+    {
+        uint4 ident = _Constraints[_ConstraintList[range.x + e]].ident;
+        if ((ident.z >> AVBD_CONSTRAINT_KIND_SHIFT) == AVBD_CONSTRAINT_KIND_CONTACT)
+            continue;
+        uint partner = ident.x == solvedBody ? ident.y : ident.x;
+        if (partner == other)
+            return true;
+    }
+    return false;
+}
+
+bool SpheresOverlap(float3 positionA, float radiusA, float3 positionB, float radiusB)
+{
+    float3 dp = positionA - positionB;
+    float r = radiusA + radiusB;
+    return dot(dp, dp) <= r * r;
+}
+
+void Emit(uint bodyA, uint bodyB, uint kind)
+{
+    uint counterWord = kind == AVBD_PAIR_DYNAMIC_DYNAMIC ? AVBD_BP_DYNAMIC_PAIRS : AVBD_BP_STATIC_PAIRS;
+    uint capacity = kind == AVBD_PAIR_DYNAMIC_DYNAMIC ? _DynamicPairCapacity : _StaticPairCapacity;
+    uint binStart = kind == AVBD_PAIR_DYNAMIC_DYNAMIC ? 0u : _DynamicPairCapacity;
+
+    uint index;
+    InterlockedAdd(_BpControl[counterWord], 1u, index);
+    if (index < capacity)
+    {
+        PairRecord record;
+        record.pair = uint4(bodyA, bodyB, kind, 0u);
+        _Pairs[binStart + index] = record;
+    }
+}
+
+[numthreads(1, 1, 1)]
+void BpReset(uint3 id : SV_DispatchThreadID)
+{
+    for (uint w = 0; w < AVBD_BP_CONTROL_WORDS; w++)
+        _BpControl[w] = 0u;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BpClearGrid(uint3 id : SV_DispatchThreadID)
+{
+    uint cell = _Base + id.x;
+    if (cell >= _Count)
+        return;
+    _GridHead[cell] = AVBD_INVALID;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BpBounds(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    uint kind = Classify(slot);
+    if (kind == CLASS_SOLVED)
+    {
+        float radius = Radius(slot);
+        if (isfinite(radius))
+        {
+            uint previous;
+            InterlockedMax(_BpControl[AVBD_BP_MAX_RADIUS], asuint(radius), previous);
+        }
+    }
+    else if (kind == CLASS_STATIC)
+    {
+        uint index;
+        InterlockedAdd(_BpControl[AVBD_BP_STATIC_COUNT], 1u, index);
+        _StaticList[index] = slot;
+    }
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BpInsert(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    _BodyCell[slot] = uint4(0u, 0u, 0u, AVBD_INVALID);
+    if (Classify(slot) != CLASS_SOLVED)
+        return;
+
+    float3 position = _BodyState[slot].position.xyz;
+    if (!IsFinite3(position))
+        return; // a body at a non-finite position makes no pairs
+
+    int3 cell = CellOf(position, CellSize());
+    uint index = HashCell(cell);
+    _BodyCell[slot] = uint4(asuint(cell), index);
+
+    uint previous;
+    InterlockedExchange(_GridHead[index], slot, previous);
+    _GridNext[slot] = previous;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
+{
+    uint self = _Base + id.x;
+    if (self >= _Count)
+        return;
+
+    uint4 selfCell = _BodyCell[self];
+    if (selfCell.w == AVBD_INVALID)
+        return; // not in the grid: not solved, or not finite
+
+    float3 selfPosition = _BodyState[self].position.xyz;
+    float selfRadius = Radius(self);
+    int3 cell = asint(selfCell.xyz);
+
+    // Pairs are found by the body with the higher slot, which is body A.
+    for (int dz = -1; dz <= 1; dz++)
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        int3 neighborCell = cell + int3(dx, dy, dz);
+        uint other = _GridHead[HashCell(neighborCell)];
+        while (other != AVBD_INVALID)
+        {
+            // A cell index can be shared by several cells; only the bodies of the cell asked for count, so no body is seen twice.
+            if (other < self && all(asint(_BodyCell[other].xyz) == neighborCell)
+                && SpheresOverlap(selfPosition, selfRadius, _BodyState[other].position.xyz, Radius(other))
+                && !Constrained(self, other))
+            {
+                Emit(self, other, AVBD_PAIR_DYNAMIC_DYNAMIC);
+            }
+            other = _GridNext[other];
+        }
+    }
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BpPairsStatic(uint3 id : SV_DispatchThreadID)
+{
+    uint self = _Base + id.x;
+    if (self >= _Count)
+        return;
+    if (Classify(self) != CLASS_SOLVED)
+        return;
+
+    float3 selfPosition = _BodyState[self].position.xyz;
+    if (!IsFinite3(selfPosition))
+        return;
+    float selfRadius = Radius(self);
+
+    uint staticCount = _BpControl[AVBD_BP_STATIC_COUNT];
+    for (uint k = 0; k < staticCount; k++)
+    {
+        uint other = _StaticList[k];
+        if (SpheresOverlap(selfPosition, selfRadius, _BodyState[other].position.xyz, Radius(other)) && !Constrained(self, other))
+            Emit(max(self, other), min(self, other), AVBD_PAIR_DYNAMIC_STATIC);
+    }
+}

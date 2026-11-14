@@ -400,6 +400,56 @@ The previous velocity is what stage P reads for the adaptive warm start, so a st
 
 Not part of this stage: GPU construction of the lists (stage G), indirect dispatch of the color sweep, temporal coherence, and removing a joint that has fractured from the graph.
 
+### Stage B: broadphase
+
+`AvbdBroadphase.compute` finds the pairs of bodies whose bounding spheres overlap. It is the producer of the pair list. The narrowphase (stage N) will be its only consumer; today it still tests all pairs itself (section 13), see the relation below. The sphere is centered on the body position and has the radius `|size| / 2` (half the box diagonal), like the reference solver: two bodies are a pair when `|dp|^2 <= (rA + rB)^2` and no joint or spring joins them. A body at a non-finite position makes no pairs.
+
+**Pair record.** `PairRecord`, 16 B, `uint4`: x = body A, y = body B, z = pair kind, w = 0. Body A is the body with the higher slot (the reference's pair loop makes the newer body body A). Slots, not handles.
+
+**Pair kinds (the bins).** The pair list is one buffer with two bins, each with its own capacity and counter:
+
+| Bin | Kind | Pairs |
+| --- | --- | --- |
+| 0 | `DynamicDynamic` | both bodies solved (not free, not kinematic, mass above zero) |
+| 1 | `DynamicStatic` | one body solved, the other live but not solved (mass 0 or kinematic) |
+
+Two static or kinematic bodies never make a pair. A pair that does not fit its bin is counted but not stored, so a counter above the capacity tells the host the bin overflowed (`AvbdBroadphase.Overflowed`). Nothing else is lost.
+
+**Deviation from the scope paragraph.** Section 1 says static colliders never enter the pair list and are tested directly in the narrowphase. This stage puts them in bin 1 instead, for two reasons: the reference solver's manifolds include pairs with static bodies, so the parity tests need them, and the narrowphase then has one input to read. The cost is that every solved body is tested against every static body (a brute-force loop over a compacted list of the static bodies), which is fine for a few large static bodies (a ground slab, walls) and slow for thousands of static colliders. A grid of static colliders is the fix and is not part of this stage.
+
+**Dynamic-dynamic search: hashed uniform grid.** The cell size is `2 * maxRadius * 1.01`, with `maxRadius` the largest radius among the solved bodies (a GPU reduction every run). Two overlapping spheres are then in the same or in adjacent cells. A body is put into the cell of its position; a body looks at its own cell and the 26 around it, and keeps the bodies of lower slot (so each pair is found once, by body A). The cells are hashed into a table of the next power of two above twice the body capacity; a hashed cell index can be shared by different cells, so a candidate counts only if its stored cell coordinates equal the cell being looked at. The cells hold linked lists, built with an atomic exchange of the head, so the grid needs no sort and no per-cell capacity.
+
+| Kernel | What |
+| --- | --- |
+| `BpReset` | Zeroes the four control words |
+| `BpClearGrid` | Sets every grid head to `AVBD_INVALID` |
+| `BpBounds` | Atomic max of the radii of the solved bodies (non-negative floats order like uints); appends each static body to the static list |
+| `BpInsert` | Stores the cell of each solved body and links it into the list of its grid cell |
+| `BpPairsDynamic` | The 27-cell search; appends to bin 0 |
+| `BpPairsStatic` | Every solved body against the static list; appends to bin 1 |
+
+**Constraint exclusion.** A pair is skipped when a joint or a spring joins the two bodies. The test reads the constraint list (stage G) of the solved body of the pair, so it costs as many steps as that body has constraints. Pairs with a world pin are never excluded. This is the narrowphase's rule (`_PairExcluded`, section 13), and it is the same in every detail that matters: a fractured joint (`Broken`) still excludes its pair, because nothing removes it from the lists yet (the reference removes it one step later; both stages will lift the exclusion together once stage G can drop it). Contact records (kind `Contact`) are in the lists too, since the narrowphase writes them, and are **not** an exclusion: a pair with contacts has to stay a candidate for as long as the boxes touch, which is how the reference's persistent manifolds behave. `IgnoreCollision` has no GPU record, in neither stage.
+
+**Relation to the narrowphase of section 13.** The all-pairs narrowphase (one thread per pair of slots, manifolds stored by dense pair index) already applies the candidate rule inline: at least one solved body, overlapping bounding spheres, not excluded; a manifold that exists is kept while the boxes still collide. Stage B computes the same rule as a list instead of a test per pair, with these consequences:
+
+- The candidate rule is identical, so replacing the narrowphase's per-pair test by the pair list changes nothing in the simulation. `Solver_Broadphase_CoversEveryPairThatHasContacts` checks the direction that matters now: every pair the narrowphase holds contacts for is in the pair list of the same step.
+- A pair with an existing manifold needs no special case in B. Touching boxes overlap their bounding spheres, and a contact does not exclude, so the pair is in the list.
+- What B does not do yet is replace the dense pair storage: manifolds are still stored at `ContactBase + pairIndex * 8` and found by the narrowphase without a lookup. The narrowphase reads no pair list, and `EnableBroadphase` only runs B next to it. Reading the pair list needs manifold storage that is not indexed by `(a, b)` (a slot per pair of the list, and a match of last step's pairs, probably by sorting or hashing the pair key). That is the next change to stage N and the reason B owns the pair record: nothing in B changes when it happens.
+
+**Order.** The pairs inside a bin are in the order the threads got their atomic counter: unspecified, different between runs. The pair list is a set; tests compare sets. Stage S (sorting bodies by Morton key) does not exist yet, so the stage does not use it; when it does, the sorted order will make the lists of nearby bodies near each other in memory, and the order of the pairs will still be unspecified unless the narrowphase needs it.
+
+**Host side.** `AvbdBroadphase` owns the grid, the static list, the pair buffer and the control words. `Run(bodies, constraints)` applies pending body edits and dispatches the six kernels; there is no readback. `ReadCounts`, `ReadPairs` and `ReadMaxRadius` read back for tests and tools. The solver runs it in `Step()` after the constraint rebuild and before predict, so it sees the poses of the end of the previous step, like the reference's broadphase, but only after `AvbdSolver.EnableBroadphase(dynamicPairCapacity, staticPairCapacity)`: until the narrowphase consumes the pairs, running it would cost time for nothing. The narrowphase will read the counts from the control buffer through indirect arguments, which is not done yet.
+
+**Limits.**
+- No temporal coherence: the grid and the pairs are rebuilt each run. It is a few dispatches over the bodies, cheap next to the solver iterations.
+- The static bodies are tested by brute force (above).
+- A cell coordinate is clamped to +-1e9. Bodies farther from the origin than a billion cells all fall into the edge cells: the result stays correct (the exact sphere test still decides) but the search gets slow. With a cell of one unit that is far outside float precision anyway.
+- A solved body of enormous radius next to many tiny ones makes the cell large and the cells crowded: the cell size follows the largest radius. Moving the few large bodies to the brute-force path is the fix, and is not done.
+- A body with a non-finite size is not supported: it is left out of the cell size and its pairs are unspecified.
+- The bin capacities are fixed when `AvbdBroadphase` is made. An overflow is reported, not repaired: the host decides whether to make a larger one.
+
+**Check.** `CpuBroadphase` is the oracle: brute force over all pairs with the same rules (it is the narrowphase's candidate rule, which `CpuContacts` mirrors). `BroadphaseTests`: the oracle's pair set equals the reference solver's pair loop (minus static-static pairs) on the ground, stack, pyramid, rope and spring scenes and 10 dense random scenes; the GPU equals the oracle, on the state the GPU holds, on the same scenes and scenes far from the origin and with sizes from 0.05 to 8; pairs are well formed (body A above body B, kind matches the bodies, no duplicates, no static-static); kinematic, static and removed bodies; excluded constraints (a fractured joint still excludes, a contact does not); overflow counts pairs beyond the capacity and stores only real ones; repeated runs and moved bodies; empty and all-static scenes; the solver running the stage on the poses of the step start; and, with contacts, every pair the narrowphase holds contacts for being a pair of the list in 40 steps of a falling pyramid. `BodyLayoutTests` checks the constants and the record against the C# mirrors.
+
 ## 12. Constraints (step 4: joints and springs)
 
 Contacts without a broadphase are section 13. Joints and springs share one record, a constraint, with the kind in the high 8 bits of the flags word (rule P7).

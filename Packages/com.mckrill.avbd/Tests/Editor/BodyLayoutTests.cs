@@ -281,6 +281,25 @@ namespace McKrill.Avbd.Tests
             Assert.AreNotEqual(AvbdConst.Invalid, AvbdGraphColoring.Pending);
         }
 
+        [Test]
+        public void Hlsl_BroadphaseConstantsMatchTheCSharpMirrors()
+        {
+            Dictionary<string, uint> d = ReadDefines("AvbdBroadphaseParams.hlsl");
+
+            Assert.AreEqual((uint)PairKind.DynamicDynamic, d["AVBD_PAIR_DYNAMIC_DYNAMIC"]);
+            Assert.AreEqual((uint)PairKind.DynamicStatic, d["AVBD_PAIR_DYNAMIC_STATIC"]);
+            Assert.AreEqual((uint)AvbdBroadphase.MaxRadiusWord, d["AVBD_BP_MAX_RADIUS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.StaticCountWord, d["AVBD_BP_STATIC_COUNT"]);
+            Assert.AreEqual((uint)AvbdBroadphase.DynamicPairsWord, d["AVBD_BP_DYNAMIC_PAIRS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.StaticPairsWord, d["AVBD_BP_STATIC_PAIRS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.ControlWords, d["AVBD_BP_CONTROL_WORDS"]);
+            StringAssert.Contains("AVBD_BP_CELL_MARGIN " + AvbdBroadphase.CellMargin.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture),
+                ReadInclude("AvbdBroadphaseParams.hlsl"));
+
+            Assert.AreEqual(AvbdBroadphase.PairStride, UnsafeUtility.SizeOf<PairRecord>());
+            AssertStructMatches(ReadInclude("AvbdBroadphaseParams.hlsl"), "PairRecord", typeof(PairRecord));
+        }
+
         static void AssertStructMatches(string hlslSource, string hlslName, Type csharpType)
         {
             Match match = Regex.Match(hlslSource, @"struct\s+" + hlslName + @"\s*\{([^}]*)\}");

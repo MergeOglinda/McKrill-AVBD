@@ -16,6 +16,7 @@ namespace McKrill.Avbd
         readonly AvbdShaderSet shaders;
         AvbdConstraintBuffers constraints;
         bool ownsConstraints;
+        AvbdBroadphase broadphase;
         readonly int predictKernel;
         readonly int primalKernel;
         readonly int initKernel;
@@ -87,7 +88,7 @@ namespace McKrill.Avbd
         /// warm start (D), per iteration a primal sweep (V) and the dual update (D), and finally the velocity update (U).
         /// The constraint lists are built on the CPU and the graph is colored on the GPU (stage C). With contacts, the narrow phase (N) runs after
         /// predict, and the contact counts are read back to rebuild the lists and the coloring every step (a stall, until stage G runs on the
-        /// GPU). Stages S, B, G, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
+        /// GPU). Stage B (the broadphase) only runs when enabled and its pairs are not used yet (the narrow phase tests all pairs). Stages S, G, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
         /// Must be called from the main thread. The previous step's results are the next step's input, so call it once per time step.
         /// </summary>
         public void Step()
@@ -100,6 +101,9 @@ namespace McKrill.Avbd
             }
             if (constraints.NeedsRebuild)
                 constraints.Rebuild();
+
+            // Stage B, on the poses of the end of the previous step, like the reference solver's broadphase.
+            broadphase?.Run(bodies, constraints);
 
             DispatchPredict();
             if (constraints.HasContacts)
@@ -118,9 +122,38 @@ namespace McKrill.Avbd
             DispatchVelocity();
         }
 
-        /// <summary>Releases the constraint buffers the solver created for itself, if any. Safe to call more than once.</summary>
+        /// <summary>True if <see cref="Step"/> runs the broadphase (stage B).</summary>
+        public bool BroadphaseEnabled => broadphase != null;
+
+        /// <summary>
+        /// Makes <see cref="Step"/> run the broadphase (stage B) on the poses of the end of the previous step. The pairs stay in a GPU
+        /// buffer. The narrowphase tests all pairs by itself and does not read them yet, so nothing changes in the simulation. Calling it again replaces the
+        /// broadphase (and its pair capacities). Needs the body buffers' capacity to stay as it is, which it does.
+        /// </summary>
+        /// <param name="dynamicPairCapacity">Pairs of two solved bodies that can be stored; more are counted and dropped.</param>
+        /// <param name="staticPairCapacity">Pairs of a solved body and a static or kinematic one that can be stored.</param>
+        public void EnableBroadphase(int dynamicPairCapacity, int staticPairCapacity = 1024)
+        {
+            if (shaders.Broadphase == null)
+                throw new System.InvalidOperationException("The AvbdShaderSet has no broadphase shader.");
+            broadphase?.Dispose();
+            broadphase = new AvbdBroadphase(shaders.Broadphase, bodies.Capacity, dynamicPairCapacity, staticPairCapacity);
+        }
+
+        /// <summary>Stops running the broadphase and releases its buffers.</summary>
+        public void DisableBroadphase()
+        {
+            broadphase?.Dispose();
+            broadphase = null;
+        }
+
+        /// <summary>The broadphase, or null if <see cref="EnableBroadphase"/> has not been called.</summary>
+        internal AvbdBroadphase Broadphase => broadphase;
+
+        /// <summary>Releases the constraint buffers the solver created for itself, if any, and the broadphase. Safe to call more than once.</summary>
         public void Dispose()
         {
+            DisableBroadphase();
             if (ownsConstraints)
                 constraints.Dispose();
             constraints = null;
