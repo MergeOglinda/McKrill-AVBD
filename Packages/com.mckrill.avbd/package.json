@@ -36,7 +36,7 @@
     },
     {
       "displayName": "GPU Fracture Wall Demo",
-      "description": "A brick wall of 200 or more blocks held together by joints that fracture, on the GPU solver. Shoot boxes at it and set the joints' stiffness, the fracture threshold and the blocks' density in the panel.",
+      "description": "A brick wall of 225 or more blocks, on an immobile bottom row, held together by joints that fracture, on the GPU solver. Shoot boxes at it and set the joints' stiffness, the fracture threshold and the blocks' density in the panel.",
       "path": "Samples~/FractureWallDemo"
     }
   ]

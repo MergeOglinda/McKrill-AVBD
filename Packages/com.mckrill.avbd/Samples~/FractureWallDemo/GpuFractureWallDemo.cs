@@ -6,7 +6,7 @@ using UnityEngine;
 namespace McKrill.Avbd.Samples
 {
     /// <summary>
-    /// A brick wall of at least 200 blocks on the GPU solver, held together by joints that fracture, and a camera you can shoot boxes from.
+    /// A brick wall of 225 or more blocks (15 x 15 by default) with an immobile bottom row, on the GPU solver, held together by joints that fracture, and a camera you can shoot boxes from.
     ///
     /// Every block is joined to its neighbors (the one beside it and the two under it in a running bond) by a ball-socket joint at the
     /// middle of the shared face, with a hard angle lock. A joint breaks when its angular multiplier exceeds the fracture threshold
@@ -45,10 +45,10 @@ namespace McKrill.Avbd.Samples
         }
 
         [Header("Wall (applied on Reset)")]
-        [Tooltip("Blocks per row. 20 columns and 10 rows are 200 blocks.")]
-        [SerializeField, Range(MinColumns, MaxColumns)] int columns = 20;
-        [Tooltip("Rows of blocks.")]
-        [SerializeField, Range(MinRows, MaxRows)] int rows = 10;
+        [Tooltip("Blocks per row. 15 columns and 15 rows are 225 blocks.")]
+        [SerializeField, Range(MinColumns, MaxColumns)] int columns = 15;
+        [Tooltip("Rows of blocks. The bottom row is immobile.")]
+        [SerializeField, Range(MinRows, MaxRows)] int rows = 15;
         [SerializeField] Vector3 blockSize = new Vector3(1f, 0.5f, 0.5f);
         [SerializeField, Min(0.01f)] float blockDensity = 1f;
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
@@ -80,11 +80,11 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(0.01f)] float lookSensitivity = 0.2f;
 
         // Contacts are tested for every pair of bodies and the package supports 512 bodies with contacts (AvbdConstraintBuffers.MaxContactBodies).
-        // The largest wall is 26 x 14 = 364 blocks; with the ground and 100 shots that fits.
-        const int MinColumns = 20;
-        const int MaxColumns = 26;
-        const int MinRows = 10;
-        const int MaxRows = 14;
+        // The largest wall is 22 x 18 = 396 blocks; with the ground and 100 shots that fits. The smallest, 15 x 15, is 225 blocks.
+        const int MinColumns = 15;
+        const int MaxColumns = 22;
+        const int MinRows = 15;
+        const int MaxRows = 18;
         const float GroundHalfExtent = 100f;
         const float BlockGap = 0.01f; // between neighbors; the wall starts almost at rest
 
@@ -286,22 +286,23 @@ namespace McKrill.Avbd.Samples
                 for (int c = 0; c < columns; c++)
                 {
                     var position = new float3((c + 0.5f * (r & 1) - centerColumn) * stepX, y, 0f);
-                    handles[r, c] = bodies.Spawn(BodyDescriptor.Box(size, blockDensity, position));
+                    // The bottom row is immobile: a body without mass is static.
+                    handles[r, c] = bodies.Spawn(BodyDescriptor.Box(size, r == 0 ? 0f : blockDensity, position));
                     positions[r, c] = position;
                     AddStaticVisual(handles[r, c], size, color);
                 }
             }
 
-            // Joints. A block is joined to the block on its left, and to the two blocks under it: with a shift of half a block, those are
+            // Joints. The bottom row is not joined to itself, only to the row above it. A block is joined to the block on its left, and to the two blocks under it: with a shift of half a block, those are
             // (c, c + 1) in an odd row and (c - 1, c) in an even one.
             jointCount = 0;
             for (int r = 0; r < rows; r++)
                 for (int c = 0; c < columns; c++)
                 {
+                    if (r == 0)
+                        continue; // the bottom row is static: its blocks need no joints to each other
                     if (c > 0)
                         Join(handles[r, c], positions[r, c], handles[r, c - 1], positions[r, c - 1]);
-                    if (r == 0)
-                        continue;
                     int firstBelow = (r & 1) == 1 ? c : c - 1;
                     for (int k = 0; k < 2; k++)
                     {
