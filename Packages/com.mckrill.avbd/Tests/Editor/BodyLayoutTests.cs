@@ -237,6 +237,16 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void Hlsl_ManifoldPoolConstantsMatchTheCSharpMirrors()
+        {
+            Dictionary<string, uint> d = ReadDefines("AvbdContacts.hlsl");
+
+            Assert.AreEqual((uint)ContactLayout.PoolFreeTopWord, d["AVBD_NP_FREE_TOP"]);
+            Assert.AreEqual((uint)ContactLayout.PoolOverflowWord, d["AVBD_NP_OVERFLOW"]);
+            Assert.AreEqual((uint)ContactLayout.PoolControlWords, d["AVBD_NP_CONTROL_WORDS"]);
+        }
+
+        [Test]
         public void ContactPairIndex_RoundTripsAndIsDense()
         {
             long expected = 0;

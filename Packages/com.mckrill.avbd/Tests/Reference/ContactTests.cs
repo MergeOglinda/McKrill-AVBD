@@ -21,6 +21,7 @@ namespace McKrill.Avbd.Tests
     public class ContactTests
     {
         const int Capacity = 64;
+        const int ContactSlots = 256; // manifold slots of the GPU scenes: far more than their pairs need
         const float NarrowphaseTolerance = 1e-4f;
 
         // ---- the topology with contacts ----------------------------------------------------------------------------
@@ -188,7 +189,7 @@ namespace McKrill.Avbd.Tests
             CpuContacts contacts = Oracle(arrays, out ConstraintRecord[] oracleRecords);
 
             using (var buffers = new AvbdBodyBuffers(Capacity))
-            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, arrays.bodyCount))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, ContactSlots))
             {
                 foreach (BodyDescriptor d in arrays.descriptors)
                     buffers.Spawn(d);
@@ -200,6 +201,7 @@ namespace McKrill.Avbd.Tests
                 // Nothing solves in between, so the bodies only move along their velocities.
                 for (int round = 0; round < 3; round++)
                 {
+                    gpu.DispatchBroadphase();
                     gpu.DispatchPredict();
                     constraints.PrepareContacts();
                     gpu.DispatchNarrowphase();
@@ -207,21 +209,34 @@ namespace McKrill.Avbd.Tests
                     CpuPredict.Run(arrays.bodies, settings, arrays.bodyCount);
                     contacts.Narrowphase(arrays.bodies, oracleRecords, settings, arrays.bodyCount);
 
-                    var counts = new uint[constraints.PairCounts.Length];
-                    constraints.PairCountsBuffer.GetData(counts);
+                    ContactSnapshot snapshot = constraints.ReadContacts();
                     var records = new ConstraintRecord[constraints.Records.count];
                     constraints.Records.GetData(records);
 
-                    int pairs = (int)ContactLayout.PairCount(arrays.bodyCount);
-                    for (int pair = 0; pair < pairs; pair++)
-                    {
-                        string what = scene + " round " + round + " pair " + pair;
-                        Assert.AreEqual(contacts.PairCounts[pair], counts[pair], what + " contact count");
-                        for (int k = 0; k < (int)counts[pair]; k++)
-                            AssertRecordNear(
-                                oracleRecords[contacts.ContactBase + pair * ContactLayout.MaxContactsPerPair + k],
-                                records[constraints.ContactBase + pair * ContactLayout.MaxContactsPerPair + k], NarrowphaseTolerance, what + " contact " + k);
-                    }
+                    // Same manifolds, in whatever slots the pool gave them.
+                    Assert.AreEqual(0, snapshot.DuplicatePairs, scene + " round " + round + ": a pair holds two slots");
+                    Assert.AreEqual(0, snapshot.Overflow, scene + " round " + round + ": the pool ran out of slots");
+                    Assert.AreEqual(snapshot.SlotsWithContacts, snapshot.UsedSlots, scene + " round " + round + ": a slot without contacts must be free");
+                    Assert.AreEqual(ContactSlots, snapshot.FreeSlots + snapshot.UsedSlots, scene + " round " + round + ": free + used slots");
+
+                    int oraclePairs = 0;
+                    for (int a = 1; a < arrays.bodyCount; a++)
+                        for (int b = 0; b < a; b++)
+                        {
+                            int pair = (int)ContactLayout.PairIndex(a, b);
+                            string what = scene + " round " + round + " pair (" + a + ", " + b + ")";
+                            Assert.AreEqual(contacts.PairCounts[pair], snapshot.CountOf(a, b), what + " contact count");
+                            if (contacts.PairCounts[pair] == 0u)
+                                continue;
+
+                            oraclePairs++;
+                            int slot = snapshot.SlotOf(a, b);
+                            for (int k = 0; k < (int)contacts.PairCounts[pair]; k++)
+                                AssertRecordNear(
+                                    oracleRecords[contacts.ContactBase + pair * ContactLayout.MaxContactsPerPair + k],
+                                    records[constraints.ContactBase + slot * ContactLayout.MaxContactsPerPair + k], NarrowphaseTolerance, what + " contact " + k);
+                        }
+                    Assert.AreEqual(oraclePairs, snapshot.SlotsWithContacts, scene + " round " + round + ": the GPU has manifolds the oracle does not");
                 }
             }
         }
@@ -235,7 +250,7 @@ namespace McKrill.Avbd.Tests
             SceneArrays arrays = ConstraintTestScenes.FromReference(reference, Capacity);
 
             using (var buffers = new AvbdBodyBuffers(Capacity))
-            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, arrays.bodyCount))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, ContactSlots))
             {
                 foreach (BodyDescriptor d in arrays.descriptors)
                     buffers.Spawn(d);
@@ -248,8 +263,7 @@ namespace McKrill.Avbd.Tests
                 {
                     reference.Step();
                     solver.Step();
-                    foreach (uint n in constraints.PairCounts)
-                        sawContacts |= n > 0u;
+                    sawContacts |= constraints.ReadContacts().SlotsWithContacts > 0;
 
                     if (Array.IndexOf(Checkpoints(scene), step) < 0)
                         continue;
@@ -279,7 +293,7 @@ namespace McKrill.Avbd.Tests
             settings.gravity = float3.zero;
 
             using (var buffers = new AvbdBodyBuffers(Capacity))
-            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, 4))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, ContactSlots))
             {
                 // Two overlapping boxes, and a third one overlapping the second.
                 BodyHandle a = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 0f, 0f)));
@@ -290,8 +304,9 @@ namespace McKrill.Avbd.Tests
 
                 solver.Step();
 
-                Assert.AreEqual(0u, constraints.PairCounts[ContactLayout.PairIndex(a.Slot, b.Slot)], "joined bodies make no manifold");
-                Assert.Greater(constraints.PairCounts[ContactLayout.PairIndex(b.Slot, c.Slot)], 0u, "bodies that are not joined do");
+                ContactSnapshot snapshot = constraints.ReadContacts();
+                Assert.AreEqual(0u, snapshot.CountOf(a.Slot, b.Slot), "joined bodies make no manifold");
+                Assert.Greater(snapshot.CountOf(b.Slot, c.Slot), 0u, "bodies that are not joined do");
                 Assert.AreEqual(0, constraints.ReadSolveFailures());
             }
         }
@@ -304,17 +319,17 @@ namespace McKrill.Avbd.Tests
             settings.gravity = float3.zero;
 
             using (var buffers = new AvbdBodyBuffers(Capacity))
-            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, 4))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, ContactSlots))
             {
                 BodyHandle ground = buffers.Spawn(BodyDescriptor.Box(new float3(10f, 10f, 1f), 0f, new float3(0f, 0f, 0f)));
                 BodyHandle box = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 0f, 0.9f)));
                 buffers.ApplyEdits();
                 var solver = new AvbdSolver(buffers, settings, null, constraints);
                 constraints.Rebuild();
-                int first = constraints.ContactBase + (int)ContactLayout.PairIndex(box.Slot, ground.Slot) * ContactLayout.MaxContactsPerPair;
 
                 // Round 1: a new contact starts at the minimum penalty.
                 NarrowphaseRound(buffers, constraints, solver);
+                int first = FirstContactRecord(constraints, box, ground);
                 Assert.AreEqual(settings.penaltyMin, ReadRecord(constraints, first).penaltyLin.x, 1e-6f, "a new contact starts at the minimum penalty");
 
                 // Pretend the solver grew the penalty. Round 2 keeps the contact and decays the penalty by gamma.
@@ -322,6 +337,7 @@ namespace McKrill.Avbd.Tests
                 grown.penaltyLin = new float4(500f, 500f, 500f, 0f);
                 constraints.Records.SetData(new[] { grown }, 0, first, 1);
                 NarrowphaseRound(buffers, constraints, solver);
+                Assert.AreEqual(first, FirstContactRecord(constraints, box, ground), "a pair that keeps touching keeps its slot");
                 float kept = ReadRecord(constraints, first).penaltyLin.x;
                 Assert.Greater(kept, 100f, "the contact of a live pair keeps its penalty");
 
@@ -333,6 +349,7 @@ namespace McKrill.Avbd.Tests
                 if (constraints.NeedsRebuild)
                     constraints.Rebuild();
                 NarrowphaseRound(buffers, constraints, solver);
+                first = FirstContactRecord(constraints, replacement, ground);
                 Assert.AreEqual(settings.penaltyMin, ReadRecord(constraints, first).penaltyLin.x, 1e-6f, "the new body does not inherit the penalty of the old one");
             }
         }
@@ -340,9 +357,18 @@ namespace McKrill.Avbd.Tests
         // What the step does up to the end of the narrow phase.
         static void NarrowphaseRound(AvbdBodyBuffers buffers, AvbdConstraintBuffers constraints, AvbdSolver solver)
         {
+            solver.DispatchBroadphase();
             solver.DispatchPredict();
             constraints.PrepareContacts();
             solver.DispatchNarrowphase();
+        }
+
+        // Index of the first contact record of the pair of two bodies: where the pool put its manifold.
+        static int FirstContactRecord(AvbdConstraintBuffers constraints, BodyHandle a, BodyHandle b)
+        {
+            int slot = constraints.ReadContacts().SlotOf(a.Slot, b.Slot);
+            Assert.GreaterOrEqual(slot, 0, "the pair has no manifold");
+            return constraints.ContactBase + slot * ContactLayout.MaxContactsPerPair;
         }
 
         static ConstraintRecord ReadRecord(AvbdConstraintBuffers constraints, int index)
@@ -353,13 +379,13 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
-        public void Gpu_Constraints_RejectTooManyContactBodies()
+        public void Gpu_Constraints_RejectABadContactCapacity()
         {
             RequireCompute();
             using (var buffers = new AvbdBodyBuffers(Capacity))
             {
-                Assert.Throws<ArgumentOutOfRangeException>(() => new AvbdConstraintBuffers(buffers, 4, null, 1));
-                Assert.Throws<ArgumentOutOfRangeException>(() => new AvbdConstraintBuffers(buffers, 4, null, AvbdConstraintBuffers.MaxContactBodies + 1));
+                Assert.Throws<ArgumentOutOfRangeException>(() => new AvbdConstraintBuffers(buffers, 4, null, -1));
+                Assert.Throws<ArgumentOutOfRangeException>(() => new AvbdConstraintBuffers(buffers, 4, null, AvbdConstraintBuffers.MaxContactManifolds + 1));
             }
         }
 

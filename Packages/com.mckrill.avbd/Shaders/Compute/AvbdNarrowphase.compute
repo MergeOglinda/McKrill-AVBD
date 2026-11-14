@@ -1,19 +1,33 @@
-// Stage N: narrow phase without a broadphase. One thread per pair of body slots (a > b): it collides the two boxes at their
-// start-of-step poses, merges the result with the pair's manifold of the last step, and writes the manifold's contacts and their
-// warm start (the reference solver's Manifold.Initialize). Run after stage P, which keeps the start-of-step pose of every body.
+// Stage N: narrow phase over the pairs of the broadphase (stage B). Manifolds live in a pool of slots: a slot holds the pair of bodies
+// (_SlotBodies, x = body A = the higher slot, y = body B, both AVBD_INVALID for a free slot), the pair's contact count (_PairCounts)
+// and room for AVBD_MAX_CONTACTS contact records at _ContactBase + slot * AVBD_MAX_CONTACTS. A pair keeps its slot for as long as it has
+// contacts, which is how the warm start finds the previous contacts. Free slots are on a stack (_FreeList, top = _NpControl[FREE_TOP]).
 //
-// Which pairs collide follows the reference solver's broadphase: a pair needs at least one solved body, and a pair that has no
-// manifold yet needs overlapping bounding spheres and no joint or spring between the bodies (_PairExcluded). A manifold that exists
-// stays while the boxes still touch. The pair's contact count is the only output besides the records, and is what the CPU reads back to
-// build the constraint lists.
+// Run after stage P (which keeps the start-of-step pose of every body) and after the broadphase, in this order:
+//   NpClearTable   empties the hash table that maps a pair to its slot (_PairTable, open addressing, size a power of two)
+//   NpRetire       one thread per slot: a slot whose body was spawned or removed since the last step (_DirtySlots) is freed, so a recycled
+//                  slot does not inherit the manifolds of the body that had it; every other used slot enters the hash table
+//   NpAllocate     one thread per candidate pair of the broadphase: a pair that has no slot yet and whose boxes collide takes one from the free
+//                  stack. The pairs of the broadphase are unique, so a new slot needs no entry in the table. With no free slot the pair is
+//                  dropped (counted in _NpControl[OVERFLOW]) and tried again next step
+//   Narrowphase    one thread per slot: collides the two boxes at their start-of-step poses, merges the result with the slot's manifold of the
+//                  last step, writes the contacts and their warm start (the reference solver's Manifold.Initialize). A slot without contacts
+//                  is freed
 //
-// A thread reads and writes only its own pair, so there is no ordering or atomics. Mirrored by Reference/Stages/CpuNarrowphase.cs.
+// Which pairs may get a manifold is the broadphase's decision (at least one solved body, overlapping bounding spheres, no joint or spring
+// between the bodies). A manifold that exists is tested every step, whether the broadphase lists its pair or not, like the reference solver.
+// A thread of the last kernel reads and writes only its own slot, so there is no ordering. Mirrored by Reference/Stages/CpuContacts.cs,
+// which tests every pair of bodies instead and must give the same manifolds.
 
+#pragma kernel NpClearTable
+#pragma kernel NpRetire
+#pragma kernel NpAllocate
 #pragma kernel Narrowphase
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBroadphaseParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactWarmStart.hlsl"
 
 StructuredBuffer<BodyStateRecord>    _BodyState;
@@ -21,13 +35,22 @@ StructuredBuffer<BodyMassRecord>     _BodyMass;
 StructuredBuffer<BodyShapeRecord>    _BodyShape;
 StructuredBuffer<BodyMetaRecord>     _BodyMeta;
 RWStructuredBuffer<ConstraintRecord> _Constraints;
-RWStructuredBuffer<uint>             _PairCounts;   // contacts per pair after this stage
-StructuredBuffer<uint>               _PairExcluded; // bit per pair: a joint or spring joins the bodies, no new manifold
+RWStructuredBuffer<uint>             _PairCounts;   // contacts per manifold slot after this stage
+RWStructuredBuffer<uint4>            _SlotBodies;   // per slot: x = body A, y = body B (AVBD_INVALID: free slot)
+RWStructuredBuffer<uint>             _PairTable;    // pair hash table: a slot index, or AVBD_INVALID
+RWStructuredBuffer<uint>             _FreeList;     // stack of free slots
+RWStructuredBuffer<uint>             _NpControl;    // AVBD_NP_*
 StructuredBuffer<uint>               _DirtySlots;   // bit per body slot: the slot was spawned or removed since the last step
+StructuredBuffer<PairRecord>         _Pairs;        // candidate pairs of the broadphase: dynamic-dynamic bin, then dynamic-static bin
+StructuredBuffer<uint>               _BpControl;    // counters of the broadphase (AVBD_BP_*)
 
-uint _Base;        // first pair to process
-uint _Count;       // end of the range: pairs [_Base, _Count)
-uint _ContactBase; // index of the first contact record in _Constraints
+uint _Base;                // first item to process
+uint _Count;               // end of the range: items [_Base, _Count)
+uint _ContactBase;         // index of the first contact record in _Constraints
+uint _SlotCapacity;        // manifold slots
+uint _TableMask;           // size of _PairTable (a power of two) minus one
+uint _DynamicPairCapacity; // capacity of the broadphase's bins, to find the pairs in _Pairs
+uint _StaticPairCapacity;
 
 // Bit `index` of a bit set stored in 32-bit words, given the word that holds it (bits[index >> 5]).
 bool BitIsSet(uint word, uint index)
@@ -41,20 +64,138 @@ bool IsSolved(uint meta, float mass)
     return (meta & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) == 0u && mass > 0.0;
 }
 
+uint HashPair(uint a, uint b)
+{
+    uint h = (a * 0x9E3779B1u) ^ ((b + 0x7F4A7C15u) * 0x85EBCA6Bu);
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    return h & _TableMask;
+}
+
+// Gives a slot back: no pair, no contacts, and it goes on the free stack. Only the kernels of this file push, and never while NpAllocate pops.
+void FreeSlot(uint slot)
+{
+    _SlotBodies[slot] = uint4(AVBD_INVALID, AVBD_INVALID, 0u, 0u);
+    _PairCounts[slot] = 0u;
+    uint top;
+    InterlockedAdd(_NpControl[AVBD_NP_FREE_TOP], 1u, top);
+    _FreeList[top] = slot;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void NpClearTable(uint3 id : SV_DispatchThreadID)
+{
+    uint entry = _Base + id.x;
+    if (entry >= _Count)
+        return;
+    _PairTable[entry] = AVBD_INVALID;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void NpRetire(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    uint4 pair = _SlotBodies[slot];
+    if (pair.x == AVBD_INVALID)
+        return;
+
+    if (BitIsSet(_DirtySlots[pair.x >> 5], pair.x) || BitIsSet(_DirtySlots[pair.y >> 5], pair.y))
+    {
+        FreeSlot(slot);
+        return;
+    }
+
+    // Enter the table. Every used slot holds a different pair, and the table has room for twice the slots, so this ends.
+    uint entry = HashPair(pair.x, pair.y);
+    for (uint probe = 0u; probe <= _TableMask; probe++)
+    {
+        uint previous;
+        InterlockedCompareExchange(_PairTable[entry], AVBD_INVALID, slot, previous);
+        if (previous == AVBD_INVALID)
+            break;
+        entry = (entry + 1u) & _TableMask;
+    }
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void NpAllocate(uint3 id : SV_DispatchThreadID)
+{
+    uint index = _Base + id.x; // index in _Pairs
+    if (index >= _Count)
+        return;
+
+    // Only the pairs the broadphase stored: its counters can be above its capacity.
+    if (index < _DynamicPairCapacity)
+    {
+        if (index >= _BpControl[AVBD_BP_DYNAMIC_PAIRS])
+            return;
+    }
+    else if (index - _DynamicPairCapacity >= _BpControl[AVBD_BP_STATIC_PAIRS])
+        return;
+
+    uint2 bodies = _Pairs[index].pair.xy;
+
+    // Does the pair have a slot already?
+    uint entry = HashPair(bodies.x, bodies.y);
+    for (uint probe = 0u; probe <= _TableMask; probe++)
+    {
+        uint slot = _PairTable[entry];
+        if (slot == AVBD_INVALID)
+            break;
+        uint4 held = _SlotBodies[slot];
+        if (held.x == bodies.x && held.y == bodies.y)
+            return;
+        entry = (entry + 1u) & _TableMask;
+    }
+
+    // A candidate is a pair of overlapping bounding spheres, far more often than a pair of touching boxes: only a pair whose boxes collide takes a
+    // slot, or the slots would be spent on candidates that the next kernel frees again. (The collision is computed twice for a new pair, once
+    // here and once in Narrowphase; pairs that have a slot are only collided there.)
+    {
+        BodyStateRecord stateA = _BodyState[bodies.x];
+        BodyStateRecord stateB = _BodyState[bodies.y];
+        if (AvbdCollideBoxes(stateA.startPosition.xyz, stateA.startRotation, _BodyShape[bodies.x].sizeFriction.xyz,
+                             stateB.startPosition.xyz, stateB.startRotation, _BodyShape[bodies.y].sizeFriction.xyz) == 0)
+            return;
+    }
+
+    // Pop a free slot. An empty stack wraps the counter below zero: the thread that sees that puts it back, and so does every thread
+    // that popped after it, so the counter is zero again when they are all done.
+    uint top;
+    InterlockedAdd(_NpControl[AVBD_NP_FREE_TOP], 0xFFFFFFFFu, top);
+    if (top == 0u || top > _SlotCapacity)
+    {
+        uint ignored;
+        InterlockedAdd(_NpControl[AVBD_NP_FREE_TOP], 1u, ignored);
+        InterlockedAdd(_NpControl[AVBD_NP_OVERFLOW], 1u, ignored);
+        return;
+    }
+
+    uint newSlot = _FreeList[top - 1u];
+    _SlotBodies[newSlot] = uint4(bodies.x, bodies.y, 0u, 0u);
+    _PairCounts[newSlot] = 0u;
+}
+
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void Narrowphase(uint3 id : SV_DispatchThreadID)
 {
-    uint pair = _Base + id.x;
-    if (pair >= _Count)
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
         return;
 
-    uint2 bodies = AvbdPairBodies(pair);
-    uint a = bodies.x; // the higher slot is body A, like the reference solver
-    uint b = bodies.y;
+    uint4 pair = _SlotBodies[slot];
+    if (pair.x == AVBD_INVALID)
+        return;
+    uint a = pair.x; // the higher slot is body A, like the reference solver
+    uint b = pair.y;
 
-    uint oldCount = _PairCounts[pair];
-    if (oldCount > AVBD_MAX_CONTACTS || BitIsSet(_DirtySlots[a >> 5], a) || BitIsSet(_DirtySlots[b >> 5], b))
-        oldCount = 0; // a recycled slot does not inherit the manifolds of the body that had it
+    uint oldCount = _PairCounts[slot];
+    if (oldCount > AVBD_MAX_CONTACTS)
+        oldCount = 0u;
 
     uint metaA = _BodyMeta[a].ident.x;
     uint metaB = _BodyMeta[b].ident.x;
@@ -64,7 +205,7 @@ void Narrowphase(uint3 id : SV_DispatchThreadID)
     // Free slots take no part. Two bodies that are not solved cannot move each other, so their contacts would change nothing.
     if ((metaA & AVBD_BODY_FLAG_FREE) || (metaB & AVBD_BODY_FLAG_FREE) || (!IsSolved(metaA, massA) && !IsSolved(metaB, massB)))
     {
-        _PairCounts[pair] = 0;
+        FreeSlot(slot);
         return;
     }
 
@@ -77,34 +218,15 @@ void Narrowphase(uint3 id : SV_DispatchThreadID)
     float4 rotA = stateA.startRotation;
     float4 rotB = stateB.startRotation;
 
-    // Creating a manifold needs overlapping bounding spheres and no joint or spring between the bodies. An existing one skips both,
-    // like the reference solver, where the manifold itself counts as a force between the bodies.
-    if (oldCount == 0)
-    {
-        if (BitIsSet(_PairExcluded[pair >> 5], pair))
-        {
-            _PairCounts[pair] = 0;
-            return;
-        }
-
-        float3 dp = posA - posB;
-        float r = length(shapeA.xyz * 0.5) + length(shapeB.xyz * 0.5);
-        if (!(dot(dp, dp) <= r * r))
-        {
-            _PairCounts[pair] = 0;
-            return;
-        }
-    }
-
     uint count = (uint)AvbdCollideBoxes(posA, rotA, shapeA.xyz, posB, rotB, shapeB.xyz);
     if (count == 0u)
     {
-        _PairCounts[pair] = 0; // the manifold is removed, and with it the multipliers and penalties
+        FreeSlot(slot); // the manifold is removed, and with it the multipliers and penalties
         return;
     }
 
     // The manifold of the last step.
-    uint firstRecord = _ContactBase + pair * AVBD_MAX_CONTACTS;
+    uint firstRecord = _ContactBase + slot * AVBD_MAX_CONTACTS;
     g_oldCount = (int)oldCount;
     for (uint k = 0; k < oldCount; k++)
     {
@@ -136,5 +258,5 @@ void Narrowphase(uint3 id : SV_DispatchThreadID)
         c.reserved = float4(0.0, 0.0, 0.0, 0.0);
         _Constraints[firstRecord + i] = c;
     }
-    _PairCounts[pair] = count;
+    _PairCounts[slot] = count;
 }

@@ -7,8 +7,8 @@ namespace McKrill.Avbd
     /// The solver does not own the body or constraint buffers; dispose them separately. Without constraint buffers it creates an
     /// empty set of its own at the first step (so that free bodies still get their primal solve), and <see cref="Dispose"/> releases that one.
     /// <see cref="Step"/> runs a whole step: edits, constraint rebuild, predict, the iterations and the velocity update.
-    /// Joints and springs come from an optional <see cref="AvbdConstraintBuffers"/>, which also owns the contact region if it was created with
-    /// contact bodies: then every step runs the narrow phase over all pairs of those bodies (no broadphase).
+    /// Joints and springs come from an optional <see cref="AvbdConstraintBuffers"/>, which also owns the manifold pool if it was created with
+    /// a contact capacity: then every step runs the broadphase (stage B) and the narrow phase (stage N) on the pairs it finds.
     /// </summary>
     public sealed class AvbdSolver : System.IDisposable
     {
@@ -23,6 +23,9 @@ namespace McKrill.Avbd
         readonly int dualKernel;
         readonly int velocityKernel;
         readonly int narrowphaseKernel = -1;
+        readonly int npClearKernel = -1;
+        readonly int npRetireKernel = -1;
+        readonly int npAllocateKernel = -1;
         readonly int dualContactKernel = -1;
         AvbdSolverSettings settings;
 
@@ -31,7 +34,16 @@ namespace McKrill.Avbd
         static readonly int ColorBodiesId = Shader.PropertyToID("_ColorBodies");
         static readonly int StatusId = Shader.PropertyToID("_Status");
         static readonly int PairCountsId = Shader.PropertyToID("_PairCounts");
-        static readonly int PairExcludedId = Shader.PropertyToID("_PairExcluded");
+        static readonly int SlotBodiesId = Shader.PropertyToID("_SlotBodies");
+        static readonly int PairTableId = Shader.PropertyToID("_PairTable");
+        static readonly int FreeListId = Shader.PropertyToID("_FreeList");
+        static readonly int NpControlId = Shader.PropertyToID("_NpControl");
+        static readonly int PairsId = Shader.PropertyToID("_Pairs");
+        static readonly int BpControlId = Shader.PropertyToID("_BpControl");
+        static readonly int SlotCapacityId = Shader.PropertyToID("_SlotCapacity");
+        static readonly int TableMaskId = Shader.PropertyToID("_TableMask");
+        static readonly int DynamicPairCapacityId = Shader.PropertyToID("_DynamicPairCapacity");
+        static readonly int StaticPairCapacityId = Shader.PropertyToID("_StaticPairCapacity");
         static readonly int DirtySlotsId = Shader.PropertyToID("_DirtySlots");
         static readonly int ContactBaseId = Shader.PropertyToID("_ContactBase");
 
@@ -67,9 +79,19 @@ namespace McKrill.Avbd
             // The contact kernels are only needed with contacts, but an asset that has the dual shader has the kernel.
             dualContactKernel = shaders.Dual.FindKernel("DualContact");
             if (shaders.Narrowphase != null)
+            {
+                npClearKernel = shaders.Narrowphase.FindKernel("NpClearTable");
+                npRetireKernel = shaders.Narrowphase.FindKernel("NpRetire");
+                npAllocateKernel = shaders.Narrowphase.FindKernel("NpAllocate");
                 narrowphaseKernel = shaders.Narrowphase.FindKernel("Narrowphase");
-            else if (constraints != null && constraints.HasContacts)
-                throw new System.InvalidOperationException("The AvbdShaderSet has no narrowphase shader.");
+            }
+            if (constraints != null && constraints.HasContacts)
+            {
+                if (shaders.Narrowphase == null)
+                    throw new System.InvalidOperationException("The AvbdShaderSet has no narrowphase shader.");
+                if (shaders.Broadphase == null)
+                    throw new System.InvalidOperationException("The AvbdShaderSet has no broadphase shader.");
+            }
         }
 
         /// <summary>Solver constants. Takes effect at the next step. Throws ArgumentException for out-of-range values.</summary>
@@ -84,11 +106,12 @@ namespace McKrill.Avbd
         }
 
         /// <summary>
-        /// Runs one whole step. Applies pending body edits (stage E) and constraint changes, then runs predict (P), the constraint
-        /// warm start (D), per iteration a primal sweep (V) and the dual update (D), and finally the velocity update (U).
-        /// The constraint lists are built on the CPU and the graph is colored on the GPU (stage C). With contacts, the narrow phase (N) runs after
-        /// predict, and the contact counts are read back to rebuild the lists and the coloring every step (a stall, until stage G runs on the
-        /// GPU). Stage B (the broadphase) only runs when enabled and its pairs are not used yet (the narrow phase tests all pairs). Stages S, G, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
+        /// Runs one whole step. Applies pending body edits (stage E) and constraint changes, then runs the broadphase (B) and predict (P), with
+        /// contacts the narrow phase (N), the constraint warm start (D), per iteration a primal sweep (V) and the dual update (D), and finally the
+        /// velocity update (U).
+        /// The constraint lists are built on the CPU and the graph is colored on the GPU (stage C). With contacts, the contact counts and pairs
+        /// are read back after the narrow phase to rebuild the lists and the coloring every step (a stall, until stage G runs on the GPU).
+        /// Stages S, G, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
         /// Must be called from the main thread. The previous step's results are the next step's input, so call it once per time step.
         /// </summary>
         public void Step()
@@ -103,7 +126,7 @@ namespace McKrill.Avbd
                 constraints.Rebuild();
 
             // Stage B, on the poses of the end of the previous step, like the reference solver's broadphase.
-            broadphase?.Run(bodies, constraints);
+            DispatchBroadphase();
 
             DispatchPredict();
             if (constraints.HasContacts)
@@ -126,9 +149,10 @@ namespace McKrill.Avbd
         public bool BroadphaseEnabled => broadphase != null;
 
         /// <summary>
-        /// Makes <see cref="Step"/> run the broadphase (stage B) on the poses of the end of the previous step. The pairs stay in a GPU
-        /// buffer. The narrowphase tests all pairs by itself and does not read them yet, so nothing changes in the simulation. Calling it again replaces the
-        /// broadphase (and its pair capacities). Needs the body buffers' capacity to stay as it is, which it does.
+        /// Makes <see cref="Step"/> run the broadphase (stage B) on the poses of the end of the previous step. The pairs stay in a GPU buffer.
+        /// With contacts the solver runs the broadphase anyway (the narrow phase reads its pairs), with capacities derived from the contact
+        /// capacity; this replaces it with one of the given capacities. Without contacts nothing reads the pairs, so this only costs time and is
+        /// for tools and tests. Calling it again replaces the broadphase.
         /// </summary>
         /// <param name="dynamicPairCapacity">Pairs of two solved bodies that can be stored; more are counted and dropped.</param>
         /// <param name="staticPairCapacity">Pairs of a solved body and a static or kinematic one that can be stored.</param>
@@ -140,20 +164,23 @@ namespace McKrill.Avbd
             broadphase = new AvbdBroadphase(shaders.Broadphase, bodies.Capacity, dynamicPairCapacity, staticPairCapacity);
         }
 
-        /// <summary>Stops running the broadphase and releases its buffers.</summary>
+        /// <summary>Stops running the broadphase and releases its buffers. Not possible with contacts: the narrow phase needs its pairs.</summary>
         public void DisableBroadphase()
         {
+            if (constraints != null && constraints.HasContacts)
+                throw new System.InvalidOperationException("The narrow phase reads the pairs of the broadphase; it cannot be disabled with contacts.");
             broadphase?.Dispose();
             broadphase = null;
         }
 
-        /// <summary>The broadphase, or null if <see cref="EnableBroadphase"/> has not been called.</summary>
+        /// <summary>The broadphase, or null if there are no contacts and <see cref="EnableBroadphase"/> has not been called.</summary>
         internal AvbdBroadphase Broadphase => broadphase;
 
         /// <summary>Releases the constraint buffers the solver created for itself, if any, and the broadphase. Safe to call more than once.</summary>
         public void Dispose()
         {
-            DisableBroadphase();
+            broadphase?.Dispose();
+            broadphase = null;
             if (ownsConstraints)
                 constraints.Dispose();
             constraints = null;
@@ -209,33 +236,58 @@ namespace McKrill.Avbd
             DispatchConstraintKernel(dualKernel);
         }
 
-        // Stage N over every pair of the used contact bodies, after stage P (it reads the start-of-step poses).
+        // Stage B: with contacts it is created at the first step, with capacities that go with the contact capacity. Runs on the poses of the end
+        // of the previous step, so call it before predict.
+        internal void DispatchBroadphase()
+        {
+            if (broadphase == null && constraints != null && constraints.HasContacts)
+                broadphase = new AvbdBroadphase(shaders.Broadphase, bodies.Capacity, constraints.CandidateCapacity, constraints.StaticCandidateCapacity);
+            broadphase?.Run(bodies, constraints);
+        }
+
+        // Stage N, after stage B and stage P (it reads the start-of-step poses): frees the slots of recycled bodies, lets the new pairs of the
+        // broadphase take slots, and collides every used slot.
         internal void DispatchNarrowphase()
         {
             if (constraints == null || !constraints.HasContacts)
                 return;
-            int pairs = constraints.ContactPairsInUse;
-            if (pairs == 0)
-                return;
+            if (broadphase == null)
+                throw new System.InvalidOperationException("The narrow phase needs the pairs of the broadphase: run DispatchBroadphase first.");
 
             ComputeShader shader = shaders.Narrowphase;
+            int slots = constraints.ContactCapacity;
+
+            foreach (int kernel in new[] { npClearKernel, npRetireKernel, npAllocateKernel, narrowphaseKernel })
+            {
+                bodies.BindTo(shader, kernel);
+                shader.SetBuffer(kernel, RecordsId, constraints.Records);
+                shader.SetBuffer(kernel, PairCountsId, constraints.PairCountsBuffer);
+                shader.SetBuffer(kernel, SlotBodiesId, constraints.SlotBodiesBuffer);
+                shader.SetBuffer(kernel, PairTableId, constraints.PairTableBuffer);
+                shader.SetBuffer(kernel, FreeListId, constraints.FreeListBuffer);
+                shader.SetBuffer(kernel, NpControlId, constraints.PoolControlBuffer);
+                shader.SetBuffer(kernel, DirtySlotsId, constraints.DirtySlotsBuffer);
+                shader.SetBuffer(kernel, PairsId, broadphase.Pairs);
+                shader.SetBuffer(kernel, BpControlId, broadphase.Control);
+            }
             SolverUniforms.Bind(shader, settings);
-            bodies.BindTo(shader, narrowphaseKernel);
-            shader.SetBuffer(narrowphaseKernel, RecordsId, constraints.Records);
-            shader.SetBuffer(narrowphaseKernel, PairCountsId, constraints.PairCountsBuffer);
-            shader.SetBuffer(narrowphaseKernel, PairExcludedId, constraints.PairExcludedBuffer);
-            shader.SetBuffer(narrowphaseKernel, DirtySlotsId, constraints.DirtySlotsBuffer);
             shader.SetInt(ContactBaseId, constraints.ContactBase);
-            AvbdDispatch.Linear(shader, narrowphaseKernel, pairs);
+            shader.SetInt(SlotCapacityId, slots);
+            shader.SetInt(TableMaskId, constraints.PairTableSize - 1);
+            shader.SetInt(DynamicPairCapacityId, broadphase.DynamicPairCapacity);
+            shader.SetInt(StaticPairCapacityId, broadphase.StaticPairCapacity);
+
+            AvbdDispatch.Linear(shader, npClearKernel, constraints.PairTableSize);
+            AvbdDispatch.Linear(shader, npRetireKernel, slots);
+            AvbdDispatch.Linear(shader, npAllocateKernel, broadphase.DynamicPairCapacity + broadphase.StaticPairCapacity);
+            AvbdDispatch.Linear(shader, narrowphaseKernel, slots);
         }
 
-        // Stage D for the contacts, after every primal sweep: one thread per contact record of the used pairs.
+        // Stage D for the contacts, after every primal sweep: one thread per contact record of the pool (the free slots and the records beyond a
+        // slot's count skip).
         internal void DispatchDualContacts()
         {
             if (constraints == null || !constraints.HasContacts)
-                return;
-            int pairs = constraints.ContactPairsInUse;
-            if (pairs == 0)
                 return;
 
             ComputeShader shader = shaders.Dual;
@@ -244,7 +296,7 @@ namespace McKrill.Avbd
             shader.SetBuffer(dualContactKernel, RecordsId, constraints.Records);
             shader.SetBuffer(dualContactKernel, PairCountsId, constraints.PairCountsBuffer);
             shader.SetInt(ContactBaseId, constraints.ContactBase);
-            AvbdDispatch.Range(shader, dualContactKernel, constraints.ContactBase, pairs * ContactLayout.MaxContactsPerPair);
+            AvbdDispatch.Range(shader, dualContactKernel, constraints.ContactBase, constraints.ContactCapacity * ContactLayout.MaxContactsPerPair);
         }
 
         // One thread per constraint. Constraints are independent, so there is no coloring and one dispatch covers them all.

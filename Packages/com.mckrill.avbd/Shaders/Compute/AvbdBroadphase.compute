@@ -11,7 +11,7 @@
 //   static-static pairs     are not generated.
 //
 // Pairs go into two bins of one buffer (pair kinds). Body A of a pair is the one with the higher slot, like the reference solver's pair
-// loop. Pairs joined by a joint or spring are left out, like AvbdBody.ConstrainedTo and the narrowphase's _PairExcluded.
+// loop. Pairs joined by a joint or spring are left out, like AvbdBody.ConstrainedTo.
 // The order of pairs inside a bin is unspecified and varies between runs (atomic append).
 //
 // Kernels, in the order the host runs them:
@@ -100,7 +100,7 @@ bool IsFinite3(float3 v)
 
 // True if a joint or a spring joins `solvedBody` and `other`. The list of a solved body holds every constraint on it, including the ones
 // to static bodies. Contacts (kind CONTACT, written by the narrowphase) are in the lists too and do not count: a pair with a contact is
-// exactly a pair that must stay a candidate. A fractured joint still counts, like in the narrowphase's exclusion (_PairExcluded).
+// exactly a pair that must stay a candidate. A fractured joint still counts, like AvbdBody.ConstrainedTo.
 bool Constrained(uint solvedBody, uint other)
 {
     uint2 range = _BodyRange[solvedBody].range.xy;

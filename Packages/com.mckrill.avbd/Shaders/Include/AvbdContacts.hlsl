@@ -5,16 +5,21 @@
 
 // Contact constants and the layout of the contact region. Mirrors ContactLayout in Runtime/Layout/ConstraintRecords.cs.
 //
-// Without a broadphase every pair of bodies is a candidate, so manifolds are stored by pair, densely: the pair of slots (a, b), a > b,
-// has index a (a - 1) / 2 + b, a contact count (_PairCounts) and room for AVBD_MAX_CONTACTS contact records at
-// _ContactBase + pair * AVBD_MAX_CONTACTS in the constraint array.
+// Manifolds live in a pool of slots (stage N): slot s has a contact count (_PairCounts[s]), the pair of bodies it belongs to
+// (_SlotBodies[s]) and room for AVBD_MAX_CONTACTS contact records at _ContactBase + s * AVBD_MAX_CONTACTS in the constraint array.
 
 #define AVBD_MAX_CONTACTS 8u
 
 #define AVBD_COLLISION_MARGIN  0.01
 #define AVBD_STICK_THRESHOLD   0.00001
 
-// Pair index of the slots (a, b) with a > b.
+// Words of the manifold pool's control buffer (_NpControl).
+#define AVBD_NP_FREE_TOP      0 // number of free slots: the top of the stack of free slots
+#define AVBD_NP_OVERFLOW      1 // candidate pairs dropped because no slot was free, since the buffer was made
+#define AVBD_NP_CONTROL_WORDS 2
+
+// Dense index of the pair of slots (a, b) with a > b. No stage uses it any more (it was the manifold slot of the narrow phase over all
+// pairs); the CPU oracle still stores its manifolds this way and the topology tests use it.
 uint AvbdPairIndex(uint a, uint b)
 {
     return (a * (a - 1u)) / 2u + b;

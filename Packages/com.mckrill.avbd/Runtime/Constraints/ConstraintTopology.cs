@@ -70,6 +70,32 @@ namespace McKrill.Avbd
 
             CollectContacts(pairCounts, contactBodies, contactBase, solved);
 
+            BuildFromCollected(records, recordCount, solved, bodyCount, buildColoring);
+        }
+
+        /// <summary>
+        /// Like <see cref="Build"/>, with the contacts of the manifold pool: slot s holds <paramref name="slotCounts"/>[s] contacts of the pair
+        /// (<paramref name="slotBodies"/>[s].x = body A, .y = body B; AVBD_INVALID = free slot), whose records are at
+        /// <paramref name="contactBase"/> + s * MaxContactsPerPair. The contacts are listed in pair order (body A, then body B, ascending), whatever
+        /// slots the pairs occupy, so the lists do not depend on the order in which the GPU handed out the slots.
+        /// </summary>
+        public void BuildWithManifolds(ConstraintRecord[] records, int recordCount, bool[] solved, int bodyCount, bool buildColoring,
+            uint[] slotCounts, uint4[] slotBodies, int slotCount, int contactBase)
+        {
+            if (records == null) throw new ArgumentNullException(nameof(records));
+            if (solved == null) throw new ArgumentNullException(nameof(solved));
+            if (slotCounts == null) throw new ArgumentNullException(nameof(slotCounts));
+            if (slotBodies == null) throw new ArgumentNullException(nameof(slotBodies));
+            if (recordCount < 0 || recordCount > records.Length) throw new ArgumentOutOfRangeException(nameof(recordCount));
+            if (bodyCount < 0 || bodyCount > solved.Length) throw new ArgumentOutOfRangeException(nameof(bodyCount));
+            if (slotCount < 0 || slotCount > slotCounts.Length || slotCount > slotBodies.Length) throw new ArgumentOutOfRangeException(nameof(slotCount));
+
+            CollectManifoldContacts(slotCounts, slotBodies, slotCount, contactBase, solved, bodyCount);
+            BuildFromCollected(records, recordCount, solved, bodyCount, buildColoring);
+        }
+
+        void BuildFromCollected(ConstraintRecord[] records, int recordCount, bool[] solved, int bodyCount, bool buildColoring)
+        {
             // 1. List sizes. Constraints on bodies that are not solved are left out: nothing reads them.
             var counts = new int[bodyCount];
             for (int i = 0; i < contactCount; i++)
@@ -175,6 +201,62 @@ namespace McKrill.Avbd
             for (int s = bodyCount - 1; s >= 0; s--)
                 if (ColorOfBody[s] >= 0)
                     ColorBodies[next[ColorOfBody[s]]++] = (uint)s;
+        }
+
+        // Lists the contacts of the used manifold slots, in pair order, as (body A, body B, constraint id). Slots of two bodies that are not solved are
+        // skipped (the narrow phase writes none).
+        void CollectManifoldContacts(uint[] slotCounts, uint4[] slotBodies, int slotCount, int contactBase, bool[] solved, int bodyCount)
+        {
+            contactCount = 0;
+
+            int used = 0;
+            for (int s = 0; s < slotCount; s++)
+                if (slotCounts[s] != 0u && slotBodies[s].x != AvbdConst.Invalid)
+                    used++;
+
+            var keys = new ulong[used];
+            var slots = new int[used];
+            int n = 0;
+            for (int s = 0; s < slotCount; s++)
+            {
+                if (slotCounts[s] == 0u || slotBodies[s].x == AvbdConst.Invalid)
+                    continue;
+                uint a = slotBodies[s].x;
+                uint b = slotBodies[s].y;
+                if (a >= (uint)bodyCount || b >= (uint)bodyCount)
+                    throw new InvalidOperationException("Manifold slot " + s + " refers to body slots " + a + " and " + b + ", and only " + bodyCount + " are in use.");
+                if (slotCounts[s] > ContactLayout.MaxContactsPerPair)
+                    throw new InvalidOperationException("Manifold slot " + s + " reports " + slotCounts[s] + " contacts; the most a manifold can have is " + ContactLayout.MaxContactsPerPair + ".");
+                keys[n] = ((ulong)a << 32) | b;
+                slots[n] = s;
+                n++;
+            }
+            Array.Sort(keys, slots);
+
+            for (int i = 0; i < n; i++)
+            {
+                int slot = slots[i];
+                uint a = slotBodies[slot].x;
+                uint b = slotBodies[slot].y;
+                if (!solved[a] && !solved[b])
+                    continue;
+
+                int count = (int)slotCounts[slot];
+                if (contactCount + count > contactA.Length)
+                {
+                    int size = Math.Max(64, Math.Max(contactA.Length * 2, contactCount + count));
+                    Array.Resize(ref contactA, size);
+                    Array.Resize(ref contactB, size);
+                    Array.Resize(ref contactId, size);
+                }
+                for (int k = 0; k < count; k++)
+                {
+                    contactA[contactCount] = a;
+                    contactB[contactCount] = b;
+                    contactId[contactCount] = (uint)(contactBase + slot * ContactLayout.MaxContactsPerPair + k);
+                    contactCount++;
+                }
+            }
         }
 
         // Lists the contacts of the pairs that have any, in pair order, as (body A, body B, constraint id). Pairs of two bodies that are not solved are

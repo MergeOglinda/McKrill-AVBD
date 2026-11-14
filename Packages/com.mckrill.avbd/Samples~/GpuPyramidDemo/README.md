@@ -3,9 +3,9 @@
 A pyramid of boxes on the GPU solver. Click to shoot a box from the camera into it.
 
 The demo uses only the package's public API: `AvbdBodyBuffers` holds the bodies, `AvbdConstraintBuffers` is created with room for contacts,
-and `AvbdSolver.Step()` advances them. It contains no collision code. The solver finds contacts by testing every pair of bodies (no broadphase yet),
-which is why the pyramid is limited to 10 layers: the package supports at most 512 bodies with contacts, and the ground, 385 blocks and up to 100 shots fit.
-Beyond that the number of shots that can be alive shrinks to fit.
+and `AvbdSolver.Step()` advances them. It contains no collision code. The solver finds the touching pairs with its broadphase and keeps a manifold slot for each, so the cost
+grows with the number of touching pairs, not with the square of the bodies. The pyramid is limited to 10 layers only because the constraint lists are still
+built on the CPU every step (stage G moves them to the GPU).
 
 ## Run it
 

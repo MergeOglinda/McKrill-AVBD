@@ -123,11 +123,14 @@ namespace McKrill.Avbd
     /// Layout of the contacts in the constraint array, and the constants of box-box collision (the reference solver's COLLISION_MARGIN and
     /// STICK_THRESH). Mirrors AvbdContacts.hlsl.
     ///
-    /// Without a broadphase every pair of bodies is a candidate, so manifolds are stored by pair, densely: the pair of slots (a, b) with
-    /// a &gt; b has index a (a - 1) / 2 + b, a count of contacts (<see cref="AvbdContactBuffers"/>) and room for <see cref="MaxContactsPerPair"/>
-    /// contact records starting at <c>contactBase + pairIndex * MaxContactsPerPair</c>, where contactBase is the capacity of the joint and
-    /// spring records in the same array. A pair keeps its slot from step to step, which is how the warm start finds the previous contacts
-    /// without a lookup. Memory grows with the square of the body count: this is the reason for a broadphase later.
+    /// Manifolds live in a pool of slots. Slot s has a contact count (<see cref="AvbdConstraintBuffers"/> reads it back), the pair of bodies it
+    /// belongs to (body A the higher slot) and room for <see cref="MaxContactsPerPair"/> contact records starting at
+    /// <c>contactBase + s * MaxContactsPerPair</c>, where contactBase is the capacity of the joint and spring records in the same array.
+    /// A pair keeps its slot while it has contacts, which is how the warm start finds the previous contacts; the narrow phase takes a free
+    /// slot for a new pair (from the pairs of the broadphase) and gives it back when the pair has no contacts.
+    ///
+    /// The dense pair index below is how the CPU oracle stores its manifolds (every pair of bodies has a fixed place) and the sort key of
+    /// the contact lists: the lists order the contacts by pair, like the reference solver's first step.
     /// </summary>
     internal static class ContactLayout
     {
@@ -139,6 +142,15 @@ namespace McKrill.Avbd
 
         /// <summary>A contact sticks if its tangential constraint value is below this after the dual update.</summary>
         public const float StickThreshold = 0.00001f;
+
+        /// <summary>Mirrors AVBD_NP_FREE_TOP: the free-slot count in the pool's control buffer.</summary>
+        public const int PoolFreeTopWord = 0;
+
+        /// <summary>Mirrors AVBD_NP_OVERFLOW: candidate pairs dropped because no slot was free.</summary>
+        public const int PoolOverflowWord = 1;
+
+        /// <summary>Mirrors AVBD_NP_CONTROL_WORDS.</summary>
+        public const int PoolControlWords = 2;
 
         /// <summary>Number of pairs of <paramref name="bodyCount"/> bodies.</summary>
         public static long PairCount(int bodyCount) => (long)bodyCount * (bodyCount - 1) / 2;
