@@ -246,7 +246,7 @@ namespace McKrill.Avbd.Tests
                 };
                 AssertSameSets(expected, got, "joined pairs are left out");
 
-                // A fractured joint still excludes its pair, like the narrowphase's _PairExcluded (nothing removes a broken joint yet).
+                // A fractured joint still excludes its pair, like AvbdBody.ConstrainedTo (nothing removes a broken joint yet).
                 var records = new ConstraintRecord[constraints.Records.count];
                 constraints.Records.GetData(records);
                 records[0].ident.z |= (uint)ConstraintFlags.Broken;
@@ -408,7 +408,7 @@ namespace McKrill.Avbd.Tests
             SceneArrays scene = ConstraintTestScenes.FromReference(reference, Capacity);
 
             using (var buffers = new AvbdBodyBuffers(Capacity))
-            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, scene.bodyCount))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, 512))
             using (var solver = new AvbdSolver(buffers, ZUpSettings(), null, constraints))
             {
                 Fill(buffers, constraints, scene);
@@ -419,19 +419,20 @@ namespace McKrill.Avbd.Tests
                 {
                     solver.Step();
                     SortedSet<ulong> candidates = ToSet(solver.Broadphase.ReadPairs());
-                    uint[] counts = constraints.PairCounts;
+                    ContactSnapshot snapshot = constraints.ReadContacts();
                     CpuBodyArrays held = ReadBodies(buffers);
-                    for (int pair = 0; pair < ContactLayout.PairCount(scene.bodyCount); pair++)
+                    for (int slot = 0; slot < snapshot.Counts.Length; slot++)
                     {
-                        if (counts[pair] == 0u)
+                        if (snapshot.Counts[slot] == 0u)
                             continue;
                         contactPairsSeen++;
-                        ContactLayout.BodiesOfPair(pair, out int hi, out int lo);
+                        int hi = (int)snapshot.Bodies[slot].x;
+                        int lo = (int)snapshot.Bodies[slot].y;
                         bool solvedHi = CpuBroadphase.Classify(held, hi) == CpuBroadphase.BodyClass.Solved;
                         PairKind kind = solvedHi && CpuBroadphase.Classify(held, lo) == CpuBroadphase.BodyClass.Solved
                             ? PairKind.DynamicDynamic : PairKind.DynamicStatic;
                         Assert.IsTrue(candidates.Contains(CpuBroadphase.Key((uint)hi, (uint)lo, kind)),
-                            "step " + step + ": the pair (" + hi + ", " + lo + ") has " + counts[pair] + " contacts but is not a broadphase pair");
+                            "step " + step + ": the pair (" + hi + ", " + lo + ") has " + snapshot.Counts[slot] + " contacts but is not a broadphase pair");
                     }
                 }
                 Assert.Greater(contactPairsSeen, 0, "the pyramid should have touched the ground within 40 steps");

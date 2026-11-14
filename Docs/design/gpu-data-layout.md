@@ -428,13 +428,13 @@ Two static or kinematic bodies never make a pair. A pair that does not fit its b
 | `BpPairsDynamic` | The 27-cell search; appends to bin 0 |
 | `BpPairsStatic` | Every solved body against the static list; appends to bin 1 |
 
-**Constraint exclusion.** A pair is skipped when a joint or a spring joins the two bodies. The test reads the constraint list (stage G) of the solved body of the pair, so it costs as many steps as that body has constraints. Pairs with a world pin are never excluded. This is the narrowphase's rule (`_PairExcluded`, section 13), and it is the same in every detail that matters: a fractured joint (`Broken`) still excludes its pair, because nothing removes it from the lists yet (the reference removes it one step later; both stages will lift the exclusion together once stage G can drop it). Contact records (kind `Contact`) are in the lists too, since the narrowphase writes them, and are **not** an exclusion: a pair with contacts has to stay a candidate for as long as the boxes touch, which is how the reference's persistent manifolds behave. `IgnoreCollision` has no GPU record, in neither stage.
+**Constraint exclusion.** A pair is skipped when a joint or a spring joins the two bodies. The test reads the constraint list (stage G) of the solved body of the pair, so it costs as many steps as that body has constraints. Pairs with a world pin are never excluded. This is the rule of the CPU oracle (`AvbdBody.ConstrainedTo`) and the only place the GPU applies it (the narrowphase of section 13 reads the list): a fractured joint (`Broken`) still excludes its pair, because nothing removes it from the lists yet (the reference removes it one step later; both stages will lift the exclusion together once stage G can drop it). Contact records (kind `Contact`) are in the lists too, since the narrowphase writes them, and are **not** an exclusion: a pair with contacts has to stay a candidate for as long as the boxes touch, which is how the reference's persistent manifolds behave. `IgnoreCollision` has no GPU record, in neither stage.
 
-**Relation to the narrowphase of section 13.** The all-pairs narrowphase (one thread per pair of slots, manifolds stored by dense pair index) already applies the candidate rule inline: at least one solved body, overlapping bounding spheres, not excluded; a manifold that exists is kept while the boxes still collide. Stage B computes the same rule as a list instead of a test per pair, with these consequences:
+**Relation to the narrowphase of section 13.** The narrowphase reads the pair list: its `NpAllocate` kernel gives a manifold slot to every pair of the list that has none and whose boxes collide. The candidate rule (at least one solved body, overlapping bounding spheres, no joint or spring between the bodies) therefore lives only here. A manifold that already exists is collided every step whether the list has its pair or not, like the reference. Consequences:
 
-- The candidate rule is identical, so replacing the narrowphase's per-pair test by the pair list changes nothing in the simulation. `Solver_Broadphase_CoversEveryPairThatHasContacts` checks the direction that matters now: every pair the narrowphase holds contacts for is in the pair list of the same step.
-- A pair with an existing manifold needs no special case in B. Touching boxes overlap their bounding spheres, and a contact does not exclude, so the pair is in the list.
-- What B does not do yet is replace the dense pair storage: manifolds are still stored at `ContactBase + pairIndex * 8` and found by the narrowphase without a lookup. The narrowphase reads no pair list, and `EnableBroadphase` only runs B next to it. Reading the pair list needs manifold storage that is not indexed by `(a, b)` (a slot per pair of the list, and a match of last step's pairs, probably by sorting or hashing the pair key). That is the next change to stage N and the reason B owns the pair record: nothing in B changes when it happens.
+- A pair with an existing manifold needs no special case in B: touching boxes overlap their bounding spheres, and a contact does not exclude, so the pair is in the list. `Solver_Broadphase_CoversEveryPairThatHasContacts` checks that every pair with contacts after a step was in that step's list.
+- A pair that is excluded after it got a manifold (a joint added later) keeps the manifold. A pair is created only from the list.
+- B must run before the narrowphase and after the constraint lists are rebuilt, and the solver does that: `AvbdSolver` creates the broadphase itself when the constraint buffers have contacts, with bins of 8 candidates per manifold slot and 1 static candidate per slot (plus 1024 each), and `DisableBroadphase` is then an error. `EnableBroadphase` replaces it with other capacities.
 
 **Order.** The pairs inside a bin are in the order the threads got their atomic counter: unspecified, different between runs. The pair list is a set; tests compare sets. Stage S (sorting bodies by Morton key) does not exist yet, so the stage does not use it; when it does, the sorted order will make the lists of nearby bodies near each other in memory, and the order of the pairs will still be unspecified unless the narrowphase needs it.
 
@@ -501,38 +501,49 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 
 None of the stage V, D, U or C code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.
 
-## 13. Contacts without a broadphase (stage N)
+## 13. Contacts (stage N)
 
-Box-box contacts, found like the reference solver finds them: every pair of bodies is tested, there is no spatial grid. The cost is O(N^2) in the number of bodies, so this is for small scenes (up to `AvbdConstraintBuffers.MaxContactBodies`, 512) and is the baseline a broadphase has to beat and to match.
+Box-box contacts for the pairs the broadphase (stage B) finds. The cost is proportional to the number of candidate pairs and touching pairs, not to the square of the number of bodies. Manifolds live in a pool of slots (below); the number of slots is a constructor argument (`contactCapacity`) and the only limit on how many bodies can collide is the memory of the contact records: 1.3 kB per slot.
+
+The first version of this stage tested every pair of bodies and stored each pair's manifold at a place fixed by its two slots. The CPU oracle (`CpuContacts`) still does that, and the GPU must produce the same manifolds: the oracle is the all-pairs semantics, and the pool is a storage change that must not change them.
 
 ### Reference semantics that are kept
 
 - Body A of a manifold is the higher slot and B the lower. A manifold lives while the collision test finds contacts and is forgotten (history included) the step it finds none.
 - Contacts are matched to the previous step's by feature key. A matched contact keeps its penalty, multiplier and stick state (penalty and multiplier decayed by `gamma`, `alpha * gamma`); if the old contact did not stick, the new `rA`, `rB` are taken. A new contact starts at the minimum penalty with a zero multiplier.
 - `C0 = Basis * (xA - xB) + (margin, 0, 0)` with margin 0.01. The normal points from B to A. Friction is `sqrt(fA * fB)`.
-- The reference's broadphase test (a sphere of radius `|size / 2|` per body) and `ConstrainedTo` (a joint or spring joins the pair) decide only whether a manifold is **created**. A pair that already has contacts is tested every step regardless.
+- The reference's broadphase test (a sphere of radius `|size / 2|` per body) and `ConstrainedTo` (a joint or spring joins the pair) decide only whether a manifold is **created**. A pair that already has contacts is tested every step regardless. On the GPU stage B makes that decision (see the stage B section) and stage N tests every slot that is in use, listed by the broadphase or not.
 
 ### Records
 
 A contact is a `ConstraintRecord` of kind `Contact` (2), so the primal kernel reads it like a joint. Mapping: A = higher slot, B = lower slot; anchor A = (rA, friction); anchor B = (rB, 0); `c0Lin` = C0; `c0Ang` = normal (B to A); `penaltyLin` and `lambdaLin` = the three rows (normal, tangent 1, tangent 2); `ident.w` = feature key; flag `Stick` (bit 4). The tangent basis is rebuilt from the normal in the kernels (`AvbdContactBasis`), as in the reference.
 
-### Dense pair storage
+### Manifold pool
 
-The pair of slots (hi, lo) has index `hi * (hi - 1) / 2 + lo` and owns eight contact records at `ContactBase + pair * 8 + k`, in the same record buffer, after the joint and spring capacity. Per pair there is a contact count (`_PairCounts`). A pair's contacts never move, so a thread owns its pair's old and new contacts and needs no atomics or compaction, and the order is fixed: pairs ascending, then k. Costs: 8 x 160 B per pair, 167 MB at 512 bodies; the cap is the limit of this layout, not of the idea.
+A manifold slot `s` owns eight contact records at `ContactBase + s * 8 + k`, in the same record buffer, after the joint and spring capacity. Per slot there is a contact count (`_PairCounts`) and the pair of bodies that holds it (`_SlotBodies`, `uint4`: x = body A, y = body B, both `AVBD_INVALID` for a free slot). A pair keeps its slot for as long as it has contacts, so the thread that owns a slot owns the old and the new contacts of its pair and needs no atomics for them. Free slots are on a stack (`_FreeList`, with the number of free slots in `_NpControl[AVBD_NP_FREE_TOP]`; the stack starts so that slot 0 is popped first).
 
-Three extra buffers: `_PairCounts` (`uint` per pair), `_PairExcluded` (a bit per pair: joined by a joint or spring, uploaded by `Rebuild()`), `_DirtySlots` (a bit per slot spawned or removed since the last narrow phase; such a slot ignores the old contacts of its pairs, so a recycled slot does not inherit the manifolds of the body that had it).
+Finding the manifold of a pair that the broadphase lists needs a map from the pair to its slot. It is a hash table rebuilt every step from the used slots (`_PairTable`, open addressing with linear probing, a power of two of at least twice the slots, entries are slot indices, key compared through `_SlotBodies`). It is only built and read inside one step, so it never needs deletions.
+
+Other buffers: `_NpControl` (free count and overflow count), `_DirtySlots` (a bit per body slot spawned or removed since the last narrow phase; a used slot of a dirty body is freed first, so a recycled body slot does not inherit the manifolds of the body that had it), and the broadphase's `_Pairs` and `_BpControl`.
 
 ### Kernels
 
-- `AvbdNarrowphase.compute`, kernel `Narrowphase`, one thread per pair: skips free slots and pairs of two unsolved bodies; reads the **start poses** (stage P has run, as in the reference where the broadphase sees the poses before the prediction); creates a pair only if not excluded and the spheres overlap; runs the 15-axis SAT and the face clipping (`AvbdBoxCollision.hlsl`, one-to-one with the reference's `BoxCollision`); merges with the old contacts by key and writes the records and the count (`AvbdContactWarmStart.hlsl`).
+Run after stage B and stage P, in this order (`AvbdNarrowphase.compute`):
+
+- `NpClearTable`: empties the hash table.
+- `NpRetire`, one thread per slot: frees the slot of a pair with a dirty body, enters every other used slot in the table.
+- `NpAllocate`, one thread per entry of the broadphase's bins (the entries beyond its counters are skipped): looks the pair up in the table; a pair without a slot whose boxes collide pops a free slot and stores its pair there with a zero count (so no history). The collision test is repeated in the next kernel for such a pair; the point of doing it first is that a candidate is a pair of overlapping *spheres*, and spending a slot on every candidate would make the pool several times larger than the number of manifolds and starve real pairs. The pairs of the broadphase are unique, so a new slot needs no table entry. With no free slot the pair is dropped, `_NpControl[AVBD_NP_OVERFLOW]` counts it, and the pair is a candidate again next step. Popping the stack is an atomic decrement; the decrement that finds it empty is undone by the thread that made it, which keeps the counter exact when many threads fail at once.
+- `Narrowphase`, one thread per slot: skips free slots; a slot of a free body or of two bodies that are not solved is freed; collides at the **start poses** (stage P has run, as in the reference where the broadphase sees the poses before the prediction) with the 15-axis SAT and the face clipping (`AvbdBoxCollision.hlsl`, one-to-one with the reference's `BoxCollision`); merges with the old contacts of the slot by key and writes the records and the count (`AvbdContactWarmStart.hlsl`). A slot whose boxes no longer collide is freed, which removes the manifold and its history, like the reference.
 - `AvbdPrimal.compute`: the contact branch of the per-body loop stamps the contact's three rows into the 6x6 system (`AvbdContactSolve.hlsl`); the force is clamped to `F.x <= 0` and the friction cone.
-- `AvbdDual.compute`, kernel `DualContact`, one thread per contact record: multiplier and penalty update, and the stick state.
+- `AvbdDual.compute`, kernel `DualContact`, one thread per contact record of the pool (free slots and records beyond a slot's count return at once): multiplier and penalty update, and the stick state.
+
+Slots are pushed only by `NpRetire` and `Narrowphase` and popped only by `NpAllocate`, and the kernels run one after the other, so a push never races a pop.
 
 ### Step order
 
-`ApplyEdits`, `Rebuild` if needed, P, `PrepareContacts` (dirty bits), N, `RefreshContactTopology`, `ConstraintInit` (joints and springs), then per iteration the primal sweep per color, `Dual`, `DualContact`; then U.
+`ApplyEdits`, `Rebuild` if needed, B, P, `PrepareContacts` (dirty bits), N (the four kernels), `RefreshContactTopology`, `ConstraintInit` (joints and springs), then per iteration the primal sweep per color, `Dual`, `DualContact`; then U.
 
-`RefreshContactTopology` reads the pair counts back (a stall), builds the per-body lists on the CPU (contacts first in each list, pairs ascending, then joints and springs newest first, which is the reference's order of constraints in the first step) and runs the GPU coloring (stage C) with the contacts in the graph. **This readback goes away with stage G** (lists built on the GPU from the pair counts). With contacts the coloring changes every step; `SlotOrder` gives the reference's coloring.
+`RefreshContactTopology` reads the contact count and the pair of every slot back (a stall), builds the per-body lists on the CPU (contacts first in each list, **ordered by pair** (body A, then body B) whichever slots the pairs hold, then joints and springs newest first, which is the reference's order of constraints in the first step) and runs the GPU coloring (stage C) with the contacts in the graph. **This readback goes away with stage G** (lists built on the GPU from the slot table). With contacts the coloring changes every step; `SlotOrder` gives the reference's coloring.
 
 ### Fractured joints
 
@@ -540,7 +551,8 @@ Stage D marks a joint that fractured with the `Broken` flag. Without contacts no
 
 ### Limits
 
-- At most 512 bodies take part in contacts; the buffers are sized at construction (`contactBodies`). Slots at or above it have no contacts.
+- The pool has a fixed number of slots (`contactCapacity`, at most `MaxContactManifolds` = 500,000, which is 640 MB of contact records). A new touching pair that finds no free slot has no contacts until one is free; `AvbdConstraintBuffers.ReadContacts()` reports it (`Overflow`). The broadphase's bins have the same kind of limit (`AvbdBroadphase.Overflowed`): the solver gives them 8 candidates per slot (+1024) and 1 static candidate per slot (+1024).
+- A manifold that exists is kept even if a joint or spring is added between its bodies later. A pair that the broadphase does not list is not created.
 - No ignore-collision pairs yet (the reference's `IgnoreCollision`). Pairs joined by a joint or spring are excluded.
 - Only box-box. Contacts of one pair are limited to eight (the reference's limit).
 - The lists are rebuilt on the CPU every step.
@@ -553,3 +565,5 @@ Stage D marks a joint that fractured with the `Broken` flag. Without contacts no
 - Tolerances for the multi-step comparisons come from upstream's own sensitivity: with every position nudged by 1e-6, the dropped box differs by 7e-4 (position) and 3e-4 (velocity) after 60 steps; the stack by up to 7e-3 and 0.1 (a boundary flip at step 1) and 8e-3 later. The pyramid is chaotic (1e-2 after 30 steps), so it is not compared.
 
 None of the Unity code, shaders and tests of this stage has been compiled or run here (no editor, compiler or GPU in the environment).
+
+The pool is checked by `ManifoldPoolTests`: a slot is given back when its pair separates; a full pool drops pairs, stores only touching ones and recovers; 700 bodies collide (the dense layout stopped at 512) with every face-neighbor pair present and nothing but neighbors; and over 40 steps of a falling pyramid every slot is used or free, no pair has two slots, no used slot is empty and body A is always the higher slot. `ContactTests` compares the manifolds of the GPU, wherever the pool put them, with the oracle's.
