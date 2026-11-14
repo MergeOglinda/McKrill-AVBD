@@ -1,0 +1,17 @@
+{
+  "name": "McKrill.Avbd.Samples.GpuPyramidDemo",
+  "rootNamespace": "McKrill.Avbd.Samples",
+  "references": [
+    "McKrill.Avbd.Runtime",
+    "Unity.Mathematics"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

@@ -25,6 +25,8 @@ Append `#0.1.0` (or another tag) to pin a version.
 
 Open **Window > Package Manager > McKrill AVBD > Samples** and import **Reference Solver Demo**. It runs the CPU reference solver live on the upstream demo scenes. See the sample's README for controls.
 
+The **GPU Pyramid Demo** sample builds a pyramid of 140 or more boxes on the GPU solver and lets you shoot boxes into it from the camera, with speed, size and mass adjustable in a panel. It is written for the solver with collisions inside `AvbdSolver.Step()`; until those stages exist the boxes pass through each other. See its README.
+
 ## Layout
 
 | Folder | Assembly | Purpose |
