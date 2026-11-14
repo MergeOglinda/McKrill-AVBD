@@ -214,12 +214,49 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)ConstraintFlags.HardAngular, d["AVBD_CONSTRAINT_FLAG_HARD_ANG"]);
             Assert.AreEqual((uint)ConstraintFlags.Fracturable, d["AVBD_CONSTRAINT_FLAG_FRACTURABLE"]);
             Assert.AreEqual((uint)ConstraintFlags.Broken, d["AVBD_CONSTRAINT_FLAG_BROKEN"]);
+            Assert.AreEqual((uint)ConstraintFlags.Stick, d["AVBD_CONSTRAINT_FLAG_STICK"]);
             Assert.AreEqual(ConstraintFlagLayout.FlagsMask, d["AVBD_CONSTRAINT_FLAGS_MASK"]);
             Assert.AreEqual((uint)ConstraintFlagLayout.KindShift, d["AVBD_CONSTRAINT_KIND_SHIFT"]);
             Assert.AreEqual((uint)ConstraintKind.Joint, d["AVBD_CONSTRAINT_KIND_JOINT"]);
             Assert.AreEqual((uint)ConstraintKind.Spring, d["AVBD_CONSTRAINT_KIND_SPRING"]);
+            Assert.AreEqual((uint)ConstraintKind.Contact, d["AVBD_CONSTRAINT_KIND_CONTACT"]);
 
             AssertStructMatches(ReadInclude("AvbdConstraintRecords.hlsl"), "ConstraintRecord", typeof(ConstraintRecord));
+        }
+
+        [Test]
+        public void Hlsl_ContactConstantsMatchTheCSharpMirrors()
+        {
+            Dictionary<string, uint> d = ReadDefines("AvbdContacts.hlsl");
+            Assert.AreEqual((uint)ContactLayout.MaxContactsPerPair, d["AVBD_MAX_CONTACTS"]);
+
+            // The margin and the threshold are floats; compare them as text-parsed values.
+            string text = ReadInclude("AvbdContacts.hlsl");
+            Assert.AreEqual(ContactLayout.CollisionMargin, ReadFloatDefine(text, "AVBD_COLLISION_MARGIN"));
+            Assert.AreEqual(ContactLayout.StickThreshold, ReadFloatDefine(text, "AVBD_STICK_THRESHOLD"));
+        }
+
+        [Test]
+        public void ContactPairIndex_RoundTripsAndIsDense()
+        {
+            long expected = 0;
+            for (int hi = 1; hi < 600; hi++)
+                for (int lo = 0; lo < hi; lo++, expected++)
+                {
+                    Assert.AreEqual(expected, ContactLayout.PairIndex(hi, lo));
+                    Assert.AreEqual(expected, ContactLayout.PairIndex(lo, hi));
+                    ContactLayout.BodiesOfPair(expected, out int a, out int b);
+                    Assert.AreEqual(hi, a);
+                    Assert.AreEqual(lo, b);
+                }
+            Assert.AreEqual(expected, ContactLayout.PairCount(600));
+        }
+
+        static float ReadFloatDefine(string text, string name)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(text, @"#define\s+" + name + @"\s+([0-9.eE+-]+)");
+            Assert.IsTrue(m.Success, "define " + name + " not found");
+            return float.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         }
 
         [Test]

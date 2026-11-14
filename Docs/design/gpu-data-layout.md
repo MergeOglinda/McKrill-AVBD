@@ -402,7 +402,7 @@ Not part of this stage: GPU construction of the lists (stage G), indirect dispat
 
 ## 12. Constraints (step 4: joints and springs)
 
-Contacts are still open. Joints and springs share one record, a constraint, with the kind in the high 8 bits of the flags word (rule P7).
+Contacts without a broadphase are section 13. Joints and springs share one record, a constraint, with the kind in the high 8 bits of the flags word (rule P7).
 
 ### Record
 
@@ -450,3 +450,52 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 | `VelocityTests` | Both | Stage U and whole steps against the reference solver (section 11, stage U) |
 
 None of the stage V, D, U or C code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.
+
+## 13. Contacts without a broadphase (stage N)
+
+Box-box contacts, found like the reference solver finds them: every pair of bodies is tested, there is no spatial grid. The cost is O(N^2) in the number of bodies, so this is for small scenes (up to `AvbdConstraintBuffers.MaxContactBodies`, 512) and is the baseline a broadphase has to beat and to match.
+
+### Reference semantics that are kept
+
+- Body A of a manifold is the higher slot and B the lower. A manifold lives while the collision test finds contacts and is forgotten (history included) the step it finds none.
+- Contacts are matched to the previous step's by feature key. A matched contact keeps its penalty, multiplier and stick state (penalty and multiplier decayed by `gamma`, `alpha * gamma`); if the old contact did not stick, the new `rA`, `rB` are taken. A new contact starts at the minimum penalty with a zero multiplier.
+- `C0 = Basis * (xA - xB) + (margin, 0, 0)` with margin 0.01. The normal points from B to A. Friction is `sqrt(fA * fB)`.
+- The reference's broadphase test (a sphere of radius `|size / 2|` per body) and `ConstrainedTo` (a joint or spring joins the pair) decide only whether a manifold is **created**. A pair that already has contacts is tested every step regardless.
+
+### Records
+
+A contact is a `ConstraintRecord` of kind `Contact` (2), so the primal kernel reads it like a joint. Mapping: A = higher slot, B = lower slot; anchor A = (rA, friction); anchor B = (rB, 0); `c0Lin` = C0; `c0Ang` = normal (B to A); `penaltyLin` and `lambdaLin` = the three rows (normal, tangent 1, tangent 2); `ident.w` = feature key; flag `Stick` (bit 4). The tangent basis is rebuilt from the normal in the kernels (`AvbdContactBasis`), as in the reference.
+
+### Dense pair storage
+
+The pair of slots (hi, lo) has index `hi * (hi - 1) / 2 + lo` and owns eight contact records at `ContactBase + pair * 8 + k`, in the same record buffer, after the joint and spring capacity. Per pair there is a contact count (`_PairCounts`). A pair's contacts never move, so a thread owns its pair's old and new contacts and needs no atomics or compaction, and the order is fixed: pairs ascending, then k. Costs: 8 x 160 B per pair, 167 MB at 512 bodies; the cap is the limit of this layout, not of the idea.
+
+Three extra buffers: `_PairCounts` (`uint` per pair), `_PairExcluded` (a bit per pair: joined by a joint or spring, uploaded by `Rebuild()`), `_DirtySlots` (a bit per slot spawned or removed since the last narrow phase; such a slot ignores the old contacts of its pairs, so a recycled slot does not inherit the manifolds of the body that had it).
+
+### Kernels
+
+- `AvbdNarrowphase.compute`, kernel `Narrowphase`, one thread per pair: skips free slots and pairs of two unsolved bodies; reads the **start poses** (stage P has run, as in the reference where the broadphase sees the poses before the prediction); creates a pair only if not excluded and the spheres overlap; runs the 15-axis SAT and the face clipping (`AvbdBoxCollision.hlsl`, one-to-one with the reference's `BoxCollision`); merges with the old contacts by key and writes the records and the count (`AvbdContactWarmStart.hlsl`).
+- `AvbdPrimal.compute`: the contact branch of the per-body loop stamps the contact's three rows into the 6x6 system (`AvbdContactSolve.hlsl`); the force is clamped to `F.x <= 0` and the friction cone.
+- `AvbdDual.compute`, kernel `DualContact`, one thread per contact record: multiplier and penalty update, and the stick state.
+
+### Step order
+
+`ApplyEdits`, `Rebuild` if needed, P, `PrepareContacts` (dirty bits), N, `RefreshContactTopology`, `ConstraintInit` (joints and springs), then per iteration the primal sweep per color, `Dual`, `DualContact`; then U.
+
+`RefreshContactTopology` reads the pair counts back (a stall), builds the per-body lists on the CPU (contacts first in each list, pairs ascending, then joints and springs newest first, which is the reference's order of constraints in the first step) and runs the GPU coloring (stage C) with the contacts in the graph. **This readback goes away with stage G** (lists built on the GPU from the pair counts). With contacts the coloring changes every step; `SlotOrder` gives the reference's coloring.
+
+### Limits
+
+- At most 512 bodies take part in contacts; the buffers are sized at construction (`contactBodies`). Slots at or above it have no contacts.
+- No ignore-collision pairs yet (the reference's `IgnoreCollision`). Pairs joined by a joint or spring are excluded.
+- Only box-box. Contacts of one pair are limited to eight (the reference's limit).
+- The lists are rebuilt on the CPU every step.
+- After the first step the summation order of a body's contacts may differ from the reference's (the reference appends new manifolds to the lists); the results differ by rounding only.
+
+### How it is checked
+
+- `Tools/HlslParity` compiles the contact HLSL as C++ and compares it with upstream's unmodified solver: `collide_parity` (narrow phase, about 800 000 cases: demo scenes, random pairs, ground, grids, crossing bars) and `contact_parity` (warm start, primal terms, dual). Both are bit-identical, apart from upstream's rounding order of one quaternion product (see its README). This checks the arithmetic, not the Unity glue.
+- `ContactTests` (needs Unity): the topology with contacts; `CpuContacts` against the reference solver's manifolds at the first step (stack, and a scene of overlapping boxes) and over 90 (ground) and 60 (stack) steps; a box coming to rest; the GPU narrow phase against the oracle; the GPU step against the reference solver; joined pairs; recycled slots; the body-count cap.
+- Tolerances for the multi-step comparisons come from upstream's own sensitivity: with every position nudged by 1e-6, the dropped box differs by 7e-4 (position) and 3e-4 (velocity) after 60 steps; the stack by up to 7e-3 and 0.1 (a boundary flip at step 1) and 8e-3 later. The pyramid is chaotic (1e-2 after 30 steps), so it is not compared.
+
+None of the Unity code, shaders and tests of this stage has been compiled or run here (no editor, compiler or GPU in the environment).
