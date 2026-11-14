@@ -28,6 +28,11 @@
       "displayName": "Reference Solver Demo",
       "description": "Runs the CPU reference solver live in a scene: upstream demo scenes, sequential versus colored sweep, graph-color tint, contact and joint overlays.",
       "path": "Samples~/ReferenceSolverDemo"
+    },
+    {
+      "displayName": "GPU Pyramid Demo",
+      "description": "A pyramid of 140 or more boxes on the GPU solver. Shoot boxes from the camera and adjust their speed, size and mass in the panel. Needs the contact stages in AvbdSolver.Step().",
+      "path": "Samples~/GpuPyramidDemo"
     }
   ]
 }
