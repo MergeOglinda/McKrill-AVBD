@@ -76,6 +76,8 @@ namespace McKrill.Avbd
         bool topologyDirty;
         int builtSolvedSetVersion;
         int excludedRecords; // joints and springs already in the exclusion bits
+        int fracturableRecords; // joints that can fracture: only then are the flags read back
+        ConstraintRecord[] flagScratch = new ConstraintRecord[0];
         bool disposed;
 
         /// <param name="bodies">The body arrays the constraints refer to.</param>
@@ -157,6 +159,12 @@ namespace McKrill.Avbd
 
         /// <summary>Number of body slots, from slot 0, that collide with each other.</summary>
         public int ContactBodies => contactBodies;
+
+        /// <summary>
+        /// Number of joints that have fractured, as of the start of the last step (with contacts). Always 0 without contacts: only the contact
+        /// path reads the joints' state back (see <see cref="PrepareContacts"/>).
+        /// </summary>
+        public int BrokenCount { get; private set; }
 
         /// <summary>Contacts per pair as of the last <see cref="RefreshContactTopology"/>, indexed like <see cref="ContactLayout.PairIndex"/>.</summary>
         internal uint[] PairCounts => pairCounts;
@@ -299,6 +307,7 @@ namespace McKrill.Avbd
                 return -1;
             }
             records[recordCount] = record;
+            CountFracturable(recordCount);
             topologyDirty = true;
             return recordCount++;
         }
@@ -339,13 +348,15 @@ namespace McKrill.Avbd
                 for (int i = 0; i < pending.Count; i++)
                 {
                     Spec s = pending[i];
-                    records[recordCount++] = s.kind == ConstraintKind.Joint
+                    records[recordCount] = s.kind == ConstraintKind.Joint
                         ? ConstraintRecordFactory.Joint(
                             s.slotA, s.slotB, s.rA, s.rB, s.stiffnessLin, s.stiffnessAng, s.fractureOrRest,
                             TorqueArm(shape, s.slotA, s.slotB))
                         : ConstraintRecordFactory.Spring(
                             s.slotA, s.slotB, s.rA, s.rB, s.stiffnessLin,
                             s.fractureOrRest >= 0f ? s.fractureOrRest : CurrentDistance(state, s));
+                    CountFracturable(recordCount);
+                    recordCount++;
                 }
                 pending.Clear();
             }
@@ -384,13 +395,48 @@ namespace McKrill.Avbd
             builtSolvedSetVersion = bodies.SolvedSetVersion;
         }
 
+        void CountFracturable(int index)
+        {
+            if ((records[index].ident.z & (uint)ConstraintFlags.Fracturable) != 0u)
+                fracturableRecords++;
+        }
+
+        // Fracture happens on the GPU (stage D sets the Broken flag). With contacts the step reads the flags back before the narrow phase,
+        // so a fractured joint leaves the lists and the coloring and stops excluding its pair from collisions, like the reference solver,
+        // which removes a broken joint. Costs one readback of the joint records per step, only if some joint can fracture.
+        void SyncFracturedJoints()
+        {
+            int count = Math.Min(recordCount, uploadedCount); // only records that are on the GPU
+            if (fracturableRecords == 0 || count == 0)
+                return;
+
+            if (flagScratch.Length < count)
+                flagScratch = new ConstraintRecord[records.Length];
+            recordBuffer.GetData(flagScratch, 0, 0, count);
+
+            bool changed = false;
+            for (int i = 0; i < count; i++)
+            {
+                if (ConstraintTopology.IsBroken(records[i]) || !ConstraintTopology.IsBroken(flagScratch[i]))
+                    continue;
+                records[i].ident.z |= (uint)ConstraintFlags.Broken;
+                BrokenCount++;
+                changed = true;
+            }
+
+            if (changed)
+                UploadExcludedPairs();
+        }
+
         // Sets the exclusion bit of the pair of every joint and spring: like the reference solver, no manifold is created between bodies
-        // that a force already joins. (Ignore-collision pairs are not supported yet.)
+        // that a force already joins (a fractured joint no longer does). (Ignore-collision pairs are not supported yet.)
         void UploadExcludedPairs()
         {
             Array.Clear(pairExcluded, 0, pairExcluded.Length);
             for (int i = 0; i < recordCount; i++)
             {
+                if (ConstraintTopology.IsBroken(records[i]))
+                    continue;
                 uint a = records[i].ident.x;
                 uint b = records[i].ident.y;
                 if (a == AvbdConst.Invalid || a >= (uint)contactBodies || b >= (uint)contactBodies)
@@ -411,6 +457,8 @@ namespace McKrill.Avbd
             ThrowIfDisposed();
             if (contactBodies == 0)
                 return;
+
+            SyncFracturedJoints();
 
             dirtySlots.Clear();
             bodies.TakeStructuralSlots(dirtySlots);

@@ -79,6 +79,8 @@ namespace McKrill.Avbd
             }
             for (int i = 0; i < recordCount; i++)
             {
+                if (IsBroken(records[i]))
+                    continue;
                 uint a = records[i].ident.x;
                 uint b = records[i].ident.y;
                 if (a != AvbdConst.Invalid)
@@ -114,6 +116,8 @@ namespace McKrill.Avbd
             }
             for (int i = recordCount - 1; i >= 0; i--)
             {
+                if (IsBroken(records[i]))
+                    continue;
                 uint a = records[i].ident.x;
                 uint b = records[i].ident.y;
                 if (a != AvbdConst.Invalid && solved[a]) { ListOther[cursor[a]] = b; List[cursor[a]++] = (uint)i; }
@@ -176,6 +180,9 @@ namespace McKrill.Avbd
                 if (ColorOfBody[s] >= 0)
                     ColorBodies[next[ColorOfBody[s]]++] = (uint)s;
         }
+
+        /// <summary>A fractured joint does nothing any more: the reference solver removes it, and the lists and the coloring leave it out.</summary>
+        internal static bool IsBroken(in ConstraintRecord r) => (r.ident.z & (uint)ConstraintFlags.Broken) != 0u;
 
         // Lists the contacts of the pairs that have any, in pair order, as (body A, body B, constraint id). Pairs of two bodies that are not solved are
         // skipped (the narrow phase writes none).
