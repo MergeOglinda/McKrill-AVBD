@@ -353,7 +353,7 @@ The previous velocity is what stage P reads for the adaptive warm start, so a st
 
 **Speed limit not implemented.** The stage table lists a speed limit, but upstream has none and the reference solver has none, so adding one now would break the parity tests. It would be one more setting (a uniform) and a clamp after the division, off by default.
 
-**Full step.** `AvbdSolver.Step()` is now complete for the stages that exist: apply edits, rebuild the constraint lists if needed, P, `ConstraintInit`, per iteration a primal sweep and `Dual`, then U. Two behaviors the driver needed:
+**Full step.** `AvbdSolver.Step()` is now complete for the stages that exist: apply edits, rebuild the constraint lists and colors if needed (lists on the CPU, then stage C), P, `ConstraintInit`, per iteration a primal sweep and `Dual`, then U. Two behaviors the driver needed:
 
 - **Without constraint buffers** the solver creates an empty `AvbdConstraintBuffers` of its own at the first step. Before, it skipped the primal sweeps, so a body without constraints never reached its inertial target and could not fall. `AvbdSolver` is now `IDisposable`; `Dispose` releases only the buffers it created itself.
 - **Bodies spawned, removed or changed later.** The color buckets and the lists depend on which bodies are solved. `AvbdBodyBuffers.SolvedSetVersion` increases when an applied batch contains a spawn, a remove, a change of shape (mass) or of the kinematic flag, and `Step()` calls `Rebuild()` when the version differs from the one the lists were built for. Before, a body spawned after the last `Rebuild()` was predicted but never solved. Pose, velocity, friction, group and appearance edits do not trigger a rebuild, because they do not change the lists.
@@ -372,6 +372,33 @@ The previous velocity is what stage P reads for the adaptive warm start, so a st
 **Tolerances.** Position 2e-3, rotation 2e-4, velocity 1e-2 (relative to max(1, |v|)). They were chosen from a sensitivity run of upstream's C++ solver on both scenes: with every initial position nudged by 1e-6, the largest drift after 60 steps was 3e-5 in position, 6e-6 in rotation and 1.4e-4 in velocity on the rope, and the spring scene did not amplify (1.4e-6 throughout). The bounds are 30 to 70 times that. Rounding differences between the GPU and the CPU are far below the nudge, but this has not been measured on a GPU.
 
 **Limits.** The two scenes have no contacts (the reference creates empty manifolds for the far ground; they affect nothing). A joint that fractures stays in the lists, so the colored order can differ from the reference's after the step in which it breaks (section 12); the parity scenes have no fracture.
+
+### Stage C: graph coloring on the GPU
+
+`AvbdColoring.compute` colors the graph of solved bodies and buckets the bodies by color, replacing the CPU coloring of `ConstraintTopology`. The graph has one node per solved body and one edge per constraint between two solved bodies. Fixed bodies and world pins create no edge. The adjacency is read from the per-body lists (stage G, still built on the CPU).
+
+**Algorithm: Jones-Plassmann.** Every body has a priority, a strict total order. A body colors itself once every neighbor of higher priority has a color, and takes the lowest color none of its neighbors has. All bodies that are ready color in the same round; one round is one dispatch. The result does not depend on the thread order inside a round: a body only sees final colors of its higher-priority neighbors, and a lower-priority neighbor cannot be colored before it. The result is therefore the sequential greedy first-fit coloring of the priority order. The color is written to `Meta.state.x`; a solved body without a color holds `AVBD_COLOR_PENDING`, a body that is not solved holds `AVBD_INVALID`.
+
+**Priority order.** `GraphColoringOrder.SlotOrder` (the default): a higher slot colors first, which is exactly the reference solver's coloring, so the colored sweep is the same sequence of updates as `ReferenceSolver` in `Colored` mode and the GPU solver can be compared with it. The cost is the number of rounds, the length of the longest chain with falling slots: a rope built in slot order needs one round per link. `GraphColoringOrder.Hashed` orders by a hash of the slot: a few rounds for any chain, a valid but different coloring (so different from the reference). `AvbdConstraintBuffers.ColoringOrder` selects it.
+
+| Kernel | What |
+| --- | --- |
+| `ColorReset` | Zeroes the work buffer (132 words: 4 control, 64 counts, 64 cursors) |
+| `ColorInit` | Marks every slot: `PENDING` if solved (not free, not kinematic, mass above zero), else `INVALID` |
+| `ColorBegin` | One thread; zeroes the counter of bodies still waiting, before the last round of a batch |
+| `ColorRound` | One round. A pending body waits if a neighbor that colors before it is pending (and counts itself as waiting); otherwise it picks the lowest color no neighbor has, 32 colors at a time. More than 64 colors sets an overflow word |
+| `ColorCount` | One atomic add per solved body into the count of its color |
+| `ColorBucket` | After the host has put the start of each color into the cursors, writes each solved slot to the next free entry of its color |
+
+**Host side.** `AvbdGraphColoring` runs the rounds in batches of 8 and reads back the waiting counter after each batch, then reads the per-color counts, computes the start of each color and writes it into the cursors. The two readbacks are the only synchronization; they disappear when the primal sweep is dispatched indirectly (a later stage). A graph that needs more than 64 colors (for example 65 bodies that are all joined to each other) makes `Rebuild()` throw `InvalidOperationException`.
+
+**Order inside a color.** The bucket entries of one color are in the order the threads got their atomic cursor, so it is unspecified and can differ between runs. It does not change the result of a sweep: the bodies of one color share no constraint, each writes only its own pose and reads the poses of other colors. The sweep stays deterministic. (The CPU coloring puts the highest slot first; tests compare buckets as sets.)
+
+**When it runs.** In `Rebuild()`, that is when constraints were added, the set of solved bodies changed (`SolvedSetVersion`) or the order was changed, not every step. Colors are recomputed from scratch each time. **Temporal coherence (keeping the colors of the previous step and fixing only conflicts) is not implemented**: it matters once contacts change the graph every step, and it would give up the exact equality with the reference coloring; it is left for the contact stages.
+
+**Check.** `CpuGraphColoring` is the oracle: bodies visited in falling priority, each takes the lowest color not used by a colored neighbor. `GraphColoringTests`: the oracle in slot order equals `ConstraintTopology`'s coloring (rope and 12 random scenes); the hashed oracle is a valid coloring; the GPU equals the oracle exactly in both orders on the rope, the spring scene and random lattices (color of every body, number of colors, bucket contents); the hashed order needs under half the rounds of the slot order on a chain of 160 links; recoloring after a spawn, an added constraint and a body becoming kinematic; bodies without constraints; and the 65-body clique that exceeds 64 colors. `PrimalTests` and `VelocityTests` now run on the GPU coloring.
+
+Not part of this stage: GPU construction of the lists (stage G), indirect dispatch of the color sweep, temporal coherence, and removing a joint that has fractured from the graph.
 
 ## 12. Constraints (step 4: joints and springs)
 
@@ -403,10 +430,10 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 - The list is a scalar `uint` buffer (the P1 exception) of constraint ids, grouped by body. Bit 31 is reserved to tag contact entries later (rule P6).
 - Only solved bodies get a list. A constraint between a solved body and a fixed one is listed for the solved body only.
 - Entries are newest constraint first, so the floating-point sums run in the reference's order.
-- Colors come from a greedy first-fit coloring: bodies from the highest slot down, lowest color not used by a colored neighbor. This is the reference's `GraphColoring`, and `ConstraintTopologyTests` checks the two against each other. Fixed bodies and world pins create no edge.
-- Bodies are bucketed by color in one list; the CPU knows each color's range, so a color is one dispatch.
+- Colors come from a greedy first-fit coloring: bodies from the highest slot down, lowest color not used by a colored neighbor. This is the reference's `GraphColoring`, and `ConstraintTopologyTests` checks the two against each other. Fixed bodies and world pins create no edge. `ConstraintTopology` still computes this coloring on the CPU, as the oracle of stage C; the solver uses the GPU coloring (stage C above), which gives the same colors in the default order.
+- Bodies are bucketed by color in one list; the host knows each color's range from the coloring's readback, so a color is one dispatch.
 
-**Both are built on the CPU for now** (`ConstraintTopology`, called by `Rebuild()`), because stages G and C do not exist. `Rebuild()` applies the pending body edits and reads body data back (sizes, poses, mass, flags), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending or when the set of solved bodies changed (section 11, stage U). Known limits until G and C exist: constraints cannot be removed, removing a body that has constraints is not supported, and a joint that fractures (stage D) stays in the lists and the coloring, so the colored order can differ from the reference's from the next step on (the reference removes a broken joint at the next step's warm start and colors again). The graph color is not written to the Meta record yet (stage C's field).
+**The lists are built on the CPU for now** (`ConstraintTopology`, called by `Rebuild()`), because stage G does not exist; the coloring and the buckets are stage C on the GPU. `Rebuild()` applies the pending body edits and reads body data back (sizes, poses, mass, flags), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending or when the set of solved bodies changed (section 11, stage U). Known limits until G exists: constraints cannot be removed, removing a body that has constraints is not supported, and a joint that fractures (stage D) stays in the lists and the coloring, so the colored order can differ from the reference's from the next step on (the reference removes a broken joint at the next step's warm start and colors again). The graph color is written to the Meta record by stage C (`Meta.state.x`).
 
 ### Tests
 
@@ -418,6 +445,8 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 | `PrimalTests` (GPU) | Yes | The kernel against the oracle on the same scenes; `AddJoint` and `AddSpring` completing the records; a joint with a known closed-form result; static bodies never moving |
 | `DualTests` (oracle) | No | `CpuConstraintInit` and `CpuDual` against `ReferenceSolver` after one step (1 and 3 iterations), a hand-computed dual update, fracture |
 | `DualTests` (GPU) | Yes | `Step()` against the oracles on the rope, the fracture scene and random lattices, including all constraint records; springs untouched by stage D |
+| `GraphColoringTests` (oracle) | No | `CpuGraphColoring` in slot order against `ConstraintTopology`; the hashed order is a valid coloring and a strict order |
+| `GraphColoringTests` (GPU) | Yes | The kernels against the oracle in both orders (colors, color count, buckets); rounds on a long chain; recoloring after edits; no constraints; more than 64 colors |
 | `VelocityTests` | Both | Stage U and whole steps against the reference solver (section 11, stage U) |
 
-None of the stage V, D or U code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.
+None of the stage V, D, U or C code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.
