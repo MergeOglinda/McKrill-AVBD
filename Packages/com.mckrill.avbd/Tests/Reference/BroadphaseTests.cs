@@ -415,7 +415,7 @@ namespace McKrill.Avbd.Tests
                 solver.EnableBroadphase(BigBin, BigBin);
 
                 int contactPairsSeen = 0;
-                for (int step = 0; step < 8; step++)
+                for (int step = 0; step < 40; step++) // the boxes start 0.25 above the ground: they touch it after about 13 steps
                 {
                     solver.Step();
                     SortedSet<ulong> candidates = ToSet(solver.Broadphase.ReadPairs());
@@ -434,7 +434,7 @@ namespace McKrill.Avbd.Tests
                             "step " + step + ": the pair (" + hi + ", " + lo + ") has " + counts[pair] + " contacts but is not a broadphase pair");
                     }
                 }
-                Assert.Greater(contactPairsSeen, 0, "the pyramid should touch the ground and itself");
+                Assert.Greater(contactPairsSeen, 0, "the pyramid should have touched the ground within 40 steps");
             }
         }
 
