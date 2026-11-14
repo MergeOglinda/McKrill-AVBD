@@ -1,0 +1,140 @@
+// Stage N: narrow phase without a broadphase. One thread per pair of body slots (a > b): it collides the two boxes at their
+// start-of-step poses, merges the result with the pair's manifold of the last step, and writes the manifold's contacts and their
+// warm start (the reference solver's Manifold.Initialize). Run after stage P, which keeps the start-of-step pose of every body.
+//
+// Which pairs collide follows the reference solver's broadphase: a pair needs at least one solved body, and a pair that has no
+// manifold yet needs overlapping bounding spheres and no joint or spring between the bodies (_PairExcluded). A manifold that exists
+// stays while the boxes still touch. The pair's contact count is the only output besides the records, and is what the CPU reads back to
+// build the constraint lists.
+//
+// A thread reads and writes only its own pair, so there is no ordering or atomics. Mirrored by Reference/Stages/CpuNarrowphase.cs.
+
+#pragma kernel Narrowphase
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactWarmStart.hlsl"
+
+StructuredBuffer<BodyStateRecord>    _BodyState;
+StructuredBuffer<BodyMassRecord>     _BodyMass;
+StructuredBuffer<BodyShapeRecord>    _BodyShape;
+StructuredBuffer<BodyMetaRecord>     _BodyMeta;
+RWStructuredBuffer<ConstraintRecord> _Constraints;
+RWStructuredBuffer<uint>             _PairCounts;   // contacts per pair after this stage
+StructuredBuffer<uint>               _PairExcluded; // bit per pair: a joint or spring joins the bodies, no new manifold
+StructuredBuffer<uint>               _DirtySlots;   // bit per body slot: the slot was spawned or removed since the last step
+
+uint _Base;        // first pair to process
+uint _Count;       // end of the range: pairs [_Base, _Count)
+uint _ContactBase; // index of the first contact record in _Constraints
+
+// Bit `index` of a bit set stored in 32-bit words, given the word that holds it (bits[index >> 5]).
+bool BitIsSet(uint word, uint index)
+{
+    return (word & (1u << (index & 31u))) != 0u;
+}
+
+// A body the primal stage solves: not free, not kinematic, mass above zero.
+bool IsSolved(uint meta, float mass)
+{
+    return (meta & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) == 0u && mass > 0.0;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Narrowphase(uint3 id : SV_DispatchThreadID)
+{
+    uint pair = _Base + id.x;
+    if (pair >= _Count)
+        return;
+
+    uint2 bodies = AvbdPairBodies(pair);
+    uint a = bodies.x; // the higher slot is body A, like the reference solver
+    uint b = bodies.y;
+
+    uint oldCount = _PairCounts[pair];
+    if (oldCount > AVBD_MAX_CONTACTS || BitIsSet(_DirtySlots[a >> 5], a) || BitIsSet(_DirtySlots[b >> 5], b))
+        oldCount = 0; // a recycled slot does not inherit the manifolds of the body that had it
+
+    uint metaA = _BodyMeta[a].ident.x;
+    uint metaB = _BodyMeta[b].ident.x;
+    float massA = _BodyMass[a].momentMass.w;
+    float massB = _BodyMass[b].momentMass.w;
+
+    // Free slots take no part. Two bodies that are not solved cannot move each other, so their contacts would change nothing.
+    if ((metaA & AVBD_BODY_FLAG_FREE) || (metaB & AVBD_BODY_FLAG_FREE) || (!IsSolved(metaA, massA) && !IsSolved(metaB, massB)))
+    {
+        _PairCounts[pair] = 0;
+        return;
+    }
+
+    BodyStateRecord stateA = _BodyState[a];
+    BodyStateRecord stateB = _BodyState[b];
+    float4 shapeA = _BodyShape[a].sizeFriction;
+    float4 shapeB = _BodyShape[b].sizeFriction;
+    float3 posA = stateA.startPosition.xyz;
+    float3 posB = stateB.startPosition.xyz;
+    float4 rotA = stateA.startRotation;
+    float4 rotB = stateB.startRotation;
+
+    // Creating a manifold needs overlapping bounding spheres and no joint or spring between the bodies. An existing one skips both,
+    // like the reference solver, where the manifold itself counts as a force between the bodies.
+    if (oldCount == 0)
+    {
+        if (BitIsSet(_PairExcluded[pair >> 5], pair))
+        {
+            _PairCounts[pair] = 0;
+            return;
+        }
+
+        float3 dp = posA - posB;
+        float r = length(shapeA.xyz * 0.5) + length(shapeB.xyz * 0.5);
+        if (!(dot(dp, dp) <= r * r))
+        {
+            _PairCounts[pair] = 0;
+            return;
+        }
+    }
+
+    uint count = (uint)AvbdCollideBoxes(posA, rotA, shapeA.xyz, posB, rotB, shapeB.xyz);
+    if (count == 0u)
+    {
+        _PairCounts[pair] = 0; // the manifold is removed, and with it the multipliers and penalties
+        return;
+    }
+
+    // The manifold of the last step.
+    uint firstRecord = _ContactBase + pair * AVBD_MAX_CONTACTS;
+    g_oldCount = (int)oldCount;
+    for (uint k = 0; k < oldCount; k++)
+    {
+        ConstraintRecord old = _Constraints[firstRecord + k];
+        g_oldKey[k] = (int)old.ident.w;
+        g_oldRA[k] = old.anchorA.xyz;
+        g_oldRB[k] = old.anchorB.xyz;
+        g_oldPenalty[k] = old.penaltyLin.xyz;
+        g_oldLambda[k] = old.lambdaLin.xyz;
+        g_oldStick[k] = (old.ident.z & AVBD_CONSTRAINT_FLAG_STICK) != 0u;
+    }
+
+    AvbdInitContacts(AVBD_ALPHA, AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+
+    float friction = sqrt(shapeA.w * shapeB.w);
+    uint kindBits = AVBD_CONSTRAINT_KIND_CONTACT << AVBD_CONSTRAINT_KIND_SHIFT;
+    for (uint i = 0; i < count; i++)
+    {
+        ConstraintRecord c;
+        c.ident = uint4(a, b, kindBits | (g_contactStick[i] ? AVBD_CONSTRAINT_FLAG_STICK : 0u), (uint)g_contactKey[i]);
+        c.anchorA = float4(g_contactRA[i], friction);
+        c.anchorB = float4(g_contactRB[i], 0.0);
+        c.c0Lin = float4(g_contactC0[i], 0.0);
+        c.c0Ang = float4(g_normalBA, 0.0);
+        c.penaltyLin = float4(g_contactPenalty[i], 0.0);
+        c.penaltyAng = float4(0.0, 0.0, 0.0, 0.0);
+        c.lambdaLin = float4(g_contactLambda[i], 0.0);
+        c.lambdaAng = float4(0.0, 0.0, 0.0, 0.0);
+        c.reserved = float4(0.0, 0.0, 0.0, 0.0);
+        _Constraints[firstRecord + i] = c;
+    }
+    _PairCounts[pair] = count;
+}

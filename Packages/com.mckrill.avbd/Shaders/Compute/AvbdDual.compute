@@ -7,21 +7,28 @@
 //
 // One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
 // ordering, coloring or atomics are needed. Springs have no state and are skipped.
+// DualContact is the dual update of the contacts, one thread per contact record of the contact region (see ContactLayout): records
+// beyond the pair's contact count are skipped. A contact's warm start is part of the narrow phase (AvbdNarrowphase.compute).
 // Mirrored by Reference/Stages/CpuConstraintInit.cs and CpuDual.cs, which the tests compare against.
 
 #pragma kernel ConstraintInit
 #pragma kernel Dual
+#pragma kernel DualContact
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactSolve.hlsl"
 
 StructuredBuffer<BodyStateRecord>      _BodyState;
 RWStructuredBuffer<ConstraintRecord>   _Constraints;
 
-uint _Base;  // first constraint to process
-uint _Count; // end of the range: constraints [_Base, _Count)
+StructuredBuffer<uint>                 _PairCounts; // contacts per pair (DualContact)
+
+uint _Base;        // first constraint to process
+uint _Count;       // end of the range: constraints [_Base, _Count)
+uint _ContactBase; // DualContact: index of the first contact record
 
 // Pose of body slot `id`: the start-of-step pose or the current pose. A body of AVBD_INVALID is the world.
 void LoadPose(uint id, bool atStart, out float3 pos, out float4 rot)
@@ -171,5 +178,45 @@ void Dual(uint3 id : SV_DispatchThreadID)
     c.penaltyAng.xyz = penaltyAng;
     c.lambdaLin.xyz = lambdaLin;
     c.lambdaAng.xyz = lambdaAng;
+    _Constraints[index] = c;
+}
+
+// Dual update of a contact (the reference solver's Manifold.UpdateDual): stores the clamped force as the multiplier, ramps the penalties
+// and updates the stick flag. The displacements are measured from the start-of-step poses, which every body has, static ones included.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void DualContact(uint3 id : SV_DispatchThreadID)
+{
+    uint index = _Base + id.x;
+    if (index >= _Count)
+        return;
+
+    uint relative = index - _ContactBase;
+    uint pair = relative / AVBD_MAX_CONTACTS;
+    uint slot = relative % AVBD_MAX_CONTACTS;
+    if (slot >= _PairCounts[pair])
+        return;
+
+    ConstraintRecord c = _Constraints[index];
+    uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+
+    BodyStateRecord stateA = _BodyState[c.ident.x];
+    BodyStateRecord stateB = _BodyState[c.ident.y];
+    float3 dqALin = stateA.position.xyz - stateA.startPosition.xyz;
+    float3 dqBLin = stateB.position.xyz - stateB.startPosition.xyz;
+    float3 dqAAng = AvbdQuatDifference(stateA.rotation, stateA.startRotation);
+    float3 dqBAng = AvbdQuatDifference(stateB.rotation, stateB.startRotation);
+
+    float3 penalty = c.penaltyLin.xyz;
+    AvbdContactEval e = AvbdEvaluateContact(
+        c.c0Ang.xyz, c.c0Lin.xyz, penalty, c.lambdaLin.xyz, c.anchorA.w, c.anchorA.xyz, c.anchorB.xyz, stateA.rotation, stateB.rotation,
+        dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
+    AvbdContactDualResult r = AvbdContactDual(e, penalty, (flags & AVBD_CONSTRAINT_FLAG_STICK) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
+
+    if (r.stick)
+        c.ident.z |= AVBD_CONSTRAINT_FLAG_STICK;
+    else
+        c.ident.z &= ~AVBD_CONSTRAINT_FLAG_STICK;
+    c.penaltyLin.xyz = r.penalty;
+    c.lambdaLin.xyz = r.lambda;
     _Constraints[index] = c;
 }

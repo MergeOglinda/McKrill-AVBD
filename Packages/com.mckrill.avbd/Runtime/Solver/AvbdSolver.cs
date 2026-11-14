@@ -7,7 +7,8 @@ namespace McKrill.Avbd
     /// The solver does not own the body or constraint buffers; dispose them separately. Without constraint buffers it creates an
     /// empty set of its own at the first step (so that free bodies still get their primal solve), and <see cref="Dispose"/> releases that one.
     /// <see cref="Step"/> runs a whole step: edits, constraint rebuild, predict, the iterations and the velocity update.
-    /// Joints and springs come from an optional <see cref="AvbdConstraintBuffers"/>.
+    /// Joints and springs come from an optional <see cref="AvbdConstraintBuffers"/>, which also owns the contact region if it was created with
+    /// contact bodies: then every step runs the narrow phase over all pairs of those bodies (no broadphase).
     /// </summary>
     public sealed class AvbdSolver : System.IDisposable
     {
@@ -20,12 +21,18 @@ namespace McKrill.Avbd
         readonly int initKernel;
         readonly int dualKernel;
         readonly int velocityKernel;
+        readonly int narrowphaseKernel = -1;
+        readonly int dualContactKernel = -1;
         AvbdSolverSettings settings;
 
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
         static readonly int ColorBodiesId = Shader.PropertyToID("_ColorBodies");
         static readonly int StatusId = Shader.PropertyToID("_Status");
+        static readonly int PairCountsId = Shader.PropertyToID("_PairCounts");
+        static readonly int PairExcludedId = Shader.PropertyToID("_PairExcluded");
+        static readonly int DirtySlotsId = Shader.PropertyToID("_DirtySlots");
+        static readonly int ContactBaseId = Shader.PropertyToID("_ContactBase");
 
         /// <param name="constraints">Joints and springs, or null for a solver of free bodies only.</param>
         public AvbdSolver(AvbdBodyBuffers bodies, AvbdSolverSettings settings, AvbdShaderSet shaderSet = null, AvbdConstraintBuffers constraints = null)
@@ -55,6 +62,13 @@ namespace McKrill.Avbd
             if (shaders.Velocity == null)
                 throw new System.InvalidOperationException("The AvbdShaderSet has no velocity shader.");
             velocityKernel = shaders.Velocity.FindKernel("Velocity");
+
+            // The contact kernels are only needed with contacts, but an asset that has the dual shader has the kernel.
+            dualContactKernel = shaders.Dual.FindKernel("DualContact");
+            if (shaders.Narrowphase != null)
+                narrowphaseKernel = shaders.Narrowphase.FindKernel("Narrowphase");
+            else if (constraints != null && constraints.HasContacts)
+                throw new System.InvalidOperationException("The AvbdShaderSet has no narrowphase shader.");
         }
 
         /// <summary>Solver constants. Takes effect at the next step. Throws ArgumentException for out-of-range values.</summary>
@@ -71,7 +85,9 @@ namespace McKrill.Avbd
         /// <summary>
         /// Runs one whole step. Applies pending body edits (stage E) and constraint changes, then runs predict (P), the constraint
         /// warm start (D), per iteration a primal sweep (V) and the dual update (D), and finally the velocity update (U).
-        /// The constraint lists are built on the CPU and the graph is colored on the GPU (stage C); stages S, B, N, G, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
+        /// The constraint lists are built on the CPU and the graph is colored on the GPU (stage C). With contacts, the narrow phase (N) runs after
+        /// predict, and the contact counts are read back to rebuild the lists and the coloring every step (a stall, until stage G runs on the
+        /// GPU). Stages S, B, G, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
         /// Must be called from the main thread. The previous step's results are the next step's input, so call it once per time step.
         /// </summary>
         public void Step()
@@ -86,11 +102,18 @@ namespace McKrill.Avbd
                 constraints.Rebuild();
 
             DispatchPredict();
+            if (constraints.HasContacts)
+            {
+                constraints.PrepareContacts();
+                DispatchNarrowphase();
+                constraints.RefreshContactTopology();
+            }
             DispatchConstraintInit();
             for (int it = 0; it < settings.iterations; it++)
             {
                 DispatchPrimalSweep();
                 DispatchDual();
+                DispatchDualContacts();
             }
             DispatchVelocity();
         }
@@ -151,6 +174,44 @@ namespace McKrill.Avbd
         internal void DispatchDual()
         {
             DispatchConstraintKernel(dualKernel);
+        }
+
+        // Stage N over every pair of the used contact bodies, after stage P (it reads the start-of-step poses).
+        internal void DispatchNarrowphase()
+        {
+            if (constraints == null || !constraints.HasContacts)
+                return;
+            int pairs = constraints.ContactPairsInUse;
+            if (pairs == 0)
+                return;
+
+            ComputeShader shader = shaders.Narrowphase;
+            SolverUniforms.Bind(shader, settings);
+            bodies.BindTo(shader, narrowphaseKernel);
+            shader.SetBuffer(narrowphaseKernel, RecordsId, constraints.Records);
+            shader.SetBuffer(narrowphaseKernel, PairCountsId, constraints.PairCountsBuffer);
+            shader.SetBuffer(narrowphaseKernel, PairExcludedId, constraints.PairExcludedBuffer);
+            shader.SetBuffer(narrowphaseKernel, DirtySlotsId, constraints.DirtySlotsBuffer);
+            shader.SetInt(ContactBaseId, constraints.ContactBase);
+            AvbdDispatch.Linear(shader, narrowphaseKernel, pairs);
+        }
+
+        // Stage D for the contacts, after every primal sweep: one thread per contact record of the used pairs.
+        internal void DispatchDualContacts()
+        {
+            if (constraints == null || !constraints.HasContacts)
+                return;
+            int pairs = constraints.ContactPairsInUse;
+            if (pairs == 0)
+                return;
+
+            ComputeShader shader = shaders.Dual;
+            SolverUniforms.Bind(shader, settings);
+            bodies.BindTo(shader, dualContactKernel);
+            shader.SetBuffer(dualContactKernel, RecordsId, constraints.Records);
+            shader.SetBuffer(dualContactKernel, PairCountsId, constraints.PairCountsBuffer);
+            shader.SetInt(ContactBaseId, constraints.ContactBase);
+            AvbdDispatch.Range(shader, dualContactKernel, constraints.ContactBase, pairs * ContactLayout.MaxContactsPerPair);
         }
 
         // One thread per constraint. Constraints are independent, so there is no coloring and one dispatch covers them all.

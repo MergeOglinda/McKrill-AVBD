@@ -19,6 +19,7 @@ namespace McKrill.Avbd
         [SerializeField] ComputeShader primal;
         [SerializeField] ComputeShader dual;
         [SerializeField] ComputeShader velocity;
+        [SerializeField] ComputeShader narrowphase;
         [SerializeField] ComputeShader coloring;
 
         /// <summary>Trivial kernel that writes a known pattern into a buffer. Proves the toolchain.</summary>
@@ -38,6 +39,9 @@ namespace McKrill.Avbd
 
         /// <summary>Stage U: velocity update from the displacement over the step, and the snapshot for the next warm start.</summary>
         public ComputeShader Velocity => velocity;
+
+        /// <summary>Stage N: box-box narrow phase over every pair of bodies, with the contact warm start.</summary>
+        public ComputeShader Narrowphase => narrowphase;
 
         /// <summary>Stage C: graph coloring of the solved bodies and bucketing by color.</summary>
         public ComputeShader Coloring => coloring;

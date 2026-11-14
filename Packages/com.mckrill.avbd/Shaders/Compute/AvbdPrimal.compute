@@ -10,6 +10,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactSolve.hlsl"
 
 RWStructuredBuffer<BodyStateRecord>    _BodyState;
 StructuredBuffer<BodyInertialRecord>   _BodyInertial;
@@ -182,6 +183,37 @@ void StampSpring(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, 
     sys.rhsAng += jAng * f;
 }
 
+// One contact point (see Include/AvbdContactSolve.hlsl). Both bodies' displacements from the start of the step enter the constraint value:
+// the body being solved is passed in, the other is read from the state array.
+void StampContact(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+{
+    bool isA = c.ident.x == slot;
+
+    float3 posA, posB;
+    float4 rotA, rotB;
+    LoadPose(c.ident.x, slot, selfPos, selfRot, posA, rotA);
+    LoadPose(c.ident.y, slot, selfPos, selfRot, posB, rotB);
+
+    BodyStateRecord stateA = _BodyState[c.ident.x];
+    BodyStateRecord stateB = _BodyState[c.ident.y];
+    float3 dqALin = posA - stateA.startPosition.xyz;
+    float3 dqBLin = posB - stateB.startPosition.xyz;
+    float3 dqAAng = AvbdQuatDifference(rotA, stateA.startRotation);
+    float3 dqBAng = AvbdQuatDifference(rotB, stateB.startRotation);
+
+    float3 penalty = c.penaltyLin.xyz;
+    AvbdContactEval e = AvbdEvaluateContact(
+        c.c0Ang.xyz, c.c0Lin.xyz, penalty, c.lambdaLin.xyz, c.anchorA.w, c.anchorA.xyz, c.anchorB.xyz, rotA, rotB,
+        dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
+    AvbdContactStamp s = AvbdStampContact(e, penalty, isA);
+
+    sys.lhsLin += s.lhsLin;
+    sys.lhsAng += s.lhsAng;
+    sys.lhsCross += s.lhsCross;
+    sys.rhsLin += s.rhsLin;
+    sys.rhsAng += s.rhsAng;
+}
+
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void Primal(uint3 id : SV_DispatchThreadID)
 {
@@ -226,6 +258,8 @@ void Primal(uint3 id : SV_DispatchThreadID)
             StampJoint(c, flags, slot, position, rotation, sys);
         else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
             StampSpring(c, slot, position, rotation, sys);
+        else if (kind == AVBD_CONSTRAINT_KIND_CONTACT)
+            StampContact(c, slot, position, rotation, sys);
     }
 
     // Lower triangle of the symmetric 6x6 matrix, row-major, and the right-hand side -rhs.
