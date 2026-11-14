@@ -9,9 +9,8 @@ namespace McKrill.Avbd.Samples
     /// A pyramid of boxes on the GPU solver, and a camera you can shoot boxes from.
     ///
     /// The simulation runs entirely through the package's public API: <see cref="AvbdBodyBuffers"/> holds the bodies,
-    /// <see cref="AvbdSolver.Step"/> advances them. Collisions are part of that step (broadphase, narrowphase and contact solve),
-    /// so this demo contains no collision code. Until those stages are inside <see cref="AvbdSolver.Step"/> the boxes fall through
-    /// each other and the ground.
+    /// <see cref="AvbdSolver.Step"/> advances them. Collisions are part of that step: the solver tests every pair of bodies
+    /// (no broadphase yet, so at most 512 bodies) and solves the contacts, so this demo contains no collision code.
     ///
     /// Drawing is the simple part: each frame the poses are read back from the GPU and copied to one cube per body. That is a
     /// stall and a per-body GameObject, fine for a few hundred boxes and not what the package's own renderer will do.
@@ -42,7 +41,7 @@ namespace McKrill.Avbd.Samples
 
         [Header("Pyramid")]
         [Tooltip("Layers of the pyramid. Layer k holds (layers - k)^2 blocks: 7 layers are 140 blocks. Applied on Reset.")]
-        [SerializeField, Range(7, 12)] int layers = 7;
+        [SerializeField, Range(7, MaxLayers)] int layers = 7;
         [SerializeField] Vector3 blockSize = new Vector3(1f, 0.5f, 1f);
         [SerializeField, Min(0.01f)] float blockDensity = 1f;
 
@@ -67,10 +66,14 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(0.1f)] float moveSpeed = 8f;
         [SerializeField, Min(0.01f)] float lookSensitivity = 0.2f;
 
+        // Contacts are tested for every pair of bodies and the package supports 512 bodies with contacts (AvbdConstraintBuffers.MaxContactBodies).
+        // Ten layers are 385 blocks; with the ground and 100 shots that fits.
+        const int MaxLayers = 10;
         const float GroundHalfExtent = 100f;
         const float BlockGap = 0.01f; // between neighbors; the pyramid starts almost at rest
 
         AvbdBodyBuffers bodies;
+        AvbdConstraintBuffers constraints;
         AvbdSolver solver;
         BodyStateRecord[] poses;
 
@@ -230,7 +233,10 @@ namespace McKrill.Avbd.Samples
         {
             DestroySimulation();
 
+            layers = Mathf.Clamp(layers, 7, MaxLayers);
             int blocks = BlockCount(layers);
+            // Bodies with contacts: the ground, the blocks and the shots. Fewer shots stay alive if they would not fit.
+            maxShots = Mathf.Clamp(maxShots, 1, AvbdConstraintBuffers.MaxContactBodies - 1 - blocks - 8);
             int capacity = 1 + blocks + maxShots + 8;
             bodies = new AvbdBodyBuffers(capacity);
             if (bodies.State.stride != UnsafeUtility.SizeOf<BodyStateRecord>())
@@ -239,7 +245,9 @@ namespace McKrill.Avbd.Samples
 
             AvbdSolverSettings settings = AvbdSolverSettings.Default; // 60 Hz, gravity (0, -10, 0): Unity's y-up
             settings.iterations = iterations;
-            solver = new AvbdSolver(bodies, settings);
+            // No joints or springs, so a capacity of 1. Every body takes part in contacts: the solver tests every pair of bodies.
+            constraints = new AvbdConstraintBuffers(bodies, 1, null, capacity);
+            solver = new AvbdSolver(bodies, settings, null, constraints);
 
             // Ground: a static slab whose top face is the plane y = 0.
             var ground = new float3(GroundHalfExtent * 2f, 1f, GroundHalfExtent * 2f);
@@ -293,8 +301,10 @@ namespace McKrill.Avbd.Samples
             DestroyVisuals(staticVisuals);
             DestroyVisuals(shots);
             if (solver != null) solver.Dispose();
+            if (constraints != null) constraints.Dispose();
             if (bodies != null) bodies.Dispose();
             solver = null;
+            constraints = null;
             bodies = null;
             poses = null;
         }
@@ -499,7 +509,7 @@ namespace McKrill.Avbd.Samples
             iterations = Mathf.RoundToInt(GUILayout.HorizontalSlider(iterations, 1, 30));
 
             GUILayout.Label("Pyramid layers: " + layers + "  (" + BlockCount(layers) + " blocks, applied on Reset)");
-            layers = Mathf.RoundToInt(GUILayout.HorizontalSlider(layers, 7, 12));
+            layers = Mathf.RoundToInt(GUILayout.HorizontalSlider(layers, 7, MaxLayers));
 
             GUILayout.BeginHorizontal();
             if (GUILayout.Button(paused ? "Play" : "Pause")) paused = !paused;
