@@ -158,6 +158,9 @@ namespace McKrill.Avbd
         /// <summary>Number of body slots, from slot 0, that collide with each other.</summary>
         public int ContactBodies => contactBodies;
 
+        /// <summary>Number of contacts found by the narrow phase in the last step (0 before the first step, or without contacts).</summary>
+        public int ContactCount { get; private set; }
+
         /// <summary>Contacts per pair as of the last <see cref="RefreshContactTopology"/>, indexed like <see cref="ContactLayout.PairIndex"/>.</summary>
         internal uint[] PairCounts => pairCounts;
 
@@ -441,6 +444,11 @@ namespace McKrill.Avbd
             int pairs = (int)ContactLayout.PairCount(inUse);
             if (pairs > 0)
                 pairCountBuffer.GetData(pairCounts, 0, 0, pairs);
+
+            int total = 0;
+            for (int p = 0; p < pairs; p++)
+                total += (int)pairCounts[p];
+            ContactCount = total;
 
             topology.Build(records, recordCount, solved, bodyCount, false, pairCounts, inUse, ContactBase);
 

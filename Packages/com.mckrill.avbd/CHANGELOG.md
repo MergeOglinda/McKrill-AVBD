@@ -40,3 +40,4 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - CPU oracle `CpuContacts` (and a contact branch in `CpuPrimal`, `CpuStep`) and `ContactTests`: topology, manifolds against the reference solver, ground and stack trajectories, GPU narrow phase against the oracle, GPU steps against the reference solver, recycled slots.
 - `Tools/HlslParity`: builds the contact HLSL as C++ and compares it with upstream's unmodified solver (narrow phase and contact math), bit-identical on about 800 000 cases.
 - `AvbdQuaternion.hlsl` split out of `AvbdMath.hlsl`.
+- `AvbdConstraintBuffers.ContactCount` (contacts found in the last step), shown in the GPU Pyramid Demo's panel. `AvbdSolver` logs a warning when it has to create its own constraint buffers for two or more bodies, because such a solver has no contacts.

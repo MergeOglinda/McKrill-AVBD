@@ -519,7 +519,8 @@ namespace McKrill.Avbd.Samples
             GUILayout.EndHorizontal();
 
             GUILayout.Space(4f);
-            GUILayout.Label("bodies " + (staticVisuals.Count + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
+            GUILayout.Label("bodies " + (staticVisuals.Count + shots.Count) + "   shots " + shots.Count + "/" + maxShots
+                + "   contacts " + (constraints != null ? constraints.ContactCount : 0));
             GUILayout.Label("step " + stepMs.ToString("0.00") + " ms (CPU side)   frame " + frameMs.ToString("0.0") + " ms");
             if (behindRealTime)
                 GUILayout.Label("running slower than real time");

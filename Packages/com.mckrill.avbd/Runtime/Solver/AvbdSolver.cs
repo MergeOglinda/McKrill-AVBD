@@ -97,6 +97,9 @@ namespace McKrill.Avbd
             {
                 constraints = new AvbdConstraintBuffers(bodies, 1, shaders);
                 ownsConstraints = true;
+                if (bodies.HighWaterMark >= 2)
+                    Debug.LogWarning("AvbdSolver: no AvbdConstraintBuffers were given, so the bodies do not collide. Create them with contactBodies "
+                        + "(new AvbdConstraintBuffers(bodies, capacity, null, contactBodies)) and pass them to the AvbdSolver constructor.");
             }
             if (constraints.NeedsRebuild)
                 constraints.Rebuild();
