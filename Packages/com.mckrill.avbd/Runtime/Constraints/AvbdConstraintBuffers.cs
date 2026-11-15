@@ -120,7 +120,7 @@ namespace McKrill.Avbd
             if (shaders == null)
                 throw new InvalidOperationException("The AvbdShaderSet asset was not found.");
             coloring = new AvbdGraphColoring(shaders.Coloring);
-            lists = new AvbdConstraintLists(shaders.Lists, bodies.Capacity);
+            lists = new AvbdConstraintLists(shaders.Lists, bodies.Capacity, (capacity + contactRecords) * 2);
 
             try
             {
@@ -263,6 +263,9 @@ namespace McKrill.Avbd
         internal GraphicsBuffer ColorBodies => colorBuffer;
 
         /// <summary>The coloring's work buffer, which holds the start and size of every color on the GPU (AVBD_COLOR_COUNTS_OFFSET and _STARTS_OFFSET).</summary>
+        /// <summary>For each entry of <see cref="List"/>, the body on the other side of the constraint (AVBD_INVALID for a world pin).</summary>
+        internal GraphicsBuffer ListOther => lists.Other;
+
         internal GraphicsBuffer ColorWork => coloring.Work;
 
         /// <summary>Indirect dispatch arguments of the primal sweep, <see cref="AvbdGraphColoring.ArgsStride"/> bytes per color.</summary>
@@ -494,7 +497,7 @@ namespace McKrill.Avbd
         // Stage C: colors the graph and buckets the bodies. The number of colors comes back; the size of each color stays on the GPU.
         void Recolor(int bodyCount)
         {
-            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, colorBuffer, coloringOrder);
+            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, lists.Other, colorBuffer, coloringOrder);
             scheduleValid = false;
         }
 

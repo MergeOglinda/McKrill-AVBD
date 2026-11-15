@@ -64,6 +64,7 @@ namespace McKrill.Avbd
         static readonly int BodyRangeId = Shader.PropertyToID("_BodyRange");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
+        static readonly int OtherId = Shader.PropertyToID("_ConstraintOther");
         static readonly int ColorBodiesId = Shader.PropertyToID("_ColorBodies");
         static readonly int WorkId = Shader.PropertyToID("_ColorWork");
         static readonly int ArgsId = Shader.PropertyToID("_ColorArgs");
@@ -115,8 +116,9 @@ namespace McKrill.Avbd
         /// </summary>
         /// <param name="records">Constraint records, read through the lists.</param>
         /// <param name="list">Per-body constraint lists; the offsets and counts are in the body Range array.</param>
-        public int Run(AvbdBodyBuffers bodies, int bodyCount, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer colorBodies,
-            GraphColoringOrder order)
+        /// <param name="other">For each list entry, the body on the other side of the constraint (<see cref="AvbdConstraintLists.Other"/>).</param>
+        public int Run(AvbdBodyBuffers bodies, int bodyCount, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other,
+            GraphicsBuffer colorBodies, GraphColoringOrder order)
         {
             if (disposed) throw new ObjectDisposedException(nameof(AvbdGraphColoring));
 
@@ -125,7 +127,7 @@ namespace McKrill.Avbd
                 return 0;
 
             foreach (int kernel in new[] { resetKernel, beginKernel, initKernel, roundKernel, countKernel, planKernel, bucketKernel })
-                Bind(kernel, bodies, records, list, colorBodies);
+                Bind(kernel, bodies, records, list, other, colorBodies);
             shader.SetInt(OrderId, (int)order);
 
             AvbdDispatch.Linear(shader, resetKernel, WorkWords);
@@ -196,13 +198,14 @@ namespace McKrill.Avbd
             return schedule;
         }
 
-        void Bind(int kernel, AvbdBodyBuffers bodies, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer colorBodies)
+        void Bind(int kernel, AvbdBodyBuffers bodies, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other, GraphicsBuffer colorBodies)
         {
             shader.SetBuffer(kernel, BodyMetaId, bodies.Meta);
             shader.SetBuffer(kernel, BodyMassId, bodies.Mass);
             shader.SetBuffer(kernel, BodyRangeId, bodies.Range);
             shader.SetBuffer(kernel, RecordsId, records);
             shader.SetBuffer(kernel, ListId, list);
+            shader.SetBuffer(kernel, OtherId, other);
             shader.SetBuffer(kernel, ColorBodiesId, colorBodies);
             shader.SetBuffer(kernel, WorkId, work);
             shader.SetBuffer(kernel, ArgsId, args);

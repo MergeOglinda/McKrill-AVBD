@@ -44,6 +44,8 @@ namespace McKrill.Avbd
         readonly int bodyCapacity;
         GraphicsBuffer work;
         GraphicsBuffer control;
+        GraphicsBuffer keys;   // one per list entry: the sort key
+        GraphicsBuffer other;  // one per list entry: the body on the other side of the constraint
         bool disposed;
 
         static readonly int BodyMetaId = Shader.PropertyToID("_BodyMeta");
@@ -51,6 +53,8 @@ namespace McKrill.Avbd
         static readonly int BodyRangeId = Shader.PropertyToID("_BodyRange");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
+        static readonly int KeysId = Shader.PropertyToID("_ListKey");
+        static readonly int OtherId = Shader.PropertyToID("_ConstraintOther");
         static readonly int WorkId = Shader.PropertyToID("_ListWork");
         static readonly int ControlId = Shader.PropertyToID("_ListControl");
         static readonly int PairCountsId = Shader.PropertyToID("_PairCounts");
@@ -62,7 +66,11 @@ namespace McKrill.Avbd
         /// <summary>Number of builds so far. Anything cached from <see cref="ReadControl"/> is out of date when this changes.</summary>
         public int Version { get; private set; }
 
-        public AvbdConstraintLists(ComputeShader shader, int bodyCapacity)
+        /// <summary>For each list entry, the body on the other side of the constraint (AVBD_INVALID for a world pin); the same layout as the list.</summary>
+        public GraphicsBuffer Other => other;
+
+        /// <param name="listCapacity">Entries of the list buffer that <see cref="Run"/> will fill.</param>
+        public AvbdConstraintLists(ComputeShader shader, int bodyCapacity, int listCapacity)
         {
             this.shader = shader != null ? shader : throw new InvalidOperationException("The AvbdShaderSet has no lists shader.");
             this.bodyCapacity = bodyCapacity;
@@ -78,6 +86,8 @@ namespace McKrill.Avbd
 
             work = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Math.Max(1, bodyCapacity * 2), sizeof(uint));
             control = new GraphicsBuffer(GraphicsBuffer.Target.Structured, ControlWords, sizeof(uint));
+            keys = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Math.Max(1, listCapacity), 2 * sizeof(uint));
+            other = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Math.Max(1, listCapacity), sizeof(uint));
             work.SetData(new uint[work.count]);
             control.SetData(new uint[ControlWords]);
         }
@@ -86,7 +96,7 @@ namespace McKrill.Avbd
         /// Builds the lists of the solved bodies among slots [0, bodyCount) and writes their offsets and counts into the body Range array.
         /// </summary>
         /// <param name="records">Constraint records. The joints and springs are [0, recordCount); the contacts are at contactBase and above.</param>
-        /// <param name="list">Receives the constraint ids. It must hold twice the number of records (joints, springs and contact records).</param>
+        /// <param name="list">Receives the constraint ids. It must hold twice the number of records (joints, springs and contact records), and as many entries as the listCapacity of the constructor.</param>
         /// <param name="pairCounts">Contacts per manifold slot, or null without contacts.</param>
         /// <param name="slotBodies">The pair of bodies of each manifold slot (AVBD_INVALID = free).</param>
         /// <param name="slotCount">Number of manifold slots.</param>
@@ -107,6 +117,8 @@ namespace McKrill.Avbd
                 shader.SetBuffer(kernel, BodyRangeId, bodies.Range);
                 shader.SetBuffer(kernel, RecordsId, records);
                 shader.SetBuffer(kernel, ListId, list);
+                shader.SetBuffer(kernel, KeysId, keys);
+                shader.SetBuffer(kernel, OtherId, other);
                 shader.SetBuffer(kernel, WorkId, work);
                 shader.SetBuffer(kernel, ControlId, control);
                 if (contacts)
@@ -149,6 +161,10 @@ namespace McKrill.Avbd
             work = null;
             control?.Release();
             control = null;
+            keys?.Release();
+            keys = null;
+            other?.Release();
+            other = null;
         }
     }
 }
