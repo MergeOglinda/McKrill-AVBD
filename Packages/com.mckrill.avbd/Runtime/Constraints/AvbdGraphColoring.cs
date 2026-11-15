@@ -50,6 +50,9 @@ namespace McKrill.Avbd
         /// <summary>Mirrors AVBD_COLOR_ROW_GROUPS: thread groups per row of a big color (the limit of one dimension of a dispatch).</summary>
         public const int RowGroups = AvbdIndirect.RowGroups;
 
+        /// <summary>Mirrors AVBD_PRIMAL_LANES: threads that solve one body in the primal sweep.</summary>
+        public const int PrimalLanes = 8;
+
         /// <summary>Rounds dispatched between two readbacks.</summary>
         const int RoundsPerBatch = 8;
 
@@ -80,10 +83,11 @@ namespace McKrill.Avbd
         public GraphicsBuffer Args => args;
 
         /// <summary>
-        /// Thread groups of an indirect dispatch over <paramref name="count"/> bodies, as <c>ColorPlan</c> computes them: x is at most
-        /// <see cref="RowGroups"/> and y the number of rows of that width. The mirror of the HLSL, which a test compares with the GPU's.
+        /// Thread groups of the primal sweep over a color of <paramref name="count"/> bodies, as <c>ColorPlan</c> computes them:
+        /// <see cref="PrimalLanes"/> threads per body, x at most <see cref="RowGroups"/> and y the number of rows of that width.
+        /// The mirror of the HLSL, which a test compares with the GPU's.
         /// </summary>
-        public static (uint x, uint y) GroupsFor(long count) => AvbdIndirect.GroupsFor(count);
+        public static (uint x, uint y) GroupsFor(long count) => AvbdIndirect.GroupsFor(count * PrimalLanes);
 
         public AvbdGraphColoring(ComputeShader shader)
         {

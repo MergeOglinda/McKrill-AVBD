@@ -1,8 +1,11 @@
-// Stage V: primal update. One thread solves one body: it assembles the body's 6x6 system from the inertia term and every
-// constraint in its list, solves it with an LDL^T factorization and applies the Newton step (Eqs. 4-6).
+// Stage V: primal update. AVBD_PRIMAL_LANES threads cooperate on one body: each assembles the 6x6 system of its share of the constraints in
+// the body's list (lane 0 also adds the inertia term), the shares are added up in groupshared memory, and lane 0 solves the sum with an LDL^T
+// factorization and applies the Newton step (Eqs. 4-6). A body with many constraints (a contact-heavy body has dozens of entries) is then
+// walked by several threads instead of one, which is what bounds the time of a color when the colors are small.
 // Dispatched (indirectly) once per graph color and iteration: the bodies of one color share no constraint, so a body writes only its own
 // pose and reads the others' poses from other colors, with no atomics (except the failure counter).
-// Mirrored by Reference/Stages/CpuPrimal.cs, which the tests compare against.
+// Mirrored by Reference/Stages/CpuPrimal.cs, which the tests compare against. The sum of the lanes adds the terms in another order than the
+// reference does, so the two agree to rounding, not bit for bit.
 
 #pragma kernel Primal
 
@@ -215,54 +218,131 @@ void StampContact(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot,
     sys.rhsAng += s.rhsAng;
 }
 
-[numthreads(AVBD_GROUP_SIZE, 1, 1)]
-void Primal(uint3 id : SV_DispatchThreadID)
+// The terms of a body's system that the lanes add up: the 3x3 blocks lhsLin, lhsAng and lhsCross (9 each, row-major), then rhsLin and
+// rhsAng (3 each).
+#define AVBD_PRIMAL_TERMS 33
+
+// Partial sums of the lanes, term-major: term t of thread i is at t * AVBD_GROUP_SIZE + i, so the lanes of a body read consecutive words.
+groupshared float gsTerms[AVBD_PRIMAL_TERMS * AVBD_GROUP_SIZE];
+
+void StorePartial(uint tid, PrimalSystem sys)
 {
-    // Entry of the color. A big color is laid out in rows of AVBD_COLOR_ROW_GROUPS groups (see AvbdColoringParams.hlsl).
-    uint index = id.y * (AVBD_COLOR_ROW_GROUPS * AVBD_GROUP_SIZE) + id.x;
-    if (index >= _ColorWork[AVBD_COLOR_COUNTS_OFFSET + _Color])
-        return;
-
-    uint slot = _ColorBodies[_ColorWork[AVBD_COLOR_STARTS_OFFSET + _Color] + index];
-
-    // The lists and the colors were built before the last edits; a body removed or changed since is skipped.
-    if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
-        return;
-    float4 momentMass = _BodyMass[slot].momentMass;
-    float mass = momentMass.w;
-    if (!(mass > 0.0))
-        return;
-
-    float dt = AVBD_DT;
-    float dtSq = dt * dt;
-
-    BodyStateRecord state = _BodyState[slot];
-    BodyInertialRecord inertial = _BodyInertial[slot];
-    float3 position = state.position.xyz;
-    float4 rotation = state.rotation;
-
-    // Inertia term.
-    PrimalSystem sys;
-    sys.lhsLin = AvbdDiagonal(float3(mass / dtSq, mass / dtSq, mass / dtSq));
-    sys.lhsAng = AvbdDiagonal(float3(momentMass.x / dtSq, momentMass.y / dtSq, momentMass.z / dtSq));
-    sys.lhsCross = float3x3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    sys.rhsLin = (mass / dtSq) * (position - inertial.position.xyz);
-    sys.rhsAng = (momentMass.xyz / dtSq) * AvbdQuatDifference(rotation, inertial.rotation);
-
-    // Every constraint of the body, newest first.
-    uint2 range = _BodyRange[slot].range.xy;
-    for (uint e = 0; e < range.y; e++)
+    [unroll]
+    for (uint r = 0; r < 3; r++)
     {
-        ConstraintRecord c = _Constraints[_ConstraintList[range.x + e]];
-        uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
-        uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
-        if (kind == AVBD_CONSTRAINT_KIND_JOINT)
-            StampJoint(c, flags, slot, position, rotation, sys);
-        else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
-            StampSpring(c, slot, position, rotation, sys);
-        else if (kind == AVBD_CONSTRAINT_KIND_CONTACT)
-            StampContact(c, slot, position, rotation, sys);
+        [unroll]
+        for (uint col = 0; col < 3; col++)
+        {
+            gsTerms[(r * 3 + col) * AVBD_GROUP_SIZE + tid] = sys.lhsLin[r][col];
+            gsTerms[(9 + r * 3 + col) * AVBD_GROUP_SIZE + tid] = sys.lhsAng[r][col];
+            gsTerms[(18 + r * 3 + col) * AVBD_GROUP_SIZE + tid] = sys.lhsCross[r][col];
+        }
     }
+    [unroll]
+    for (uint k = 0; k < 3; k++)
+    {
+        gsTerms[(27 + k) * AVBD_GROUP_SIZE + tid] = sys.rhsLin[k];
+        gsTerms[(30 + k) * AVBD_GROUP_SIZE + tid] = sys.rhsAng[k];
+    }
+}
+
+// AVBD_PRIMAL_LANES threads solve one body. Lane l stamps the entries l, l + AVBD_PRIMAL_LANES, ... of the body's list into its own partial system;
+// the partial systems are added up in groupshared memory, and lane 0 solves the sum once and writes the pose. The lanes of a body are
+// adjacent threads of a group, so a group of AVBD_GROUP_SIZE threads solves AVBD_GROUP_SIZE / AVBD_PRIMAL_LANES bodies.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
+{
+    // Item of the dispatch: body (entry of the color) times lanes, plus the lane. A big color is laid out in rows of AVBD_COLOR_ROW_GROUPS
+    // groups (see AvbdColoringParams.hlsl). Every thread reaches the barriers below, so nothing returns early.
+    uint item = id.y * (AVBD_COLOR_ROW_GROUPS * AVBD_GROUP_SIZE) + id.x;
+    uint index = item / AVBD_PRIMAL_LANES;
+    uint lane = item % AVBD_PRIMAL_LANES;
+    uint first = tid - lane; // the thread of lane 0 of this body
+
+    bool active = index < _ColorWork[AVBD_COLOR_COUNTS_OFFSET + _Color];
+    uint slot = 0u;
+    float mass = 0.0;
+    float4 momentMass = float4(0.0, 0.0, 0.0, 0.0);
+    if (active)
+    {
+        slot = _ColorBodies[_ColorWork[AVBD_COLOR_STARTS_OFFSET + _Color] + index];
+
+        // The lists and the colors were built before the last edits; a body removed or changed since is skipped.
+        if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
+            active = false;
+        else
+        {
+            momentMass = _BodyMass[slot].momentMass;
+            mass = momentMass.w;
+            active = mass > 0.0;
+        }
+    }
+
+    float3 position = float3(0.0, 0.0, 0.0);
+    float4 rotation = float4(0.0, 0.0, 0.0, 1.0);
+
+    PrimalSystem sys;
+    sys.lhsLin = float3x3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    sys.lhsAng = sys.lhsLin;
+    sys.lhsCross = sys.lhsLin;
+    sys.rhsLin = float3(0.0, 0.0, 0.0);
+    sys.rhsAng = float3(0.0, 0.0, 0.0);
+
+    if (active)
+    {
+        BodyStateRecord state = _BodyState[slot];
+        position = state.position.xyz;
+        rotation = state.rotation;
+
+        // Inertia term: once, by lane 0.
+        if (lane == 0u)
+        {
+            float dtSq = AVBD_DT * AVBD_DT;
+            BodyInertialRecord inertial = _BodyInertial[slot];
+            sys.lhsLin = AvbdDiagonal(float3(mass / dtSq, mass / dtSq, mass / dtSq));
+            sys.lhsAng = AvbdDiagonal(float3(momentMass.x / dtSq, momentMass.y / dtSq, momentMass.z / dtSq));
+            sys.rhsLin = (mass / dtSq) * (position - inertial.position.xyz);
+            sys.rhsAng = (momentMass.xyz / dtSq) * AvbdQuatDifference(rotation, inertial.rotation);
+        }
+
+        // This lane's share of the constraints of the body.
+        uint2 range = _BodyRange[slot].range.xy;
+        for (uint e = lane; e < range.y; e += AVBD_PRIMAL_LANES)
+        {
+            ConstraintRecord c = _Constraints[_ConstraintList[range.x + e]];
+            uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+            uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
+            if (kind == AVBD_CONSTRAINT_KIND_JOINT)
+                StampJoint(c, flags, slot, position, rotation, sys);
+            else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
+                StampSpring(c, slot, position, rotation, sys);
+            else if (kind == AVBD_CONSTRAINT_KIND_CONTACT)
+                StampContact(c, slot, position, rotation, sys);
+        }
+
+        StorePartial(tid, sys);
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // Add up the partial systems of the body's lanes into lane 0's words, in lane order (so the sum does not depend on timing). Lane l adds
+    // the terms l, l + AVBD_PRIMAL_LANES, ...; a term is read and written by one lane only, so this needs no second copy.
+    if (active)
+    {
+        for (uint t = lane; t < AVBD_PRIMAL_TERMS; t += AVBD_PRIMAL_LANES)
+        {
+            float sum = 0.0;
+            [unroll]
+            for (uint l = 0; l < AVBD_PRIMAL_LANES; l++)
+                sum += gsTerms[t * AVBD_GROUP_SIZE + first + l];
+            gsTerms[t * AVBD_GROUP_SIZE + first] = sum;
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (!active || lane != 0u)
+        return;
 
     // Lower triangle of the symmetric 6x6 matrix, row-major, and the right-hand side -rhs.
     float a[36];
@@ -276,22 +356,23 @@ void Primal(uint3 id : SV_DispatchThreadID)
         [unroll]
         for (uint col = 0; col < 3; col++)
         {
-            a[r * 6 + col] = sys.lhsLin[r][col];
-            a[(3 + r) * 6 + col] = sys.lhsCross[r][col];
-            a[(3 + r) * 6 + 3 + col] = sys.lhsAng[r][col];
+            a[r * 6 + col] = gsTerms[(r * 3 + col) * AVBD_GROUP_SIZE + tid];
+            a[(3 + r) * 6 + col] = gsTerms[(18 + r * 3 + col) * AVBD_GROUP_SIZE + tid];
+            a[(3 + r) * 6 + 3 + col] = gsTerms[(9 + r * 3 + col) * AVBD_GROUP_SIZE + tid];
         }
     }
 
     float y[6];
-    y[0] = -sys.rhsLin.x;
-    y[1] = -sys.rhsLin.y;
-    y[2] = -sys.rhsLin.z;
-    y[3] = -sys.rhsAng.x;
-    y[4] = -sys.rhsAng.y;
-    y[5] = -sys.rhsAng.z;
+    [unroll]
+    for (uint k = 0; k < 3; k++)
+    {
+        y[k] = -gsTerms[(27 + k) * AVBD_GROUP_SIZE + tid];
+        y[3 + k] = -gsTerms[(30 + k) * AVBD_GROUP_SIZE + tid];
+    }
 
     if (AvbdSolveLdlt6(a, y))
     {
+        BodyStateRecord state = _BodyState[slot];
         state.position = float4(position + float3(y[0], y[1], y[2]), 0.0);
         state.rotation = AvbdIntegrateAngular(rotation, float3(y[3], y[4], y[5]));
         _BodyState[slot] = state;

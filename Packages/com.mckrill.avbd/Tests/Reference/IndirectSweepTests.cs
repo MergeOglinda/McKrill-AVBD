@@ -18,7 +18,7 @@ namespace McKrill.Avbd.Tests
         // ---- the argument arithmetic (the C# mirror of ColorPlan) ----------------------------------------------------------
 
         [Test]
-        public void GroupsFor_CoversEveryEntryOfAColorOnce()
+        public void GroupsFor_CoversEveryLaneOfEveryBodyOfAColorOnce()
         {
             var counts = new long[]
             {
@@ -33,21 +33,23 @@ namespace McKrill.Avbd.Tests
             {
                 (uint x, uint y) = AvbdGraphColoring.GroupsFor(count);
                 long rowWidth = (long)AvbdGraphColoring.RowGroups * ThreadsPerGroup;
+                long items = count * AvbdGraphColoring.PrimalLanes; // the primal sweep has several threads per body
 
                 Assert.LessOrEqual(x, (uint)AvbdGraphColoring.RowGroups, "count " + count + ": one dimension of a dispatch is at most 65535 groups");
                 Assert.GreaterOrEqual(y, 1u, "count " + count + ": at least one row, so the dispatch is a valid (empty) one");
 
-                // Thread (tx, ty) handles entry ty * rowWidth + tx. Every row but the last is full, so the entries the dispatch reaches are
-                // [0, (y - 1) * rowWidth + x * 64), and the last group is the only one that can overshoot the count.
+                // Thread (tx, ty) handles item ty * rowWidth + tx (lane item % lanes of body item / lanes). Every row but the last is full, so
+                // the items the dispatch reaches are [0, (y - 1) * rowWidth + x * 64), and the last group is the only one that can overshoot.
                 long reached = (y - 1) * rowWidth + (long)x * ThreadsPerGroup;
-                Assert.GreaterOrEqual(reached, count, "count " + count + ": reaches every entry");
-                Assert.Less(reached - count, ThreadsPerGroup + (y > 1 ? rowWidth : 0), "count " + count + ": no whole group or row is wasted");
+                Assert.GreaterOrEqual(reached, items, "count " + count + ": reaches every lane of every body");
+                Assert.Less(reached - items, ThreadsPerGroup + (y > 1 ? rowWidth : 0), "count " + count + ": no whole group or row is wasted");
                 if (y > 1)
                     Assert.AreEqual((uint)AvbdGraphColoring.RowGroups, x, "count " + count + ": the rows of a big color are full width");
             }
 
             Assert.AreEqual(((uint)0, (uint)1), AvbdGraphColoring.GroupsFor(0), "an empty color is a 0 x 1 dispatch");
-            Assert.AreEqual(((uint)5, (uint)1), AvbdGraphColoring.GroupsFor(300));
+            Assert.AreEqual(((uint)38, (uint)1), AvbdGraphColoring.GroupsFor(300), "300 bodies x 8 lanes = 2400 threads = 37.5 groups");
+            Assert.AreEqual(ThreadsPerGroup % AvbdGraphColoring.PrimalLanes, 0, "the lanes of a body share a thread group");
         }
 
         // ---- the GPU -------------------------------------------------------------------------------------------------------
@@ -56,7 +58,7 @@ namespace McKrill.Avbd.Tests
         public void Gpu_ColorSchedule_HoldsTheStartSizeAndArgumentsOfEveryColor()
         {
             RequireCompute();
-            const int links = 200; // a chain colors with two colors of 100 bodies: two thread groups each
+            const int links = 200; // a chain colors with two colors of 100 bodies: 13 thread groups each (8 lanes per body)
 
             using (var buffers = new AvbdBodyBuffers(256))
             using (var constraints = new AvbdConstraintBuffers(buffers, 256))
@@ -78,7 +80,7 @@ namespace McKrill.Avbd.Tests
                 Assert.AreEqual(links, schedule.Starts[2], "the starts end at the number of colored bodies");
                 for (int c = 0; c < 2; c++)
                 {
-                    Assert.AreEqual(2u, schedule.GroupsX[c], "groups of color " + c);
+                    Assert.AreEqual(13u, schedule.GroupsX[c], "groups of color " + c + ": 100 bodies x 8 lanes = 12.5 groups");
                     Assert.AreEqual(1u, schedule.GroupsY[c]);
                     Assert.AreEqual(1u, schedule.GroupsZ[c]);
                 }
