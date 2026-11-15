@@ -100,7 +100,7 @@ bool IsFinite3(float3 v)
 
 // True if a joint or a spring joins `solvedBody` and `other`. The list of a solved body holds every constraint on it, including the ones
 // to static bodies. Contacts (kind CONTACT, written by the narrowphase) are in the lists too and do not count: a pair with a contact is
-// exactly a pair that must stay a candidate. A fractured joint still counts, like AvbdBody.ConstrainedTo.
+// exactly a pair that must stay a candidate. A fractured joint still counts, like AvbdBody.ConstrainedTo, until the list build (stage G) drops it, one step after it broke.
 bool Constrained(uint solvedBody, uint other)
 {
     uint2 range = _BodyRange[solvedBody].range.xy;

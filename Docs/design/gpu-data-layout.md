@@ -375,7 +375,7 @@ The previous velocity is what stage P reads for the adaptive warm start, so a st
 
 ### Stage C: graph coloring on the GPU
 
-`AvbdColoring.compute` colors the graph of solved bodies and buckets the bodies by color, replacing the CPU coloring of `ConstraintTopology`. The graph has one node per solved body and one edge per constraint between two solved bodies. Fixed bodies and world pins create no edge. The adjacency is read from the per-body lists (stage G, still built on the CPU).
+`AvbdColoring.compute` colors the graph of solved bodies and buckets the bodies by color, replacing the CPU coloring of `ConstraintTopology`. The graph has one node per solved body and one edge per constraint between two solved bodies. Fixed bodies and world pins create no edge. The adjacency is read from the per-body lists (stage G).
 
 **Algorithm: Jones-Plassmann.** Every body has a priority, a strict total order. A body colors itself once every neighbor of higher priority has a color, and takes the lowest color none of its neighbors has. All bodies that are ready color in the same round; one round is one dispatch. The result does not depend on the thread order inside a round: a body only sees final colors of its higher-priority neighbors, and a lower-priority neighbor cannot be colored before it. The result is therefore the sequential greedy first-fit coloring of the priority order. The color is written to `Meta.state.x`; a solved body without a color holds `AVBD_COLOR_PENDING`, a body that is not solved holds `AVBD_INVALID`.
 
@@ -398,7 +398,7 @@ The previous velocity is what stage P reads for the adaptive warm start, so a st
 
 **Check.** `CpuGraphColoring` is the oracle: bodies visited in falling priority, each takes the lowest color not used by a colored neighbor. `GraphColoringTests`: the oracle in slot order equals `ConstraintTopology`'s coloring (rope and 12 random scenes); the hashed oracle is a valid coloring; the GPU equals the oracle exactly in both orders on the rope, the spring scene and random lattices (color of every body, number of colors, bucket contents); the hashed order needs under half the rounds of the slot order on a chain of 160 links; recoloring after a spawn, an added constraint and a body becoming kinematic; bodies without constraints; and the 65-body clique that exceeds 64 colors. `PrimalTests` and `VelocityTests` now run on the GPU coloring.
 
-Not part of this stage: GPU construction of the lists (stage G), indirect dispatch of the color sweep, temporal coherence, and removing a joint that has fractured from the graph.
+Not part of this stage: indirect dispatch of the color sweep (the host still reads the color counts back), and temporal coherence. A joint that has fractured is left out of the lists by stage G, so it is not in the graph either.
 
 ### Stage B: broadphase
 
@@ -450,6 +450,37 @@ Two static or kinematic bodies never make a pair. A pair that does not fit its b
 
 **Check.** `CpuBroadphase` is the oracle: brute force over all pairs with the same rules (it is the narrowphase's candidate rule, which `CpuContacts` mirrors). `BroadphaseTests`: the oracle's pair set equals the reference solver's pair loop (minus static-static pairs) on the ground, stack, pyramid, rope and spring scenes and 10 dense random scenes; the GPU equals the oracle, on the state the GPU holds, on the same scenes and scenes far from the origin and with sizes from 0.05 to 8; pairs are well formed (body A above body B, kind matches the bodies, no duplicates, no static-static); kinematic, static and removed bodies; excluded constraints (a joint that broke after the lists were built still excludes until they are rebuilt, a contact does not); overflow counts pairs beyond the capacity and stores only real ones; repeated runs and moved bodies; empty and all-static scenes; the solver running the stage on the poses of the step start; and, with contacts, every pair the narrowphase holds contacts for being a pair of the list in 40 steps of a falling pyramid. `BodyLayoutTests` checks the constants and the record against the C# mirrors.
 
+### Stage G: constraint lists on the GPU
+
+`AvbdLists.compute` builds the constraint list of every solved body (CSR) from the joint and spring records and the manifold pool, replacing the CPU build of `ConstraintTopology` and the readbacks that fed it. `AvbdConstraintLists` (`Runtime/Constraints`) owns its two scratch buffers and dispatches it; `AvbdConstraintBuffers` calls it from `Rebuild()` and, with contacts, from `RefreshContactTopology()` after the narrow phase, followed by stage C.
+
+**Output.** The `_ConstraintList` buffer (constraint ids grouped per solved body) and, per body, `Range = (offset, count)` in the body Range array (owner: stage G; `zw` are zero). A body that is not solved gets count 0. Rules of section 12 are kept: only solved bodies get a list, a constraint to a body that is not solved (or to the world) is listed for its solved side only, and the list is sized `(capacity + contact records) * 2`, the most that can be needed (two entries per record).
+
+**Fractured joints.** A record with the `Broken` flag (set by stage D) is not listed, and is counted. This replaces the per-step readback of the joint flags: the flag is read where it is, on the GPU. The timing is the one section 13 describes (the lists built in step k + 1, after the narrow phase, leave out a joint that broke in step k).
+
+**Kernels**, in the order the host runs them:
+
+| Kernel | Threads | Does |
+| --- | --- | --- |
+| `ListBegin` | 1 | Zeroes the control words |
+| `ListClear` | one per body | Zeroes the count of the body and its Range |
+| `ListCountRecords` | one per joint or spring | Adds 1 to the count of each solved body of the record; counts fractured records; flags records that name a body that is not in use |
+| `ListCountContacts` | one per manifold slot | Adds the slot's contact count to each solved body of the pair (a free slot, an empty one or one with a bad body is skipped) |
+| `ListScan` | one group of 1024 | Exclusive prefix sum of the counts into the offsets (every thread owns a run of consecutive bodies, a group-shared scan combines the runs); writes Range, the cursors and the total |
+| `ListFillRecords` | one per joint or spring | Appends the id to the list of each solved body, with an atomic cursor |
+| `ListFillContacts` | one per manifold slot | Appends the slot's contact ids (`ContactBase + slot * 8 + k`) |
+| `ListSort` | one per body | Insertion sort of the body's list |
+
+**Order.** The fill order depends on thread timing and on the slots the pool handed out, so every list is sorted afterwards, with the key: contacts first, by (body A, body B, k) ascending, then joints and springs by falling id (newest first). That is the order of the CPU oracle, which is the reference's order of constraints in the first step, and it makes the floating-point sums reproducible from run to run. Insertion sort is fine because a list has a few dozen entries at most.
+
+**Control buffer** (`AVBD_LIST_CONTROL_*`): the total number of entries, the number of fractured records left out (`AvbdConstraintBuffers.BrokenCount` reads it, once per build), and the number of records or manifolds that name a body slot that is not in use or report more than eight contacts (0 in a healthy scene; the CPU build threw an exception here).
+
+**Cost.** No readback. The scan is one group, so it is serial over `bodyCount / 1024` bodies per thread; fine up to some hundred thousand bodies, and the first thing to replace with a multi-group scan if it shows in a profile.
+
+**Check.** `ConstraintTopology` (`Build` and `BuildWithManifolds`) is the oracle. `ConstraintListTests`: the ranges and every list entry equal the oracle's for joints and springs with world pins, a body of mass 0 and a kinematic body as partners and two constraints between the same pair; for a fractured joint (left out, counted, `BrokenCount`); for a scene with contacts, after each of six steps; and for a spring to a massless body added after a first build. `BodyLayoutTests` compares the HLSL constants with the C# mirrors.
+
+**Limits.** The sort and the scan are simple, not fast. The coloring that follows still reads the color counts back. Constraints cannot be removed, and removing a body that has constraints is not supported.
+
 ## 12. Constraints (step 4: joints and springs)
 
 Contacts without a broadphase are section 13. Joints and springs share one record, a constraint, with the kind in the high 8 bits of the flags word (rule P7).
@@ -483,7 +514,7 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 - Colors come from a greedy first-fit coloring: bodies from the highest slot down, lowest color not used by a colored neighbor. This is the reference's `GraphColoring`, and `ConstraintTopologyTests` checks the two against each other. Fixed bodies and world pins create no edge. `ConstraintTopology` still computes this coloring on the CPU, as the oracle of stage C; the solver uses the GPU coloring (stage C above), which gives the same colors in the default order.
 - Bodies are bucketed by color in one list; the host knows each color's range from the coloring's readback, so a color is one dispatch.
 
-**The lists are built on the CPU for now** (`ConstraintTopology`, called by `Rebuild()`), because stage G does not exist; the coloring and the buckets are stage C on the GPU. `Rebuild()` applies the pending body edits and reads body data back (sizes, poses, mass, flags), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending or when the set of solved bodies changed (section 11, stage U). Known limits until G exists: constraints cannot be removed, removing a body that has constraints is not supported, and a joint that fractures (stage D) stays in the lists and the coloring, so the colored order can differ from the reference's from the next step on (the reference removes a broken joint at the next step's warm start and colors again). The graph color is written to the Meta record by stage C (`Meta.state.x`).
+**The lists are built on the GPU** (stage G, section 11), and so are the coloring and the buckets (stage C). `ConstraintTopology` is the CPU oracle for both. `Rebuild()` applies the pending body edits and reads the sizes and poses of the bodies back only when new constraints must be completed (the torque arm, the spring's rest length), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending or when the set of solved bodies changed (section 11, stage U). Known limits: constraints cannot be removed, removing a body that has constraints is not supported, and without contacts the lists are rebuilt only by `Rebuild()`, so a joint that fractures (stage D) stays in the lists and the coloring until then (with contacts the lists are rebuilt every step and drop it; section 13). The graph color is written to the Meta record by stage C (`Meta.state.x`).
 
 ### Tests
 
@@ -497,9 +528,10 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 | `DualTests` (GPU) | Yes | `Step()` against the oracles on the rope, the fracture scene and random lattices, including all constraint records; springs untouched by stage D |
 | `GraphColoringTests` (oracle) | No | `CpuGraphColoring` in slot order against `ConstraintTopology`; the hashed order is a valid coloring and a strict order |
 | `GraphColoringTests` (GPU) | Yes | The kernels against the oracle in both orders (colors, color count, buckets); rounds on a long chain; recoloring after edits; no constraints; more than 64 colors |
+| `ConstraintListTests` | Yes | Stage G: the GPU lists and ranges against `ConstraintTopology` entry by entry (pins, fixed and kinematic partners, a fractured joint, contacts over six steps, a massless partner added later) |
 | `VelocityTests` | Both | Stage U and whole steps against the reference solver (section 11, stage U) |
 
-None of the stage V, D, U or C code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.
+None of the stage V, D, U, C or G code or tests has been compiled or run: there was no Unity editor, compiler or GPU in the environment where it was written.
 
 ## 13. Contacts (stage N)
 
@@ -543,11 +575,11 @@ Slots are pushed only by `NpRetire` and `Narrowphase` and popped only by `NpAllo
 
 `ApplyEdits`, `Rebuild` if needed, B, P, `PrepareContacts` (dirty bits), N (the four kernels), `RefreshContactTopology`, `ConstraintInit` (joints and springs), then per iteration the primal sweep per color, `Dual`, `DualContact`; then U.
 
-`RefreshContactTopology` reads the contact count and the pair of every slot back (a stall), builds the per-body lists on the CPU (contacts first in each list, **ordered by pair** (body A, then body B) whichever slots the pairs hold, then joints and springs newest first, which is the reference's order of constraints in the first step) and runs the GPU coloring (stage C) with the contacts in the graph. **This readback goes away with stage G** (lists built on the GPU from the slot table). With contacts the coloring changes every step; `SlotOrder` gives the reference's coloring.
+`RefreshContactTopology` builds the per-body lists on the GPU (stage G) from the slot table and the records, with no readback: contacts first in each list, **ordered by pair** (body A, then body B) whichever slots the pairs hold, then joints and springs newest first, which is the reference's order of constraints in the first step. It then runs the GPU coloring (stage C) with the contacts in the graph; that still reads the color counts back. With contacts the coloring changes every step; `SlotOrder` gives the reference's coloring.
 
 ### Fractured joints
 
-Stage D marks a joint that fractured with the `Broken` flag. Without contacts nothing reads it back and the joint stays in the lists (section 12). With contacts, and if some joint is fracturable, `PrepareContacts` reads the flags of the joint records back (after the broadphase of the step, before the narrow phase). The CPU copy of each new broken joint gets the flag, and the lists and the coloring that `RefreshContactTopology` builds right after leave the joint out. The broadphase reads those lists to exclude joined pairs (section 11, stage B), so a pair stops being excluded in the step after the one that sees the fracture. That is the reference solver's timing: a joint that broke in step k is still attached in the broadphase of step k + 1, where its `initialize()` removes it, and the pair is a candidate from step k + 2. `AvbdConstraintBuffers.BrokenCount` is the number of joints seen broken. Cost: one readback of the joint records per step, only if a joint can fracture.
+Stage D marks a joint that fractured with the `Broken` flag. Stage G reads the flag on the GPU and leaves the joint out of the lists it builds, and so out of the coloring. With contacts the lists are rebuilt right after the narrow phase of every step, so the joint that broke in step k is dropped from the lists of step k + 1. The broadphase reads those lists to exclude joined pairs (section 11, stage B), and it runs before that rebuild, so it still finds the pair joined in step k + 1 and a pair stops being excluded in step k + 2. That is the reference solver's timing: a joint that broke in step k is still attached in the broadphase of step k + 1, where its `initialize()` removes it, and the pair is a candidate from step k + 2. `AvbdConstraintBuffers.BrokenCount` is the number of broken joints and springs counted by the last list build (one readback of the control buffer when it is read after a build). Without contacts the lists are not rebuilt after a fracture (section 12).
 
 ### Limits
 
@@ -555,7 +587,7 @@ Stage D marks a joint that fractured with the `Broken` flag. Without contacts no
 - A manifold that exists is kept even if a joint or spring is added between its bodies later. A pair that the broadphase does not list is not created.
 - No ignore-collision pairs yet (the reference's `IgnoreCollision`). Pairs joined by a joint or spring are excluded.
 - Only box-box. Contacts of one pair are limited to eight (the reference's limit).
-- The lists are rebuilt on the CPU every step.
+- The lists are rebuilt on the GPU every step; the coloring behind them still reads the color counts back.
 - After the first step the summation order of a body's contacts may differ from the reference's (the reference appends new manifolds to the lists); the results differ by rounding only.
 
 ### How it is checked

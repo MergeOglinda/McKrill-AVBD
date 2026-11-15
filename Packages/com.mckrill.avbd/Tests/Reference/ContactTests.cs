@@ -416,8 +416,8 @@ namespace McKrill.Avbd.Tests
                 Assert.AreEqual(0u, constraints.ReadContacts().CountOf(a.Slot, b.Slot), "the joint keeps the pair from colliding while it holds");
 
                 // The joint breaks on the GPU in some step k. In step k + 1 the broadphase still finds the pair joined (the reference solver
-                // removes a broken joint at the initialize of that step), and the step reads the broken flag back and drops the joint from
-                // the lists. From step k + 2 the pair is a candidate.
+                // removes a broken joint at the initialize of that step), and the list build (stage G) after the narrow phase leaves the
+                // joint out. From step k + 2 the pair is a candidate.
                 for (int i = 0; i < 10 && constraints.BrokenCount == 0; i++)
                     solver.Step();
                 Assert.AreEqual(1, constraints.BrokenCount, "the joint fractured");

@@ -79,8 +79,8 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(0.1f)] float moveSpeed = 8f;
         [SerializeField, Min(0.01f)] float lookSensitivity = 0.2f;
 
-        // The wall sizes: 15 x 15 = 225 blocks at least, 22 x 18 = 396 at most. The limit is the cost of the constraint lists, which are
-        // still built on the CPU every step (stage G moves them to the GPU).
+        // The wall sizes: 15 x 15 = 225 blocks at least, 22 x 18 = 396 at most. The limit is what was tried: the constraint lists are built on
+        // the GPU now (stage G), but the graph coloring still reads two small things back every step, and nobody has measured larger walls.
         const int MinColumns = 15;
         const int MaxColumns = 22;
         const int MinRows = 15;

@@ -10,16 +10,15 @@ namespace McKrill.Avbd
     /// list and the bodies bucketed by graph color.
     ///
     /// AddJoint and AddSpring only record the constraint on the CPU. <see cref="Rebuild"/> (which <see cref="AvbdSolver.Step"/>
-    /// calls when constraints are pending) applies the pending body edits, completes the records, builds the per-body lists on the CPU
-    /// and uploads them, then colors the graph and buckets the bodies on the GPU (stage C). The CPU list build is temporary: stage G
-    /// replaces it on the GPU.
+    /// calls when constraints are pending) applies the pending body edits, completes and uploads the records, builds the per-body lists
+    /// (stage G) and colors the graph and buckets the bodies (stage C), both on the GPU.
     ///
     /// Contacts: with a nonzero <c>contactCapacity</c> the object also owns the contact region of the record array and the manifold pool of
     /// stage N (see <see cref="ContactLayout"/>): <c>contactCapacity</c> slots, each holding the manifold of one pair of bodies. The pairs come
     /// from the broadphase (stage B), which <see cref="AvbdSolver"/> runs when there are contacts. After the narrow phase,
-    /// <see cref="RefreshContactTopology"/> reads the contact count and bodies of every slot back and rebuilds the lists (on the CPU) and the
-    /// coloring (stage C, on the GPU), because they change every step. That readback is temporary, like the CPU build of the lists: stage G
-    /// replaces it.
+    /// <see cref="RefreshContactTopology"/> rebuilds the lists (stage G) and the coloring (stage C), because they change every step. The lists
+    /// are built from the pool and the records where they are, with no readback. The coloring still reads two small things back (see
+    /// <see cref="AvbdGraphColoring"/>).
     ///
     /// Limits of this version: constraints cannot be removed, and removing a body that has constraints is not supported.
     /// The arrays have a fixed capacity. Methods must be called from the main thread.
@@ -55,8 +54,8 @@ namespace McKrill.Avbd
         readonly AvbdBodyBuffers bodies;
         readonly ConstraintRecord[] records;
         readonly List<Spec> pending = new List<Spec>();
-        readonly ConstraintTopology topology = new ConstraintTopology();
         readonly AvbdGraphColoring coloring;
+        readonly AvbdConstraintLists lists;
         int[] colorOffsets = new int[1];
         int colorCount;
         GraphColoringOrder coloringOrder = GraphColoringOrder.SlotOrder;
@@ -74,19 +73,16 @@ namespace McKrill.Avbd
 
         readonly int contactSlots;
         readonly int tableSize;
-        readonly uint[] slotCounts;     // last read back
-        readonly uint4[] slotBodies;    // last read back
         readonly uint[] dirtyBits;
         readonly HashSet<int> dirtySlots = new HashSet<int>();
         bool dirtyUploaded;
-        bool[] solved = new bool[0];
 
         int recordCount;   // records in the CPU array
         int uploadedCount; // records already on the GPU
         bool topologyDirty;
         int builtSolvedSetVersion;
-        int fracturableRecords; // joints that can fracture: only then are the flags read back
-        ConstraintRecord[] flagScratch = new ConstraintRecord[0];
+        int brokenCountVersion = -1; // list build that BrokenCount was last read for
+        int brokenCount;
         bool disposed;
 
         /// <param name="bodies">The body arrays the constraints refer to.</param>
@@ -111,8 +107,8 @@ namespace McKrill.Avbd
             while (tableEntries < contactSlots * 2)
                 tableEntries <<= 1;
             tableSize = tableEntries;
-            slotCounts = new uint[Math.Max(1, contactSlots)];
-            slotBodies = new uint4[Math.Max(1, contactSlots)];
+            var slotCounts = new uint[Math.Max(1, contactSlots)];
+            var slotBodies = new uint4[Math.Max(1, contactSlots)];
             for (int s = 0; s < slotBodies.Length; s++)
                 slotBodies[s] = new uint4(AvbdConst.Invalid, AvbdConst.Invalid, 0u, 0u);
             dirtyBits = new uint[Math.Max(1, (bodies.Capacity + 31) / 32)];
@@ -122,6 +118,7 @@ namespace McKrill.Avbd
             if (shaders == null)
                 throw new InvalidOperationException("The AvbdShaderSet asset was not found.");
             coloring = new AvbdGraphColoring(shaders.Coloring);
+            lists = new AvbdConstraintLists(shaders.Lists, bodies.Capacity);
 
             try
             {
@@ -188,10 +185,29 @@ namespace McKrill.Avbd
         internal int ContactBase => records.Length;
 
         /// <summary>
-        /// Number of joints that have fractured, as of the start of the last step (with contacts). Always 0 without contacts: only the contact
-        /// path reads the joints' state back (see <see cref="PrepareContacts"/>).
+        /// Number of joints and springs that have fractured, as of the last list build (stage G): every step with contacts, otherwise
+        /// <see cref="Rebuild"/>. Reading it waits for the GPU the first time after a build, so do not read it every frame in a hot loop.
         /// </summary>
-        public int BrokenCount { get; private set; }
+        public int BrokenCount
+        {
+            get
+            {
+                ThrowIfDisposed();
+                if (brokenCountVersion != lists.Version)
+                {
+                    brokenCount = lists.ReadControl().Broken;
+                    brokenCountVersion = lists.Version;
+                }
+                return brokenCount;
+            }
+        }
+
+        /// <summary>What the last list build counted: entries, fractured joints left out, and records it could not list. Waits for the GPU.</summary>
+        internal ConstraintListControl ReadListControl()
+        {
+            ThrowIfDisposed();
+            return lists.ReadControl();
+        }
 
         /// <summary>Size of the pair hash table of stage N: a power of two, at least twice the number of slots.</summary>
         internal int PairTableSize => tableSize;
@@ -240,7 +256,6 @@ namespace McKrill.Avbd
         internal GraphicsBuffer FreeListBuffer => freeListBuffer;
         internal GraphicsBuffer PoolControlBuffer => poolControlBuffer;
         internal GraphicsBuffer DirtySlotsBuffer => dirtyBuffer;
-        internal ConstraintTopology Topology => topology; // the lists; the coloring is on the GPU (see ColorCount, ColorOffset)
 
         /// <summary>Start of a color in the bucket array (<see cref="ColorBodies"/>).</summary>
         internal int ColorOffset(int color) => colorOffsets[color];
@@ -334,7 +349,6 @@ namespace McKrill.Avbd
                 return -1;
             }
             records[recordCount] = record;
-            CountFracturable(recordCount);
             topologyDirty = true;
             return recordCount++;
         }
@@ -382,7 +396,6 @@ namespace McKrill.Avbd
                         : ConstraintRecordFactory.Spring(
                             s.slotA, s.slotB, s.rA, s.rB, s.stiffnessLin,
                             s.fractureOrRest >= 0f ? s.fractureOrRest : CurrentDistance(state, s));
-                    CountFracturable(recordCount);
                     recordCount++;
                 }
                 pending.Clear();
@@ -394,60 +407,12 @@ namespace McKrill.Avbd
                 uploadedCount = recordCount;
             }
 
-            // Which bodies the primal stage solves.
-            var meta = new BodyMetaRecord[capacity];
-            var mass = new BodyMassRecord[capacity];
-            bodies.Meta.GetData(meta);
-            bodies.Mass.GetData(mass);
-            if (solved.Length < bodyCount)
-                solved = new bool[bodyCount];
-            const uint notSolved = (uint)BodyFlags.Free | (uint)BodyFlags.Kinematic;
-            for (int s = 0; s < bodyCount; s++)
-                solved[s] = (meta[s].ident.x & notSolved) == 0u && mass[s].momentMass.w > 0f;
-
-            BuildTopology(bodyCount);
-
-            if (bodyCount > 0)
-                bodies.Range.SetData(topology.Ranges, 0, 0, bodyCount);
-            if (topology.ListCount > 0)
-                listBuffer.SetData(topology.List, 0, 0, topology.ListCount);
-
-            // Stage C: color the graph and bucket the bodies, on the GPU.
+            // Stage G: the per-body lists, then stage C: color the graph and bucket the bodies. Both on the GPU.
+            BuildLists(bodyCount);
             colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, colorBuffer, coloringOrder, out colorOffsets);
 
             topologyDirty = false;
             builtSolvedSetVersion = bodies.SolvedSetVersion;
-        }
-
-        void CountFracturable(int index)
-        {
-            if ((records[index].ident.z & (uint)ConstraintFlags.Fracturable) != 0u)
-                fracturableRecords++;
-        }
-
-        // Fracture happens on the GPU (stage D sets the Broken flag). With contacts the step reads the flags back after the broadphase and
-        // before the narrow phase, and the lists that RefreshContactTopology builds right after leave a fractured joint out (so does the
-        // coloring). The broadphase of the next step then no longer finds the pair constrained and makes it a candidate. That is the
-        // reference solver's timing: a joint that broke in step k is still attached in the broadphase of step k + 1, where its
-        // initialize() removes it, and the pair is a candidate from step k + 2. Costs one readback of the joint records per step, and only
-        // if some joint can fracture.
-        void SyncFracturedJoints()
-        {
-            int count = Math.Min(recordCount, uploadedCount); // only records that are on the GPU
-            if (fracturableRecords == 0 || count == 0)
-                return;
-
-            if (flagScratch.Length < count)
-                flagScratch = new ConstraintRecord[records.Length];
-            recordBuffer.GetData(flagScratch, 0, 0, count);
-
-            for (int i = 0; i < count; i++)
-            {
-                if (ConstraintTopology.IsBroken(records[i]) || !ConstraintTopology.IsBroken(flagScratch[i]))
-                    continue;
-                records[i].ident.z |= (uint)ConstraintFlags.Broken;
-                BrokenCount++;
-            }
         }
 
         /// <summary>
@@ -459,8 +424,6 @@ namespace McKrill.Avbd
             ThrowIfDisposed();
             if (contactSlots == 0)
                 return;
-
-            SyncFracturedJoints();
 
             dirtySlots.Clear();
             bodies.TakeStructuralSlots(dirtySlots);
@@ -476,9 +439,10 @@ namespace McKrill.Avbd
         }
 
         /// <summary>
-        /// After the narrow phase: reads the contact count of every pair back and rebuilds the lists, the coloring and the color buckets
-        /// with the contacts in them. Stalls until the GPU has finished the narrow phase. Call <see cref="Rebuild"/> first if constraints
-        /// were added or the set of solved bodies changed.
+        /// After the narrow phase: rebuilds the lists (stage G), the coloring and the color buckets (stage C) with the contacts in them. The lists
+        /// read the manifold pool and the records on the GPU, so nothing is read back for them. A fractured joint is left out here, which is how the
+        /// broadphase of the next step stops excluding its pair (the reference solver removes a broken joint one step after it breaks). Call
+        /// <see cref="Rebuild"/> first if constraints were added or the set of solved bodies changed.
         /// </summary>
         internal void RefreshContactTopology()
         {
@@ -487,36 +451,22 @@ namespace McKrill.Avbd
                 return;
 
             int bodyCount = bodies.HighWaterMark;
-            pairCountBuffer.GetData(slotCounts);
-            slotBodiesBuffer.GetData(slotBodies);
-            BuildTopology(bodyCount);
-
-            if (bodyCount > 0)
-                bodies.Range.SetData(topology.Ranges, 0, 0, bodyCount);
-            if (topology.ListCount > listBuffer.count)
-                throw new InvalidOperationException("The constraint list needs " + topology.ListCount + " entries; the buffer has " + listBuffer.count + ".");
-            if (topology.ListCount > 0)
-                listBuffer.SetData(topology.List, 0, 0, topology.ListCount);
-
-            // Stage C on the GPU colors the bodies with the contacts in the graph.
+            BuildLists(bodyCount);
             colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, colorBuffer, coloringOrder, out colorOffsets);
         }
 
-        // The lists of the per-body constraints, from the joints and springs and the manifolds as last read back.
-        void BuildTopology(int bodyCount)
+        // Stage G: the lists of the per-body constraints, from the joints and springs on the GPU and the manifold pool.
+        void BuildLists(int bodyCount)
         {
-            if (contactSlots > 0)
-                topology.BuildWithManifolds(records, recordCount, solved, bodyCount, false, slotCounts, slotBodies, contactSlots, ContactBase);
-            else
-                topology.Build(records, recordCount, solved, bodyCount, false);
+            lists.Run(bodies, bodyCount, recordBuffer, uploadedCount, listBuffer, pairCountBuffer, slotBodiesBuffer, contactSlots, ContactBase);
         }
 
         /// <summary>Reads the manifold pool back from the GPU (this waits for the GPU): the pairs, their slots and contact counts, the free slots and the overflow count.</summary>
         internal ContactSnapshot ReadContacts()
         {
             ThrowIfDisposed();
-            var counts = new uint[slotCounts.Length];
-            var bodiesOfSlot = new uint4[slotBodies.Length];
+            var counts = new uint[pairCountBuffer.count];
+            var bodiesOfSlot = new uint4[slotBodiesBuffer.count];
             var control = new uint[ContactLayout.PoolControlWords];
             pairCountBuffer.GetData(counts);
             slotBodiesBuffer.GetData(bodiesOfSlot);
@@ -594,6 +544,7 @@ namespace McKrill.Avbd
             Release(ref poolControlBuffer);
             Release(ref dirtyBuffer);
             coloring?.Dispose();
+            lists?.Dispose();
         }
 
         static void Release(ref GraphicsBuffer buffer)
