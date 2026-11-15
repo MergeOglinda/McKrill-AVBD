@@ -8,6 +8,8 @@
 /[Uu]ser[Ss]ettings/
 /[Mm]emoryCaptures/
 /[Rr]ecordings/
+/[Rr]ecordings/
+/ProfilerCaptures/
 
 # Asset meta data should be committed, so it is NOT ignored here.
 # Unity only creates .meta files for assets inside the project and packages.

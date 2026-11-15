@@ -1,6 +1,6 @@
 // Stage V: primal update. One thread solves one body: it assembles the body's 6x6 system from the inertia term and every
 // constraint in its list, solves it with an LDL^T factorization and applies the Newton step (Eqs. 4-6).
-// Dispatched once per graph color and iteration: the bodies of one color share no constraint, so a body writes only its own
+// Dispatched (indirectly) once per graph color and iteration: the bodies of one color share no constraint, so a body writes only its own
 // pose and reads the others' poses from other colors, with no atomics (except the failure counter).
 // Mirrored by Reference/Stages/CpuPrimal.cs, which the tests compare against.
 
@@ -9,6 +9,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdColoringParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactSolve.hlsl"
 
@@ -20,10 +21,10 @@ StructuredBuffer<BodyRangeRecord>      _BodyRange;
 StructuredBuffer<ConstraintRecord>     _Constraints;
 StructuredBuffer<uint>                 _ConstraintList; // constraint ids, grouped per body (see _BodyRange)
 StructuredBuffer<uint>                 _ColorBodies;    // solved body slots, grouped per color
+StructuredBuffer<uint>                 _ColorWork;      // stage C's work buffer: the size and the start of every color
 RWStructuredBuffer<uint>               _Status;         // x = number of failed solves
 
-uint _Base;  // first entry of _ColorBodies to process
-uint _Count; // end of the range: entries [_Base, _Count)
+uint _Color; // the graph color this dispatch solves. The dispatch is indirect: its size comes from the arguments ColorPlan wrote
 
 // The 6x6 system of one body, as the blocks the reference uses (all 3x3 blocks are mathematical matrices).
 struct PrimalSystem
@@ -217,11 +218,12 @@ void StampContact(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot,
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void Primal(uint3 id : SV_DispatchThreadID)
 {
-    uint index = _Base + id.x;
-    if (index >= _Count)
+    // Entry of the color. A big color is laid out in rows of AVBD_COLOR_ROW_GROUPS groups (see AvbdColoringParams.hlsl).
+    uint index = id.y * (AVBD_COLOR_ROW_GROUPS * AVBD_GROUP_SIZE) + id.x;
+    if (index >= _ColorWork[AVBD_COLOR_COUNTS_OFFSET + _Color])
         return;
 
-    uint slot = _ColorBodies[index];
+    uint slot = _ColorBodies[_ColorWork[AVBD_COLOR_STARTS_OFFSET + _Color] + index];
 
     // The lists and the colors were built before the last edits; a body removed or changed since is skipped.
     if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))

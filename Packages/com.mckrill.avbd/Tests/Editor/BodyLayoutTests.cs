@@ -278,15 +278,23 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(AvbdGraphColoring.Pending, d["AVBD_COLOR_PENDING"]);
             Assert.AreEqual((uint)AvbdGraphColoring.ControlWords, d["AVBD_COLOR_CONTROL_WORDS"]);
             Assert.AreEqual((uint)AvbdGraphColoring.CountsOffset, d["AVBD_COLOR_COUNTS_OFFSET"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.ColorCountWord, d["AVBD_COLOR_COUNT_WORD"]);
             Assert.AreEqual((uint)AvbdGraphColoring.CursorsOffset, d["AVBD_COLOR_CURSORS_OFFSET"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.StartsOffset, d["AVBD_COLOR_STARTS_OFFSET"]);
             Assert.AreEqual((uint)AvbdGraphColoring.WorkWords, d["AVBD_COLOR_WORK_WORDS"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.ArgsStride, d["AVBD_COLOR_ARGS_STRIDE"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.RowGroups, d["AVBD_COLOR_ROW_GROUPS"]);
             Assert.AreEqual((uint)GraphColoringOrder.SlotOrder, d["AVBD_COLOR_ORDER_SLOT"]);
             Assert.AreEqual((uint)GraphColoringOrder.Hashed, d["AVBD_COLOR_ORDER_HASHED"]);
 
-            // The three sections of the work buffer follow each other without a gap, and a color is never confused with a marker.
+            // The four sections of the work buffer follow each other without a gap, and a color is never confused with a marker.
             Assert.AreEqual(AvbdGraphColoring.ControlWords, AvbdGraphColoring.CountsOffset);
             Assert.AreEqual(AvbdGraphColoring.CountsOffset + AvbdGraphColoring.MaxColors, AvbdGraphColoring.CursorsOffset);
-            Assert.AreEqual(AvbdGraphColoring.CursorsOffset + AvbdGraphColoring.MaxColors, AvbdGraphColoring.WorkWords);
+            Assert.AreEqual(AvbdGraphColoring.CursorsOffset + AvbdGraphColoring.MaxColors, AvbdGraphColoring.StartsOffset);
+            Assert.AreEqual(AvbdGraphColoring.StartsOffset + AvbdGraphColoring.MaxColors, AvbdGraphColoring.WorkWords);
+            Assert.Less(AvbdGraphColoring.ColorCountWord, AvbdGraphColoring.ControlWords);
+            Assert.AreEqual(3 * sizeof(uint), AvbdGraphColoring.ArgsStride, "groups x, y and z");
+            Assert.AreEqual(65535, AvbdGraphColoring.RowGroups, "the limit of one dimension of a dispatch");
             Assert.Greater(AvbdGraphColoring.Pending, (uint)AvbdGraphColoring.MaxColors);
             Assert.AreNotEqual(AvbdConst.Invalid, AvbdGraphColoring.Pending);
         }
