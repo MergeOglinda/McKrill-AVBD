@@ -7,8 +7,10 @@
 //
 // One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
 // ordering, coloring or atomics are needed. Springs have no state and are skipped.
-// DualContact is the dual update of the contacts, one thread per contact record of the contact region (see ContactLayout): records
-// beyond the pair's contact count are skipped. A contact's warm start is part of the narrow phase (AvbdNarrowphase.compute).
+// DualContact is the dual update of the contacts, one thread per contact record of the slots of the manifold pool that have ever been used
+// (below the pool's high-water mark; see ContactLayout): records beyond the slot's contact count are skipped. It is dispatched indirectly
+// with arguments the narrow phase wrote, so the host never needs the number of manifolds. A contact's warm start is part of the narrow phase
+// (AvbdNarrowphase.compute).
 // Mirrored by Reference/Stages/CpuConstraintInit.cs and CpuDual.cs, which the tests compare against.
 
 #pragma kernel ConstraintInit
@@ -20,15 +22,18 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactSolve.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdIndirect.hlsl"
 
 StructuredBuffer<BodyStateRecord>      _BodyState;
 RWStructuredBuffer<ConstraintRecord>   _Constraints;
 
-StructuredBuffer<uint>                 _PairCounts; // contacts per pair (DualContact)
+StructuredBuffer<uint>                 _PairCounts; // contacts per manifold slot (DualContact)
+StructuredBuffer<uint>                 _NpControl;  // the manifold pool's control words (DualContact): the high-water mark
 
 uint _Base;        // first constraint to process
 uint _Count;       // end of the range: constraints [_Base, _Count)
 uint _ContactBase; // DualContact: index of the first contact record
+uint _SlotCapacity; // DualContact: manifold slots
 
 // Pose of body slot `id`: the start-of-step pose or the current pose. A body of AVBD_INVALID is the world.
 void LoadPose(uint id, bool atStart, out float3 pos, out float4 rot)
@@ -186,11 +191,12 @@ void Dual(uint3 id : SV_DispatchThreadID)
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void DualContact(uint3 id : SV_DispatchThreadID)
 {
-    uint index = _Base + id.x;
-    if (index >= _Count)
+    // Item k of the dispatch is contact k % AVBD_MAX_CONTACTS of slot k / AVBD_MAX_CONTACTS. The last group can overshoot the slots in use.
+    uint relative = AvbdIndirectItem(id);
+    if (relative >= min(_NpControl[AVBD_NP_HIGH_WATER], _SlotCapacity) * AVBD_MAX_CONTACTS)
         return;
 
-    uint relative = index - _ContactBase;
+    uint index = _ContactBase + relative;
     uint pair = relative / AVBD_MAX_CONTACTS;
     uint slot = relative % AVBD_MAX_CONTACTS;
     if (slot >= _PairCounts[pair])

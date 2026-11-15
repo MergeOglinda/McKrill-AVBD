@@ -186,6 +186,7 @@ namespace McKrill.Avbd.Tests
                     buffers.Spawn(d);
 
                 int maxUsed = 0;
+                int previousHighWater = 0;
                 for (int step = 0; step < 40; step++)
                 {
                     solver.Step();
@@ -199,9 +200,92 @@ namespace McKrill.Avbd.Tests
                             Assert.Greater(snapshot.Bodies[slot].x, snapshot.Bodies[slot].y, "step " + step + ": body A is the higher slot");
                     maxUsed = math.max(maxUsed, snapshot.UsedSlots);
                     Assert.AreEqual(0, constraints.ReadSolveFailures(), "step " + step);
+
+                    // The high-water mark: above every used slot, never above the capacity, and it never falls.
+                    int highestUsed = -1;
+                    for (int slot = 0; slot < snapshot.Bodies.Length; slot++)
+                        if (snapshot.Bodies[slot].x != AvbdConst.Invalid)
+                            highestUsed = slot;
+                    Assert.Greater(snapshot.HighWater, highestUsed, "step " + step + ": every used slot is below the high-water mark");
+                    Assert.LessOrEqual(snapshot.HighWater, 512, "step " + step);
+                    Assert.GreaterOrEqual(snapshot.HighWater, previousHighWater, "step " + step + ": the high-water mark never falls");
+                    previousHighWater = snapshot.HighWater;
                 }
                 Assert.Greater(maxUsed, 10, "the pyramid should touch the ground and itself");
             }
+        }
+
+        // ---- the indirect dispatches of stage N and of the dual update of the contacts ---------------------------------------
+
+        [Test]
+        public void Gpu_HighWaterMark_StartsAtZero_AndTheArgumentsStartEmpty()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 1, null, 128))
+            {
+                Assert.AreEqual(0, constraints.ReadContacts().HighWater);
+                uint[] args = constraints.ReadNpArgs();
+                for (int entry = 0; entry < ContactLayout.PoolArgsCount; entry++)
+                {
+                    Assert.AreEqual(0u, args[entry * 3], "entry " + entry + ": no groups");
+                    Assert.AreEqual(1u, args[entry * 3 + 1]);
+                    Assert.AreEqual(1u, args[entry * 3 + 2]);
+                }
+            }
+        }
+
+        [Test]
+        public void Gpu_ContactDispatches_FollowTheManifoldsAndPairs_NotTheCapacities()
+        {
+            RequireCompute();
+            const int slots = 20000; // far more than a pyramid of 6 layers needs
+            var reference = new ReferenceSolver();
+            AvbdScenes.Pyramid(reference, 6);
+            SceneArrays scene = ConstraintTestScenes.FromReference(reference, Capacity);
+
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            settings.gravity = new float3(0f, 0f, -10f); // the upstream scenes are z-up
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 1, null, slots))
+            using (var solver = new AvbdSolver(buffers, settings, null, constraints))
+            {
+                foreach (BodyDescriptor d in scene.descriptors)
+                    buffers.Spawn(d);
+
+                for (int step = 0; step < 5; step++)
+                    solver.Step();
+
+                ContactSnapshot snapshot = constraints.ReadContacts();
+                Assert.Greater(snapshot.HighWater, 10, "the pyramid should touch the ground and itself");
+                Assert.Less(snapshot.HighWater, slots / 10, "the manifolds are packed at the bottom of the pool");
+
+                AvbdBroadphase broadphase = solver.Broadphase;
+                broadphase.ReadCounts();
+                long dynamicPairs = math.min(broadphase.DynamicPairCount, broadphase.DynamicPairCapacity);
+                long staticPairs = math.min(broadphase.StaticPairCount, broadphase.StaticPairCapacity);
+
+                // The planner ran after the last allocation of the step, so every entry has the final counts.
+                uint[] args = constraints.ReadNpArgs();
+                AssertArgs(args, ContactLayout.PoolArgsRetire, snapshot.HighWater);
+                AssertArgs(args, ContactLayout.PoolArgsAllocateDynamic, dynamicPairs);
+                AssertArgs(args, ContactLayout.PoolArgsAllocateStatic, staticPairs);
+                AssertArgs(args, ContactLayout.PoolArgsNarrowphase, snapshot.HighWater);
+                AssertArgs(args, ContactLayout.PoolArgsDual, (long)snapshot.HighWater * ContactLayout.MaxContactsPerPair);
+
+                (uint capacityGroups, _) = AvbdIndirect.GroupsFor((long)slots * ContactLayout.MaxContactsPerPair);
+                Assert.Less(args[ContactLayout.PoolArgsDual * 3], capacityGroups / 10,
+                    "the dual update runs over the manifolds that exist, not over the " + capacityGroups + " groups of the capacity");
+            }
+        }
+
+        static void AssertArgs(uint[] args, int entry, long items)
+        {
+            (uint x, uint y) = AvbdIndirect.GroupsFor(items);
+            Assert.AreEqual(x, args[entry * 3], "groups x of entry " + entry + " for " + items + " items");
+            Assert.AreEqual(y, args[entry * 3 + 1], "groups y of entry " + entry);
+            Assert.AreEqual(1u, args[entry * 3 + 2], "groups z of entry " + entry);
         }
 
         static void RequireCompute()

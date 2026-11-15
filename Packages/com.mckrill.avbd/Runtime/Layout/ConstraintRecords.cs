@@ -149,8 +149,23 @@ namespace McKrill.Avbd
         /// <summary>Mirrors AVBD_NP_OVERFLOW: candidate pairs dropped because no slot was free.</summary>
         public const int PoolOverflowWord = 1;
 
+        /// <summary>
+        /// Mirrors AVBD_NP_HIGH_WATER: the highest slot ever taken + 1. Every used slot is below it, and it only grows, so it is the peak number
+        /// of manifolds that were ever in use at once (a freed slot is the next to be taken, so the slots in use stay packed at the bottom).
+        /// The kernels of stage N and the dual update of the contacts run over this many slots, not over the capacity.
+        /// </summary>
+        public const int PoolHighWaterWord = 2;
+
         /// <summary>Mirrors AVBD_NP_CONTROL_WORDS.</summary>
-        public const int PoolControlWords = 2;
+        public const int PoolControlWords = 3;
+
+        // Entries of the indirect dispatch arguments of stage N, AvbdIndirect.ArgsStride bytes each. Mirror AVBD_NP_ARGS_*.
+        public const int PoolArgsRetire = 0;
+        public const int PoolArgsAllocateDynamic = 1;
+        public const int PoolArgsAllocateStatic = 2;
+        public const int PoolArgsNarrowphase = 3;
+        public const int PoolArgsDual = 4;
+        public const int PoolArgsCount = 5;
 
         /// <summary>Number of pairs of <paramref name="bodyCount"/> bodies.</summary>
         public static long PairCount(int bodyCount) => (long)bodyCount * (bodyCount - 1) / 2;

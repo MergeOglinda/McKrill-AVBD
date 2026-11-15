@@ -243,7 +243,33 @@ namespace McKrill.Avbd.Tests
 
             Assert.AreEqual((uint)ContactLayout.PoolFreeTopWord, d["AVBD_NP_FREE_TOP"]);
             Assert.AreEqual((uint)ContactLayout.PoolOverflowWord, d["AVBD_NP_OVERFLOW"]);
+            Assert.AreEqual((uint)ContactLayout.PoolHighWaterWord, d["AVBD_NP_HIGH_WATER"]);
             Assert.AreEqual((uint)ContactLayout.PoolControlWords, d["AVBD_NP_CONTROL_WORDS"]);
+            Assert.Less(Math.Max(ContactLayout.PoolFreeTopWord, Math.Max(ContactLayout.PoolOverflowWord, ContactLayout.PoolHighWaterWord)),
+                ContactLayout.PoolControlWords, "every control word is inside the buffer");
+
+            Assert.AreEqual((uint)ContactLayout.PoolArgsRetire, d["AVBD_NP_ARGS_RETIRE"]);
+            Assert.AreEqual((uint)ContactLayout.PoolArgsAllocateDynamic, d["AVBD_NP_ARGS_ALLOCATE_DYNAMIC"]);
+            Assert.AreEqual((uint)ContactLayout.PoolArgsAllocateStatic, d["AVBD_NP_ARGS_ALLOCATE_STATIC"]);
+            Assert.AreEqual((uint)ContactLayout.PoolArgsNarrowphase, d["AVBD_NP_ARGS_NARROWPHASE"]);
+            Assert.AreEqual((uint)ContactLayout.PoolArgsDual, d["AVBD_NP_ARGS_DUAL"]);
+            Assert.AreEqual((uint)ContactLayout.PoolArgsCount, d["AVBD_NP_ARGS_COUNT"]);
+            Assert.AreEqual(ContactLayout.PoolArgsCount - 1, ContactLayout.PoolArgsDual, "the entries are numbered without a gap");
+        }
+
+        [Test]
+        public void Hlsl_IndirectConstantsMatchTheCSharpMirrors()
+        {
+            Dictionary<string, uint> d = ReadDefines("AvbdIndirect.hlsl", "AvbdColoringParams.hlsl");
+
+            Assert.AreEqual((uint)AvbdIndirect.ArgsStride, d["AVBD_INDIRECT_ARGS_STRIDE"]);
+            Assert.AreEqual((uint)AvbdIndirect.RowGroups, d["AVBD_INDIRECT_ROW_GROUPS"]);
+            Assert.AreEqual(3 * sizeof(uint), AvbdIndirect.ArgsStride, "groups x, y and z");
+            Assert.AreEqual(65535, AvbdIndirect.RowGroups, "the limit of one dimension of a dispatch");
+
+            // The coloring has its own copy of the same arithmetic in ColorPlan.
+            Assert.AreEqual(d["AVBD_INDIRECT_ARGS_STRIDE"], d["AVBD_COLOR_ARGS_STRIDE"]);
+            Assert.AreEqual(d["AVBD_INDIRECT_ROW_GROUPS"], d["AVBD_COLOR_ROW_GROUPS"]);
         }
 
         [Test]
