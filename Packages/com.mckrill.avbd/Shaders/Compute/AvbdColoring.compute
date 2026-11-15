@@ -18,7 +18,8 @@
 //   ColorBegin   zeroes the counter of bodies left (one thread, before the last round of a batch)
 //   ColorRound   one coloring round; counts the bodies that are still without a color
 //   ColorCount   counts the bodies of each color
-//   ColorBucket  writes the body slots into the color buckets (the host has put the start of each color into the cursors)
+//   ColorPlan    one thread; the start of each color (also the bucket cursors) and the indirect dispatch arguments of the primal sweep
+//   ColorBucket  writes the body slots into the color buckets, at the cursors ColorPlan set
 // Mirrored by Reference/Stages/CpuGraphColoring.cs, which the tests compare against.
 
 #pragma kernel ColorReset
@@ -26,6 +27,7 @@
 #pragma kernel ColorInit
 #pragma kernel ColorRound
 #pragma kernel ColorCount
+#pragma kernel ColorPlan
 #pragma kernel ColorBucket
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
@@ -39,6 +41,7 @@ StructuredBuffer<ConstraintRecord>  _Constraints;
 StructuredBuffer<uint>              _ConstraintList;
 RWStructuredBuffer<uint>            _ColorBodies;
 RWStructuredBuffer<uint>            _ColorWork;
+RWByteAddressBuffer                 _ColorArgs;  // AVBD_COLOR_MAX x (groups x, groups y, 1): an indirect arguments buffer
 
 uint _Base;
 uint _Count; // end of the range: items [_Base, _Count)
@@ -148,6 +151,7 @@ void ColorRound(uint3 id : SV_DispatchThreadID)
         color = AVBD_COLOR_MAX - 1u;
     }
 
+    InterlockedMax(_ColorWork[AVBD_COLOR_COUNT_WORD], color + 1u);
     _BodyMeta[slot].state.x = color;
 }
 
@@ -163,6 +167,24 @@ void ColorCount(uint3 id : SV_DispatchThreadID)
     {
         uint previous;
         InterlockedAdd(_ColorWork[AVBD_COLOR_COUNTS_OFFSET + color], 1u, previous);
+    }
+}
+
+// Runs after ColorCount. Colors are numbered from 0 and AVBD_COLOR_MAX entries are always written: a color without bodies gets an empty dispatch.
+[numthreads(1, 1, 1)]
+void ColorPlan(uint3 id : SV_DispatchThreadID)
+{
+    uint start = 0u;
+    for (uint c = 0u; c < AVBD_COLOR_MAX; c++)
+    {
+        uint count = _ColorWork[AVBD_COLOR_COUNTS_OFFSET + c];
+        _ColorWork[AVBD_COLOR_CURSORS_OFFSET + c] = start;
+        _ColorWork[AVBD_COLOR_STARTS_OFFSET + c] = start;
+        start += count;
+
+        uint groups = (count + AVBD_GROUP_SIZE - 1u) / AVBD_GROUP_SIZE;
+        uint rows = max(1u, (groups + AVBD_COLOR_ROW_GROUPS - 1u) / AVBD_COLOR_ROW_GROUPS);
+        _ColorArgs.Store3(c * AVBD_COLOR_ARGS_STRIDE, uint3(min(groups, AVBD_COLOR_ROW_GROUPS), rows, 1u));
     }
 }
 

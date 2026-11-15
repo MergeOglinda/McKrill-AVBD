@@ -32,6 +32,8 @@ namespace McKrill.Avbd
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
         static readonly int ColorBodiesId = Shader.PropertyToID("_ColorBodies");
+        static readonly int ColorWorkId = Shader.PropertyToID("_ColorWork");
+        static readonly int ColorId = Shader.PropertyToID("_Color");
         static readonly int StatusId = Shader.PropertyToID("_Status");
         static readonly int PairCountsId = Shader.PropertyToID("_PairCounts");
         static readonly int SlotBodiesId = Shader.PropertyToID("_SlotBodies");
@@ -110,7 +112,7 @@ namespace McKrill.Avbd
         /// contacts the narrow phase (N), the constraint warm start (D), per iteration a primal sweep (V) and the dual update (D), and finally the
         /// velocity update (U).
         /// The constraint lists (stage G) are built and the graph is colored (stage C) on the GPU. With contacts, both are rebuilt every step after the
-        /// narrow phase; the lists need no readback, the coloring still reads two small things back (a stall, until the primal sweep is dispatched indirectly).
+        /// narrow phase; the lists need no readback, and the coloring reads back one small thing (whether bodies are still waiting, which is also the number of colors), a stall.
         /// Stages S, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
         /// Must be called from the main thread. The previous step's results are the next step's input, so call it once per time step.
         /// </summary>
@@ -206,7 +208,8 @@ namespace McKrill.Avbd
         }
 
         // Stage V: one primal sweep. One dispatch per color; the dispatches of one sweep run in order, because a body reads the
-        // poses that the earlier colors just wrote. Does nothing without constraints.
+        // poses that the earlier colors just wrote. Each dispatch is indirect: the size of a color is only known on the GPU, where stage C
+        // wrote the arguments, and the host only knows how many colors there are. Does nothing without constraints.
         internal void DispatchPrimalSweep()
         {
             if (constraints == null)
@@ -218,10 +221,14 @@ namespace McKrill.Avbd
             shader.SetBuffer(primalKernel, RecordsId, constraints.Records);
             shader.SetBuffer(primalKernel, ListId, constraints.List);
             shader.SetBuffer(primalKernel, ColorBodiesId, constraints.ColorBodies);
+            shader.SetBuffer(primalKernel, ColorWorkId, constraints.ColorWork);
             shader.SetBuffer(primalKernel, StatusId, constraints.Status);
 
             for (int color = 0; color < constraints.ColorCount; color++)
-                AvbdDispatch.Range(shader, primalKernel, constraints.ColorOffset(color), constraints.ColorSize(color));
+            {
+                shader.SetInt(ColorId, color);
+                shader.DispatchIndirect(primalKernel, constraints.ColorArgs, (uint)(color * AvbdGraphColoring.ArgsStride));
+            }
         }
 
         // Stage D, once per step after stage P: evaluates every joint at the start-of-step pose and warm-starts its variables.
