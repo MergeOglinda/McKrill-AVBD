@@ -70,6 +70,7 @@ namespace McKrill.Avbd
         GraphicsBuffer pairTableBuffer;    // hash table from a pair to its slot (scratch of stage N)
         GraphicsBuffer freeListBuffer;     // stack of free manifold slots
         GraphicsBuffer poolControlBuffer;  // AVBD_NP_*
+        GraphicsBuffer npArgsBuffer;       // indirect dispatch arguments of stage N and of the contacts' dual update, AVBD_NP_ARGS_*
         GraphicsBuffer dirtyBuffer;        // bit per body slot: spawned or removed since the last narrow phase
 
         readonly int contactSlots;
@@ -130,6 +131,9 @@ namespace McKrill.Avbd
                 pairTableBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, tableSize, sizeof(uint));
                 freeListBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slotCounts.Length, sizeof(uint));
                 poolControlBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, ContactLayout.PoolControlWords, sizeof(uint));
+                // Written by a compute shader (a raw byte-address buffer) and read by DispatchIndirect.
+                npArgsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments | GraphicsBuffer.Target.Raw,
+                    ContactLayout.PoolArgsCount * AvbdIndirect.ArgsStride / sizeof(uint), sizeof(uint));
                 dirtyBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, dirtyBits.Length, sizeof(uint));
                 colorBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodies.Capacity, sizeof(uint));
                 statusBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, StatusWords, sizeof(uint));
@@ -151,7 +155,14 @@ namespace McKrill.Avbd
             for (int i = 0; i < contactSlots; i++)
                 freeList[i] = (uint)(contactSlots - 1 - i); // the stack pops slot 0 first
             freeListBuffer.SetData(freeList);
-            poolControlBuffer.SetData(new uint[] { (uint)contactSlots, 0u });
+            poolControlBuffer.SetData(new uint[] { (uint)contactSlots, 0u, 0u }); // all slots free, nothing dropped, no slot taken yet
+            var emptyArgs = new uint[ContactLayout.PoolArgsCount * 3];
+            for (int i = 0; i < ContactLayout.PoolArgsCount; i++)
+            {
+                emptyArgs[i * 3 + 1] = 1u; // 0 x 1 x 1 groups: nothing, until stage N has planned
+                emptyArgs[i * 3 + 2] = 1u;
+            }
+            npArgsBuffer.SetData(emptyArgs);
             dirtyBuffer.SetData(dirtyBits);
             colorBuffer.SetData(new uint[bodies.Capacity]);
             ClearStatus();
@@ -265,6 +276,9 @@ namespace McKrill.Avbd
         internal GraphicsBuffer PairTableBuffer => pairTableBuffer;
         internal GraphicsBuffer FreeListBuffer => freeListBuffer;
         internal GraphicsBuffer PoolControlBuffer => poolControlBuffer;
+
+        /// <summary>Indirect dispatch arguments of stage N and of the dual update of the contacts, <see cref="AvbdIndirect.ArgsStride"/> bytes per entry (<c>ContactLayout.PoolArgs*</c>).</summary>
+        internal GraphicsBuffer NpArgsBuffer => npArgsBuffer;
         internal GraphicsBuffer DirtySlotsBuffer => dirtyBuffer;
 
         /// <summary>
@@ -503,7 +517,20 @@ namespace McKrill.Avbd
             pairCountBuffer.GetData(counts);
             slotBodiesBuffer.GetData(bodiesOfSlot);
             poolControlBuffer.GetData(control);
-            return new ContactSnapshot(counts, bodiesOfSlot, (int)control[ContactLayout.PoolFreeTopWord], (int)control[ContactLayout.PoolOverflowWord]);
+            return new ContactSnapshot(counts, bodiesOfSlot, (int)control[ContactLayout.PoolFreeTopWord], (int)control[ContactLayout.PoolOverflowWord],
+                (int)control[ContactLayout.PoolHighWaterWord]);
+        }
+
+        /// <summary>
+        /// The groups (x, y, z) of every indirect dispatch the last narrow phase planned, in the order of <c>ContactLayout.PoolArgs*</c>: three
+        /// words per entry. Waits for the GPU. For tests and tools.
+        /// </summary>
+        internal uint[] ReadNpArgs()
+        {
+            ThrowIfDisposed();
+            var words = new uint[ContactLayout.PoolArgsCount * 3];
+            npArgsBuffer.GetData(words);
+            return words;
         }
 
         static float TorqueArm(BodyShapeRecord[] shape, uint slotA, uint slotB)
@@ -574,6 +601,7 @@ namespace McKrill.Avbd
             Release(ref pairTableBuffer);
             Release(ref freeListBuffer);
             Release(ref poolControlBuffer);
+            Release(ref npArgsBuffer);
             Release(ref dirtyBuffer);
             coloring?.Dispose();
             lists?.Dispose();

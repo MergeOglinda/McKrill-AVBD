@@ -16,7 +16,16 @@
 // Words of the manifold pool's control buffer (_NpControl).
 #define AVBD_NP_FREE_TOP      0 // number of free slots: the top of the stack of free slots
 #define AVBD_NP_OVERFLOW      1 // candidate pairs dropped because no slot was free, since the buffer was made
-#define AVBD_NP_CONTROL_WORDS 2
+#define AVBD_NP_HIGH_WATER    2 // the highest slot ever taken + 1: every used slot is below it, so the stage's kernels need no more threads
+#define AVBD_NP_CONTROL_WORDS 3
+
+// Entries of the indirect dispatch arguments of stage N (_NpArgs; AVBD_INDIRECT_ARGS_STRIDE bytes each), written by the NpPlan kernel.
+#define AVBD_NP_ARGS_RETIRE            0 // NpRetire: one thread per slot below the high-water mark
+#define AVBD_NP_ARGS_ALLOCATE_DYNAMIC  1 // NpAllocate over the pairs stored in the broadphase's dynamic-dynamic bin
+#define AVBD_NP_ARGS_ALLOCATE_STATIC   2 // NpAllocate over the pairs stored in the dynamic-static bin
+#define AVBD_NP_ARGS_NARROWPHASE       3 // Narrowphase: one thread per slot below the high-water mark
+#define AVBD_NP_ARGS_DUAL              4 // DualContact: one thread per contact record of those slots
+#define AVBD_NP_ARGS_COUNT             5
 
 // Dense index of the pair of slots (a, b) with a > b. No stage uses it any more (it was the manifold slot of the narrow phase over all
 // pairs); the CPU oracle still stores its manifolds this way and the topology tests use it.

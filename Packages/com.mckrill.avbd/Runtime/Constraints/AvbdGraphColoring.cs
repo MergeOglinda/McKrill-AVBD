@@ -45,10 +45,10 @@ namespace McKrill.Avbd
         public const int WorkWords = 196;
 
         /// <summary>Mirrors AVBD_COLOR_ARGS_STRIDE: bytes of indirect arguments per color (groups x, y and z).</summary>
-        public const int ArgsStride = 12;
+        public const int ArgsStride = AvbdIndirect.ArgsStride;
 
         /// <summary>Mirrors AVBD_COLOR_ROW_GROUPS: thread groups per row of a big color (the limit of one dimension of a dispatch).</summary>
-        public const int RowGroups = 65535;
+        public const int RowGroups = AvbdIndirect.RowGroups;
 
         /// <summary>Rounds dispatched between two readbacks.</summary>
         const int RoundsPerBatch = 8;
@@ -83,12 +83,7 @@ namespace McKrill.Avbd
         /// Thread groups of an indirect dispatch over <paramref name="count"/> bodies, as <c>ColorPlan</c> computes them: x is at most
         /// <see cref="RowGroups"/> and y the number of rows of that width. The mirror of the HLSL, which a test compares with the GPU's.
         /// </summary>
-        public static (uint x, uint y) GroupsFor(long count)
-        {
-            long groups = (count + AvbdConst.GroupSize - 1) / AvbdConst.GroupSize;
-            long rows = Math.Max(1L, (groups + RowGroups - 1) / RowGroups);
-            return ((uint)Math.Min(groups, RowGroups), (uint)rows);
-        }
+        public static (uint x, uint y) GroupsFor(long count) => AvbdIndirect.GroupsFor(count);
 
         public AvbdGraphColoring(ComputeShader shader)
         {

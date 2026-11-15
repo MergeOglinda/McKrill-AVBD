@@ -21,14 +21,18 @@ namespace McKrill.Avbd
         /// <summary>Candidate pairs dropped because no slot was free, since the buffers were made.</summary>
         public readonly int Overflow;
 
+        /// <summary>The highest slot ever taken + 1 (<see cref="ContactLayout.PoolHighWaterWord"/>): every used slot is below it.</summary>
+        public readonly int HighWater;
+
         readonly Dictionary<ulong, int> slotOfPair = new Dictionary<ulong, int>();
 
-        public ContactSnapshot(uint[] counts, uint4[] bodies, int freeSlots, int overflow)
+        public ContactSnapshot(uint[] counts, uint4[] bodies, int freeSlots, int overflow, int highWater)
         {
             Counts = counts;
             Bodies = bodies;
             FreeSlots = freeSlots;
             Overflow = overflow;
+            HighWater = highWater;
             for (int s = 0; s < bodies.Length; s++)
                 if (bodies[s].x != AvbdConst.Invalid)
                 {

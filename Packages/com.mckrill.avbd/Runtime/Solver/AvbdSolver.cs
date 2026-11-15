@@ -24,6 +24,7 @@ namespace McKrill.Avbd
         readonly int velocityKernel;
         readonly int narrowphaseKernel = -1;
         readonly int npClearKernel = -1;
+        readonly int npPlanKernel = -1;
         readonly int npRetireKernel = -1;
         readonly int npAllocateKernel = -1;
         readonly int dualContactKernel = -1;
@@ -42,6 +43,8 @@ namespace McKrill.Avbd
         static readonly int NpControlId = Shader.PropertyToID("_NpControl");
         static readonly int PairsId = Shader.PropertyToID("_Pairs");
         static readonly int BpControlId = Shader.PropertyToID("_BpControl");
+        static readonly int NpArgsId = Shader.PropertyToID("_NpArgs");
+        static readonly int BinId = Shader.PropertyToID("_Bin");
         static readonly int SlotCapacityId = Shader.PropertyToID("_SlotCapacity");
         static readonly int TableMaskId = Shader.PropertyToID("_TableMask");
         static readonly int DynamicPairCapacityId = Shader.PropertyToID("_DynamicPairCapacity");
@@ -83,6 +86,7 @@ namespace McKrill.Avbd
             if (shaders.Narrowphase != null)
             {
                 npClearKernel = shaders.Narrowphase.FindKernel("NpClearTable");
+                npPlanKernel = shaders.Narrowphase.FindKernel("NpPlan");
                 npRetireKernel = shaders.Narrowphase.FindKernel("NpRetire");
                 npAllocateKernel = shaders.Narrowphase.FindKernel("NpAllocate");
                 narrowphaseKernel = shaders.Narrowphase.FindKernel("Narrowphase");
@@ -253,7 +257,10 @@ namespace McKrill.Avbd
         }
 
         // Stage N, after stage B and stage P (it reads the start-of-step poses): frees the slots of recycled bodies, lets the new pairs of the
-        // broadphase take slots, and collides every used slot.
+        // broadphase take slots, and collides every used slot. Every kernel but the first is dispatched indirectly, with sizes that NpPlan computed
+        // on the GPU from the pool's high-water mark and the pair counts of the broadphase: the host reads no count, and the work follows the number
+        // of manifolds and pairs, not the capacities. NpPlan runs twice: for the first kernels, and again for the sizes that depend on the slots
+        // NpAllocate took (Narrowphase, and the dual update of the contacts after every primal sweep).
         internal void DispatchNarrowphase()
         {
             if (constraints == null || !constraints.HasContacts)
@@ -264,7 +271,7 @@ namespace McKrill.Avbd
             ComputeShader shader = shaders.Narrowphase;
             int slots = constraints.ContactCapacity;
 
-            foreach (int kernel in new[] { npClearKernel, npRetireKernel, npAllocateKernel, narrowphaseKernel })
+            foreach (int kernel in new[] { npClearKernel, npPlanKernel, npRetireKernel, npAllocateKernel, narrowphaseKernel })
             {
                 bodies.BindTo(shader, kernel);
                 shader.SetBuffer(kernel, RecordsId, constraints.Records);
@@ -276,6 +283,7 @@ namespace McKrill.Avbd
                 shader.SetBuffer(kernel, DirtySlotsId, constraints.DirtySlotsBuffer);
                 shader.SetBuffer(kernel, PairsId, broadphase.Pairs);
                 shader.SetBuffer(kernel, BpControlId, broadphase.Control);
+                shader.SetBuffer(kernel, NpArgsId, constraints.NpArgsBuffer);
             }
             SolverUniforms.Bind(shader, settings);
             shader.SetInt(ContactBaseId, constraints.ContactBase);
@@ -285,13 +293,22 @@ namespace McKrill.Avbd
             shader.SetInt(StaticPairCapacityId, broadphase.StaticPairCapacity);
 
             AvbdDispatch.Linear(shader, npClearKernel, constraints.PairTableSize);
-            AvbdDispatch.Linear(shader, npRetireKernel, slots);
-            AvbdDispatch.Linear(shader, npAllocateKernel, broadphase.DynamicPairCapacity + broadphase.StaticPairCapacity);
-            AvbdDispatch.Linear(shader, narrowphaseKernel, slots);
+            shader.Dispatch(npPlanKernel, 1, 1, 1);
+            shader.DispatchIndirect(npRetireKernel, constraints.NpArgsBuffer, NpArgsOffset(ContactLayout.PoolArgsRetire));
+
+            shader.SetInt(BinId, 0);
+            shader.DispatchIndirect(npAllocateKernel, constraints.NpArgsBuffer, NpArgsOffset(ContactLayout.PoolArgsAllocateDynamic));
+            shader.SetInt(BinId, 1);
+            shader.DispatchIndirect(npAllocateKernel, constraints.NpArgsBuffer, NpArgsOffset(ContactLayout.PoolArgsAllocateStatic));
+
+            shader.Dispatch(npPlanKernel, 1, 1, 1); // the high-water mark may have grown
+            shader.DispatchIndirect(narrowphaseKernel, constraints.NpArgsBuffer, NpArgsOffset(ContactLayout.PoolArgsNarrowphase));
         }
 
-        // Stage D for the contacts, after every primal sweep: one thread per manifold slot of the pool, which loops over the slot's contacts (a
-        // free slot skips).
+        static uint NpArgsOffset(int entry) => (uint)(entry * AvbdIndirect.ArgsStride);
+
+        // Stage D for the contacts, after every primal sweep: one thread per contact record of the slots below the pool's high-water mark (the free
+        // slots and the records beyond a slot's count skip). Dispatched indirectly with the arguments the narrow phase of this step planned.
         internal void DispatchDualContacts()
         {
             if (constraints == null || !constraints.HasContacts)
@@ -302,8 +319,10 @@ namespace McKrill.Avbd
             bodies.BindTo(shader, dualContactKernel);
             shader.SetBuffer(dualContactKernel, RecordsId, constraints.Records);
             shader.SetBuffer(dualContactKernel, PairCountsId, constraints.PairCountsBuffer);
+            shader.SetBuffer(dualContactKernel, NpControlId, constraints.PoolControlBuffer);
             shader.SetInt(ContactBaseId, constraints.ContactBase);
-            AvbdDispatch.Linear(shader, dualContactKernel, constraints.ContactCapacity);
+            shader.SetInt(SlotCapacityId, constraints.ContactCapacity);
+            shader.DispatchIndirect(dualContactKernel, constraints.NpArgsBuffer, NpArgsOffset(ContactLayout.PoolArgsDual));
         }
 
         // One thread per constraint. Constraints are independent, so there is no coloring and one dispatch covers them all.

@@ -10,8 +10,8 @@ namespace McKrill.Avbd
     /// The pair list has two bins in one buffer: dynamic-dynamic pairs first, then dynamic-static pairs. Each bin has a capacity; pairs
     /// beyond it are counted but not stored, see <see cref="DynamicPairCount"/> and <see cref="Overflowed"/>.
     ///
-    /// Everything stays on the GPU. The host only reads the pair counts back when asked (<see cref="ReadCounts"/>); a later stage will
-    /// let the narrowphase read the counts from the control buffer by itself (indirect dispatch).
+    /// Everything stays on the GPU. The host only reads the pair counts back when asked (<see cref="ReadCounts"/>); the narrowphase reads them
+    /// from the control buffer by itself and is dispatched indirectly.
     /// Pairs are recomputed from scratch on every <see cref="Run"/>; there is no temporal coherence, and the order of the pairs inside a
     /// bin is not deterministic.
     /// </summary>
