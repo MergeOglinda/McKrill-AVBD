@@ -17,8 +17,8 @@ namespace McKrill.Avbd
     /// stage N (see <see cref="ContactLayout"/>): <c>contactCapacity</c> slots, each holding the manifold of one pair of bodies. The pairs come
     /// from the broadphase (stage B), which <see cref="AvbdSolver"/> runs when there are contacts. After the narrow phase,
     /// <see cref="RefreshContactTopology"/> rebuilds the lists (stage G) and the coloring (stage C), because they change every step. The lists
-    /// are built from the pool and the records where they are, with no readback. The coloring still reads two small things back (see
-    /// <see cref="AvbdGraphColoring"/>).
+    /// are built from the pool and the records where they are, with no readback. The coloring reads one small thing back, which also gives the
+    /// number of colors; the size of every color stays on the GPU and the primal sweep is dispatched indirectly (see <see cref="AvbdGraphColoring"/>).
     ///
     /// Limits of this version: constraints cannot be removed, and removing a body that has constraints is not supported.
     /// The arrays have a fixed capacity. Methods must be called from the main thread.
@@ -56,8 +56,9 @@ namespace McKrill.Avbd
         readonly List<Spec> pending = new List<Spec>();
         readonly AvbdGraphColoring coloring;
         readonly AvbdConstraintLists lists;
-        int[] colorOffsets = new int[1];
         int colorCount;
+        ColorSchedule schedule;   // read back on demand, for tests and tools: the sweep itself never needs it on the CPU
+        bool scheduleValid;
         GraphColoringOrder coloringOrder = GraphColoringOrder.SlotOrder;
 
         GraphicsBuffer recordBuffer;
@@ -218,7 +219,7 @@ namespace McKrill.Avbd
         /// <summary>Capacity of the broadphase's dynamic-static bin that goes with this contact capacity.</summary>
         internal int StaticCandidateCapacity => contactSlots + 1024;
 
-        /// <summary>Number of graph colors of the last rebuild: the primal stage dispatches this many times per iteration.</summary>
+        /// <summary>Number of graph colors of the last rebuild: the primal stage dispatches this many times per iteration (each dispatch is indirect).</summary>
         public int ColorCount => colorCount;
 
         /// <summary>
@@ -249,6 +250,12 @@ namespace McKrill.Avbd
         internal GraphicsBuffer Records => recordBuffer;
         internal GraphicsBuffer List => listBuffer;
         internal GraphicsBuffer ColorBodies => colorBuffer;
+
+        /// <summary>The coloring's work buffer, which holds the start and size of every color on the GPU (AVBD_COLOR_COUNTS_OFFSET and _STARTS_OFFSET).</summary>
+        internal GraphicsBuffer ColorWork => coloring.Work;
+
+        /// <summary>Indirect dispatch arguments of the primal sweep, <see cref="AvbdGraphColoring.ArgsStride"/> bytes per color.</summary>
+        internal GraphicsBuffer ColorArgs => coloring.Args;
         internal GraphicsBuffer Status => statusBuffer;
         internal GraphicsBuffer PairCountsBuffer => pairCountBuffer;
         internal GraphicsBuffer SlotBodiesBuffer => slotBodiesBuffer;
@@ -257,11 +264,26 @@ namespace McKrill.Avbd
         internal GraphicsBuffer PoolControlBuffer => poolControlBuffer;
         internal GraphicsBuffer DirtySlotsBuffer => dirtyBuffer;
 
-        /// <summary>Start of a color in the bucket array (<see cref="ColorBodies"/>).</summary>
-        internal int ColorOffset(int color) => colorOffsets[color];
+        /// <summary>
+        /// The start and size of every color and the indirect arguments of its sweep, read back from the GPU (this waits for the GPU; the result is
+        /// kept until the next coloring). For tests and tools: the solver never reads them.
+        /// </summary>
+        internal ColorSchedule ReadColorSchedule()
+        {
+            ThrowIfDisposed();
+            if (!scheduleValid)
+            {
+                schedule = coloring.ReadSchedule(colorCount);
+                scheduleValid = true;
+            }
+            return schedule;
+        }
 
-        /// <summary>Number of bodies of a color.</summary>
-        internal int ColorSize(int color) => colorOffsets[color + 1] - colorOffsets[color];
+        /// <summary>Start of a color in the bucket array (<see cref="ColorBodies"/>). Reads the GPU, see <see cref="ReadColorSchedule"/>.</summary>
+        internal int ColorOffset(int color) => ReadColorSchedule().Starts[color];
+
+        /// <summary>Number of bodies of a color. Reads the GPU, see <see cref="ReadColorSchedule"/>.</summary>
+        internal int ColorSize(int color) => ReadColorSchedule().Counts[color];
 
         /// <summary>The bucket array read back: the solved body slots grouped by color. Order inside a color is unspecified.</summary>
         internal uint[] ReadColorBodies()
@@ -269,7 +291,7 @@ namespace McKrill.Avbd
             ThrowIfDisposed();
             var all = new uint[colorBuffer.count];
             colorBuffer.GetData(all);
-            var used = new uint[colorOffsets[colorCount]];
+            var used = new uint[ReadColorSchedule().Starts[colorCount]];
             Array.Copy(all, used, used.Length);
             return used;
         }
@@ -409,7 +431,7 @@ namespace McKrill.Avbd
 
             // Stage G: the per-body lists, then stage C: color the graph and bucket the bodies. Both on the GPU.
             BuildLists(bodyCount);
-            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, colorBuffer, coloringOrder, out colorOffsets);
+            Recolor(bodyCount);
 
             topologyDirty = false;
             builtSolvedSetVersion = bodies.SolvedSetVersion;
@@ -452,7 +474,14 @@ namespace McKrill.Avbd
 
             int bodyCount = bodies.HighWaterMark;
             BuildLists(bodyCount);
-            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, colorBuffer, coloringOrder, out colorOffsets);
+            Recolor(bodyCount);
+        }
+
+        // Stage C: colors the graph and buckets the bodies. The number of colors comes back; the size of each color stays on the GPU.
+        void Recolor(int bodyCount)
+        {
+            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, colorBuffer, coloringOrder);
+            scheduleValid = false;
         }
 
         // Stage G: the lists of the per-body constraints, from the joints and springs on the GPU and the manifold pool.

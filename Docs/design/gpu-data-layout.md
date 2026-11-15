@@ -383,14 +383,17 @@ The previous velocity is what stage P reads for the adaptive warm start, so a st
 
 | Kernel | What |
 | --- | --- |
-| `ColorReset` | Zeroes the work buffer (132 words: 4 control, 64 counts, 64 cursors) |
+| `ColorReset` | Zeroes the work buffer (196 words: 4 control, 64 counts, 64 cursors, 64 starts) |
 | `ColorInit` | Marks every slot: `PENDING` if solved (not free, not kinematic, mass above zero), else `INVALID` |
 | `ColorBegin` | One thread; zeroes the counter of bodies still waiting, before the last round of a batch |
-| `ColorRound` | One round. A pending body waits if a neighbor that colors before it is pending (and counts itself as waiting); otherwise it picks the lowest color no neighbor has, 32 colors at a time. More than 64 colors sets an overflow word |
+| `ColorRound` | One round. A pending body waits if a neighbor that colors before it is pending (and counts itself as waiting); otherwise it picks the lowest color no neighbor has, 32 colors at a time, and raises the color count (control word 2) to its color + 1 with an atomic max. More than 64 colors sets an overflow word |
 | `ColorCount` | One atomic add per solved body into the count of its color |
-| `ColorBucket` | After the host has put the start of each color into the cursors, writes each solved slot to the next free entry of its color |
+| `ColorPlan` | One thread, after `ColorCount`: for each of the 64 colors, the start in the bucket array (stored as the start and as the bucket cursor) and the arguments of an indirect dispatch over its bodies |
+| `ColorBucket` | Writes each solved slot to the next free entry of its color, at the cursors `ColorPlan` set |
 
-**Host side.** `AvbdGraphColoring` runs the rounds in batches of 8 and reads back the waiting counter after each batch, then reads the per-color counts, computes the start of each color and writes it into the cursors. The two readbacks are the only synchronization; they disappear when the primal sweep is dispatched indirectly (a later stage). A graph that needs more than 64 colors (for example 65 bodies that are all joined to each other) makes `Rebuild()` throw `InvalidOperationException`.
+**Host side.** `AvbdGraphColoring` runs the rounds in batches of 8 and reads back the control words after each batch: whether bodies are still waiting, and, once none is, the number of colors. That is the only synchronization. The size and the start of every color are never on the CPU: `ColorCount` and `ColorPlan` leave them in the work buffer (counts at word 4, starts at word 132) and the dispatch arguments in a second buffer (`Args`, `IndirectArguments | Raw`, written through a `RWByteAddressBuffer`), and `ColorBucket` fills the buckets from the cursors `ColorPlan` set. The previous version read the counts back, computed the starts on the CPU and uploaded them as cursors.
+
+**Indirect sweep.** The primal sweep is one dispatch per color and iteration, in order, because a body reads the poses the earlier colors just wrote. `AvbdSolver` sets `_Color` and calls `DispatchIndirect(args, color * 12)` for each of the `ColorCount` colors. The kernel reads the size and the start of its color from the work buffer (`_ColorWork`), so nothing about a color's size reaches the CPU. A color of at most 65,535 groups (4.19 million bodies) is a dispatch of `x` groups by one row; a bigger one is laid out in rows of 65,535 groups (`y` rows), and thread `(x, y)` handles entry `y * 65535 * 64 + x`, the last group possibly overshooting, which the size check absorbs. `AvbdGraphColoring.GroupsFor` is the C# mirror of the arithmetic. A color without bodies gets a `0 x 1 x 1` dispatch, which does nothing. A graph that needs more than 64 colors (for example 65 bodies that are all joined to each other) makes `Rebuild()` throw `InvalidOperationException`.
 
 **Order inside a color.** The bucket entries of one color are in the order the threads got their atomic cursor, so it is unspecified and can differ between runs. It does not change the result of a sweep: the bodies of one color share no constraint, each writes only its own pose and reads the poses of other colors. The sweep stays deterministic. (The CPU coloring puts the highest slot first; tests compare buckets as sets.)
 
@@ -398,7 +401,7 @@ The previous velocity is what stage P reads for the adaptive warm start, so a st
 
 **Check.** `CpuGraphColoring` is the oracle: bodies visited in falling priority, each takes the lowest color not used by a colored neighbor. `GraphColoringTests`: the oracle in slot order equals `ConstraintTopology`'s coloring (rope and 12 random scenes); the hashed oracle is a valid coloring; the GPU equals the oracle exactly in both orders on the rope, the spring scene and random lattices (color of every body, number of colors, bucket contents); the hashed order needs under half the rounds of the slot order on a chain of 160 links; recoloring after a spawn, an added constraint and a body becoming kinematic; bodies without constraints; and the 65-body clique that exceeds 64 colors. `PrimalTests` and `VelocityTests` now run on the GPU coloring.
 
-Not part of this stage: indirect dispatch of the color sweep (the host still reads the color counts back), and temporal coherence. A joint that has fractured is left out of the lists by stage G, so it is not in the graph either.
+Not part of this stage: removing the last readback, and temporal coherence. The host still needs to know when the rounds are finished and how many colors there are. Replacing that means dispatching a bounded number of rounds without knowing the count (empty indirect rounds cost little) and finishing a rare overflow some other way; the sweep is already indirect, so the color count could then also be replaced by the 64 colors' arguments. A joint that has fractured is left out of the lists by stage G, so it is not in the graph either.
 
 ### Stage B: broadphase
 
@@ -479,7 +482,7 @@ Two static or kinematic bodies never make a pair. A pair that does not fit its b
 
 **Check.** `ConstraintTopology` (`Build` and `BuildWithManifolds`) is the oracle. `ConstraintListTests`: the ranges and every list entry equal the oracle's for joints and springs with world pins, a body of mass 0 and a kinematic body as partners and two constraints between the same pair; for a fractured joint (left out, counted, `BrokenCount`); for a scene with contacts, after each of six steps; and for a spring to a massless body added after a first build. `BodyLayoutTests` compares the HLSL constants with the C# mirrors.
 
-**Limits.** The sort and the scan are simple, not fast. The coloring that follows still reads the color counts back. Constraints cannot be removed, and removing a body that has constraints is not supported.
+**Limits.** The sort and the scan are simple, not fast. The coloring that follows still reads back whether bodies are waiting and the number of colors (section 9, stage C). Constraints cannot be removed, and removing a body that has constraints is not supported.
 
 ## 12. Constraints (step 4: joints and springs)
 
@@ -512,7 +515,7 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 - Only solved bodies get a list. A constraint between a solved body and a fixed one is listed for the solved body only.
 - Entries are newest constraint first, so the floating-point sums run in the reference's order.
 - Colors come from a greedy first-fit coloring: bodies from the highest slot down, lowest color not used by a colored neighbor. This is the reference's `GraphColoring`, and `ConstraintTopologyTests` checks the two against each other. Fixed bodies and world pins create no edge. `ConstraintTopology` still computes this coloring on the CPU, as the oracle of stage C; the solver uses the GPU coloring (stage C above), which gives the same colors in the default order.
-- Bodies are bucketed by color in one list; the host knows each color's range from the coloring's readback, so a color is one dispatch.
+- Bodies are bucketed by color in one list; the start and size of each color are on the GPU (stage C) and the host only knows the number of colors, so a color is one indirect dispatch.
 
 **The lists are built on the GPU** (stage G, section 11), and so are the coloring and the buckets (stage C). `ConstraintTopology` is the CPU oracle for both. `Rebuild()` applies the pending body edits and reads the sizes and poses of the bodies back only when new constraints must be completed (the torque arm, the spring's rest length), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending or when the set of solved bodies changed (section 11, stage U). Known limits: constraints cannot be removed, removing a body that has constraints is not supported, and without contacts the lists are rebuilt only by `Rebuild()`, so a joint that fractures (stage D) stays in the lists and the coloring until then (with contacts the lists are rebuilt every step and drop it; section 13). The graph color is written to the Meta record by stage C (`Meta.state.x`).
 
@@ -527,6 +530,7 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 | `DualTests` (oracle) | No | `CpuConstraintInit` and `CpuDual` against `ReferenceSolver` after one step (1 and 3 iterations), a hand-computed dual update, fracture |
 | `DualTests` (GPU) | Yes | `Step()` against the oracles on the rope, the fracture scene and random lattices, including all constraint records; springs untouched by stage D |
 | `GraphColoringTests` (oracle) | No | `CpuGraphColoring` in slot order against `ConstraintTopology`; the hashed order is a valid coloring and a strict order |
+| `IndirectSweepTests` | Yes (all but the first) | The argument arithmetic covers every entry of a color once, including colors of more than 65,535 groups (no GPU); the GPU's start, size and arguments of every color against the oracle's sizes and the mirror; a color of five groups where every body is solved by a step |
 | `GraphColoringTests` (GPU) | Yes | The kernels against the oracle in both orders (colors, color count, buckets); rounds on a long chain; recoloring after edits; no constraints; more than 64 colors |
 | `ConstraintListTests` | Yes | Stage G: the GPU lists and ranges against `ConstraintTopology` entry by entry (pins, fixed and kinematic partners, a fractured joint, contacts over six steps, a massless partner added later) |
 | `VelocityTests` | Both | Stage U and whole steps against the reference solver (section 11, stage U) |
@@ -575,7 +579,7 @@ Slots are pushed only by `NpRetire` and `Narrowphase` and popped only by `NpAllo
 
 `ApplyEdits`, `Rebuild` if needed, B, P, `PrepareContacts` (dirty bits), N (the four kernels), `RefreshContactTopology`, `ConstraintInit` (joints and springs), then per iteration the primal sweep per color, `Dual`, `DualContact`; then U.
 
-`RefreshContactTopology` builds the per-body lists on the GPU (stage G) from the slot table and the records, with no readback: contacts first in each list, **ordered by pair** (body A, then body B) whichever slots the pairs hold, then joints and springs newest first, which is the reference's order of constraints in the first step. It then runs the GPU coloring (stage C) with the contacts in the graph; that still reads the color counts back. With contacts the coloring changes every step; `SlotOrder` gives the reference's coloring.
+`RefreshContactTopology` builds the per-body lists on the GPU (stage G) from the slot table and the records, with no readback: contacts first in each list, **ordered by pair** (body A, then body B) whichever slots the pairs hold, then joints and springs newest first, which is the reference's order of constraints in the first step. It then runs the GPU coloring (stage C) with the contacts in the graph; that still reads back whether bodies are waiting and the number of colors, but not the size of a color (the sweep is indirect). With contacts the coloring changes every step; `SlotOrder` gives the reference's coloring.
 
 ### Fractured joints
 
@@ -587,7 +591,7 @@ Stage D marks a joint that fractured with the `Broken` flag. Stage G reads the f
 - A manifold that exists is kept even if a joint or spring is added between its bodies later. A pair that the broadphase does not list is not created.
 - No ignore-collision pairs yet (the reference's `IgnoreCollision`). Pairs joined by a joint or spring are excluded.
 - Only box-box. Contacts of one pair are limited to eight (the reference's limit).
-- The lists are rebuilt on the GPU every step; the coloring behind them still reads the color counts back.
+- The lists are rebuilt on the GPU every step; the coloring behind them still reads back one small word group (bodies waiting, number of colors), and the sweep is dispatched indirectly.
 - After the first step the summation order of a body's contacts may differ from the reference's (the reference appends new manifolds to the lists); the results differ by rounding only.
 
 ### How it is checked
