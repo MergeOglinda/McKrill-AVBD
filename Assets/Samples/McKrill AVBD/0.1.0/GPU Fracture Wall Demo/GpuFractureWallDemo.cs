@@ -54,9 +54,9 @@ namespace McKrill.Avbd.Samples
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
         [SerializeField] bool rigidJoints = true;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
-        [SerializeField, Min(1f)] float jointStiffness = 1e5f;
+        [SerializeField, Min(1f)] float jointStiffness = 1e3f;
         [Tooltip("A joint breaks when the norm of its angular multiplier is above this.")]
-        [SerializeField, Min(0.01f)] float fractureThreshold = 100f;
+        [SerializeField, Min(0.01f)] float fractureThreshold = 13f;
 
         [Header("Solver")]
         [SerializeField, Range(1, 30)] int iterations = 10;

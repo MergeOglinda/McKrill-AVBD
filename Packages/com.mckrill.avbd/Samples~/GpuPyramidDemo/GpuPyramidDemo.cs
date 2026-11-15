@@ -68,7 +68,7 @@ namespace McKrill.Avbd.Samples
 
         // The broadphase finds the touching pairs and the narrow phase keeps a manifold slot for each of them (see ManifoldSlots below).
         // Ten layers are 385 blocks; with the ground and 100 shots that fits.
-        const int MaxLayers = 10;
+        const int MaxLayers = 50;
         const float GroundHalfExtent = 100f;
         const float BlockGap = 0.01f; // between neighbors; the pyramid starts almost at rest
 

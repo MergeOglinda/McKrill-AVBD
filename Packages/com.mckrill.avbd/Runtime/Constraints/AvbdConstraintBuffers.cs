@@ -59,7 +59,7 @@ namespace McKrill.Avbd
         int colorCount;
         ColorSchedule schedule;   // read back on demand, for tests and tools: the sweep itself never needs it on the CPU
         bool scheduleValid;
-        GraphColoringOrder coloringOrder = GraphColoringOrder.SlotOrder;
+        GraphColoringOrder coloringOrder = GraphColoringOrder.Hashed;
 
         GraphicsBuffer recordBuffer;
         GraphicsBuffer listBuffer;

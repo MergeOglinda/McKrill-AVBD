@@ -54,9 +54,9 @@ namespace McKrill.Avbd.Samples
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
         [SerializeField] bool rigidJoints = true;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
-        [SerializeField, Min(1f)] float jointStiffness = 1e5f;
+        [SerializeField, Min(1f)] float jointStiffness = 1e3f;
         [Tooltip("A joint breaks when the norm of its angular multiplier is above this.")]
-        [SerializeField, Min(0.01f)] float fractureThreshold = 100f;
+        [SerializeField, Min(0.01f)] float fractureThreshold = 13f;
 
         [Header("Solver")]
         [SerializeField, Range(1, 30)] int iterations = 10;
@@ -82,9 +82,9 @@ namespace McKrill.Avbd.Samples
         // The wall sizes: 15 x 15 = 225 blocks at least, 22 x 18 = 396 at most. The limit is what was tried: the constraint lists are built on
         // the GPU now (stage G), but the graph coloring still reads two small things back every step, and nobody has measured larger walls.
         const int MinColumns = 15;
-        const int MaxColumns = 22;
+        const int MaxColumns = 75;
         const int MinRows = 15;
-        const int MaxRows = 18;
+        const int MaxRows = 75;
         const float GroundHalfExtent = 100f;
         const float BlockGap = 0.01f; // between neighbors; the wall starts almost at rest
 
