@@ -24,7 +24,7 @@
 #define AVBD_NP_ARGS_ALLOCATE_DYNAMIC  1 // NpAllocate over the pairs stored in the broadphase's dynamic-dynamic bin
 #define AVBD_NP_ARGS_ALLOCATE_STATIC   2 // NpAllocate over the pairs stored in the dynamic-static bin
 #define AVBD_NP_ARGS_NARROWPHASE       3 // Narrowphase: one thread per slot below the high-water mark
-#define AVBD_NP_ARGS_DUAL              4 // DualContact: one thread per contact record of those slots
+#define AVBD_NP_ARGS_DUAL              4 // DualContact: one thread per slot (it loops over the slot's contacts)
 #define AVBD_NP_ARGS_COUNT             5
 
 // Dense index of the pair of slots (a, b) with a > b. No stage uses it any more (it was the manifold slot of the narrow phase over all

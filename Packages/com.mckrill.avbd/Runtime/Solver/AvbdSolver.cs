@@ -307,8 +307,8 @@ namespace McKrill.Avbd
 
         static uint NpArgsOffset(int entry) => (uint)(entry * AvbdIndirect.ArgsStride);
 
-        // Stage D for the contacts, after every primal sweep: one thread per contact record of the slots below the pool's high-water mark (the free
-        // slots and the records beyond a slot's count skip). Dispatched indirectly with the arguments the narrow phase of this step planned.
+        // Stage D for the contacts, after every primal sweep: one thread per slot below the pool's high-water mark, which loops over the slot's
+        // contacts (a free slot skips). Dispatched indirectly with the arguments the narrow phase of this step planned.
         internal void DispatchDualContacts()
         {
             if (constraints == null || !constraints.HasContacts)
