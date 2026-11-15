@@ -22,6 +22,7 @@ namespace McKrill.Avbd
         [SerializeField] ComputeShader narrowphase;
         [SerializeField] ComputeShader coloring;
         [SerializeField] ComputeShader broadphase;
+        [SerializeField] ComputeShader lists;
 
         /// <summary>Trivial kernel that writes a known pattern into a buffer. Proves the toolchain.</summary>
         public ComputeShader Smoke => smoke;
@@ -49,6 +50,9 @@ namespace McKrill.Avbd
 
         /// <summary>Stage B: broadphase (candidate pairs of overlapping bounding spheres).</summary>
         public ComputeShader Broadphase => broadphase;
+
+        /// <summary>Stage G: per-body constraint lists (CSR), built from the constraint records and the manifold pool.</summary>
+        public ComputeShader Lists => lists;
 
         /// <summary>Loads the shader set, or returns null if the asset is missing.</summary>
         public static AvbdShaderSet Load()

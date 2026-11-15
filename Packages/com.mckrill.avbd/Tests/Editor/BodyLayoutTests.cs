@@ -292,6 +292,19 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void Hlsl_ListConstantsMatchTheCSharpMirrors()
+        {
+            Dictionary<string, uint> d = ReadDefines("AvbdListParams.hlsl");
+
+            Assert.AreEqual((uint)AvbdConstraintLists.ControlTotal, d["AVBD_LIST_CONTROL_TOTAL"]);
+            Assert.AreEqual((uint)AvbdConstraintLists.ControlBroken, d["AVBD_LIST_CONTROL_BROKEN"]);
+            Assert.AreEqual((uint)AvbdConstraintLists.ControlInvalid, d["AVBD_LIST_CONTROL_INVALID"]);
+            Assert.AreEqual((uint)AvbdConstraintLists.ControlWords, d["AVBD_LIST_CONTROL_WORDS"]);
+            Assert.AreEqual((uint)AvbdConstraintLists.ScanGroup, d["AVBD_LIST_SCAN_GROUP"]);
+            Assert.AreEqual((uint)ContactLayout.MaxContactsPerPair, d["AVBD_LIST_CONTACTS_PER_SLOT"]);
+        }
+
+        [Test]
         public void Hlsl_BroadphaseConstantsMatchTheCSharpMirrors()
         {
             Dictionary<string, uint> d = ReadDefines("AvbdBroadphaseParams.hlsl");

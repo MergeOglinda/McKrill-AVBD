@@ -223,7 +223,7 @@ void Primal(uint3 id : SV_DispatchThreadID)
 
     uint slot = _ColorBodies[index];
 
-    // The color lists are built on the CPU; a body removed or changed since is skipped.
+    // The lists and the colors were built before the last edits; a body removed or changed since is skipped.
     if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
         return;
     float4 momentMass = _BodyMass[slot].momentMass;

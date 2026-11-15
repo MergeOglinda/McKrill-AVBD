@@ -109,9 +109,9 @@ namespace McKrill.Avbd
         /// Runs one whole step. Applies pending body edits (stage E) and constraint changes, then runs the broadphase (B) and predict (P), with
         /// contacts the narrow phase (N), the constraint warm start (D), per iteration a primal sweep (V) and the dual update (D), and finally the
         /// velocity update (U).
-        /// The constraint lists are built on the CPU and the graph is colored on the GPU (stage C). With contacts, the contact counts and pairs
-        /// are read back after the narrow phase to rebuild the lists and the coloring every step (a stall, until stage G runs on the GPU).
-        /// Stages S, G, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
+        /// The constraint lists (stage G) are built and the graph is colored (stage C) on the GPU. With contacts, both are rebuilt every step after the
+        /// narrow phase; the lists need no readback, the coloring still reads two small things back (a stall, until the primal sweep is dispatched indirectly).
+        /// Stages S, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
         /// Must be called from the main thread. The previous step's results are the next step's input, so call it once per time step.
         /// </summary>
         public void Step()

@@ -47,6 +47,6 @@ The panel also shows how many joints have broken, out of all.
 
 ## Limits
 
-- The wall is limited to 396 blocks only because the constraint lists are still built on the CPU every step (stage G moves them to the GPU).
-- Each step reads the joints' state and the contact counts back from the GPU to rebuild the constraint lists. That is a stall, fine at this size.
+- The wall is limited to 396 blocks because that is the largest size that was tried. The constraint lists are built on the GPU (stage G) and nothing is read back for them; the graph coloring still reads two small things back every step (the number of colors), which is the remaining stall.
+- The "joints broken" counter is a counter on the GPU that the panel reads once per step.
 - The demo reads the poses back every frame and draws one cube per body, as the pyramid demo does.
