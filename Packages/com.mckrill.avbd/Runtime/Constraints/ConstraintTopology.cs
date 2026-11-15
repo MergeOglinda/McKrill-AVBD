@@ -98,10 +98,11 @@ namespace McKrill.Avbd
         {
             // 1. List sizes. Constraints on bodies that are not solved are left out: nothing reads them.
             var counts = new int[bodyCount];
+            var contacts = new int[bodyCount]; // entries that are contacts: the first ones of each list
             for (int i = 0; i < contactCount; i++)
             {
-                if (solved[contactA[i]]) counts[contactA[i]]++;
-                if (solved[contactB[i]]) counts[contactB[i]]++;
+                if (solved[contactA[i]]) { counts[contactA[i]]++; contacts[contactA[i]]++; }
+                if (solved[contactB[i]]) { counts[contactB[i]]++; contacts[contactB[i]]++; }
             }
             for (int i = 0; i < recordCount; i++)
             {
@@ -124,7 +125,7 @@ namespace McKrill.Avbd
             var cursor = new int[bodyCount];
             for (int s = 0; s < bodyCount; s++)
             {
-                Ranges[s] = new BodyRangeRecord { range = new uint4((uint)total, (uint)counts[s], 0u, 0u) };
+                Ranges[s] = new BodyRangeRecord { range = new uint4((uint)total, (uint)counts[s], (uint)contacts[s], 0u) };
                 cursor[s] = total;
                 total += counts[s];
             }

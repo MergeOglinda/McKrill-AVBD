@@ -194,7 +194,7 @@ Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Seven arr
 | Motion | 48 B | linear velocity, angular velocity, previous linear velocity | Cold | E, U | B, P, Z |
 | Shape | 16 B | size (xyz), friction (w) | Cold | E | B, N, R |
 | Meta | 32 B | flags and kind, group mask, appearance id; graph color, sleep counter | Cold | E (first word group), C, Z | B, N, P, R |
-| Range | 16 B | constraint-list offset and count | Hot | G | V |
+| Range | 16 B | constraint-list offset, count and number of contact entries | Hot | G | V |
 
 Decisions made here, where section 1 left them open:
 
@@ -454,7 +454,7 @@ Two static or kinematic bodies never make a pair. A pair that does not fit its b
 
 `AvbdLists.compute` builds the constraint list of every solved body (CSR) from the joint and spring records and the manifold pool, replacing the CPU build of `ConstraintTopology` and the readbacks that fed it. `AvbdConstraintLists` (`Runtime/Constraints`) owns its two scratch buffers and dispatches it; `AvbdConstraintBuffers` calls it from `Rebuild()` and, with contacts, from `RefreshContactTopology()` after the narrow phase, followed by stage C.
 
-**Output.** The `_ConstraintList` buffer (constraint ids grouped per solved body) and, per body, `Range = (offset, count)` in the body Range array (owner: stage G; `zw` are zero). A body that is not solved gets count 0. Rules of section 12 are kept: only solved bodies get a list, a constraint to a body that is not solved (or to the world) is listed for its solved side only, and the list is sized `(capacity + contact records) * 2`, the most that can be needed (two entries per record).
+**Output.** The `_ConstraintList` buffer (constraint ids grouped per solved body) and, per body, `Range = (offset, count, contacts, 0)` in the body Range array (owner: stage G). `contacts` is how many of the `count` entries are contacts; they are the first ones in the list, so the joints and springs are the entries `[offset + contacts, offset + count)`. The broadphase uses it to skip the contacts when it asks whether a joint joins two bodies: that question is asked for every candidate pair, and a body at rest on a pile has dozens of contact entries and, usually, no joint at all. A body that is not solved gets count 0. Rules of section 12 are kept: only solved bodies get a list, a constraint to a body that is not solved (or to the world) is listed for its solved side only, and the list is sized `(capacity + contact records) * 2`, the most that can be needed (two entries per record).
 
 **Fractured joints.** A record with the `Broken` flag (set by stage D) is not listed, and is counted. This replaces the per-step readback of the joint flags: the flag is read where it is, on the GPU. The timing is the one section 13 describes (the lists built in step k + 1, after the narrow phase, leave out a joint that broke in step k).
 
@@ -469,7 +469,7 @@ Two static or kinematic bodies never make a pair. A pair that does not fit its b
 | `ListScan` | one group of 1024 | Exclusive prefix sum of the counts into the offsets (every thread owns a run of consecutive bodies, a group-shared scan combines the runs); writes Range, the cursors and the total |
 | `ListFillRecords` | one per joint or spring | Appends the id to the list of each solved body, with an atomic cursor |
 | `ListFillContacts` | one per manifold slot | Appends the slot's contact ids (`ContactBase + slot * 8 + k`) |
-| `ListSort` | one per body | Insertion sort of the body's list |
+| `ListSort` | one per body | Insertion sort of the body's list; writes the number of contact entries into `Range.z` |
 
 **Order.** The fill order depends on thread timing and on the slots the pool handed out, so every list is sorted afterwards, with the key: contacts first, by (body A, body B, k) ascending, then joints and springs by falling id (newest first). That is the order of the CPU oracle, which is the reference's order of constraints in the first step, and it makes the floating-point sums reproducible from run to run. Insertion sort is fine because a list has a few dozen entries at most.
 

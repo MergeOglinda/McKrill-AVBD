@@ -9,7 +9,9 @@
 // then the joints and springs from the newest (highest id) to the oldest. The fill order of the threads is arbitrary, so every list is
 // sorted afterwards; the result does not depend on the slots the pool happened to hand out or on thread timing.
 //
-// Output: _ConstraintList (ids grouped per body) and _BodyRange (x = offset, y = count; zw = 0).
+// Output: _ConstraintList (ids grouped per body) and _BodyRange (x = offset, y = count, z = how many of the entries are contacts, w = 0).
+// The contacts come first in a list (see below), so the joints and springs are the entries [x + z, x + y): a reader that wants only those
+// (the broadphase) skips the contacts without visiting them.
 //
 // Kernels, in the order the host runs them:
 //   ListBegin          zeroes the control words
@@ -19,7 +21,7 @@
 //   ListScan           exclusive prefix sum of the counts into the offsets; writes _BodyRange and the total. One group
 //   ListFillRecords    writes the ids of the joints and springs
 //   ListFillContacts   writes the ids of the contacts
-//   ListSort           sorts every list (insertion sort: lists are short)
+//   ListSort           sorts every list (insertion sort: lists are short) and writes the number of contacts into Range.z
 // Mirrored by Reference/Stages (the CPU oracle is Runtime/Constraints/ConstraintTopology.cs), which the tests compare against.
 
 #pragma kernel ListBegin
@@ -271,9 +273,12 @@ void ListSort(uint3 id : SV_DispatchThreadID)
         return;
 
     uint2 range = _BodyRange[body].range.xy;
-    for (uint i = 1u; i < range.y; i++)
+    uint contacts = 0u; // the entries that are contacts: after the sort they are the first ones of the list
+    for (uint i = 0u; i < range.y; i++)
     {
         uint value = _ConstraintList[range.x + i];
+        if (value >= _ContactBase)
+            contacts++;
         uint4 key = ListKey(value);
         uint j = i;
         while (j > 0u)
@@ -286,4 +291,8 @@ void ListSort(uint3 id : SV_DispatchThreadID)
         }
         _ConstraintList[range.x + j] = value;
     }
+
+    BodyRangeRecord r;
+    r.range = uint4(range.x, range.y, contacts, 0u);
+    _BodyRange[body] = r;
 }

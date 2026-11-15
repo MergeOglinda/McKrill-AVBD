@@ -176,6 +176,7 @@ namespace McKrill.Avbd.Tests
             {
                 Assert.AreEqual(oracle.Ranges[s].range.x, ranges[s].range.x, what + ": offset of body " + s);
                 Assert.AreEqual(oracle.Ranges[s].range.y, ranges[s].range.y, what + ": count of body " + s);
+                Assert.AreEqual(oracle.Ranges[s].range.z, ranges[s].range.z, what + ": contact entries of body " + s);
                 for (int e = 0; e < (int)oracle.Ranges[s].range.y; e++)
                 {
                     int at = (int)oracle.Ranges[s].range.x + e;

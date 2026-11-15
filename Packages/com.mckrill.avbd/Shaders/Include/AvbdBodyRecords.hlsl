@@ -62,7 +62,7 @@ struct BodyMetaRecord
 // 16 B, hot. Range in the constraint list.
 struct BodyRangeRecord
 {
-    uint4 range; // x = offset, y = count, zw unused
+    uint4 range; // x = offset, y = count, z = contact entries (the first z of the count, written by stage G), w unused
 };
 
 // Flags word of a free slot of the given kind.
