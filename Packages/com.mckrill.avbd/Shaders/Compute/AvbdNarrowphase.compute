@@ -5,6 +5,9 @@
 //
 // Run after stage P (which keeps the start-of-step pose of every body) and after the broadphase, in this order:
 //   NpClearTable   empties the hash table that maps a pair to its slot (_PairTable, open addressing, size a power of two)
+//   NpPlan         one thread: the sizes of the dispatches below, from counts that are on the GPU (the high-water mark of the slots and the
+//                  pair counts of the broadphase), written as indirect dispatch arguments (_NpArgs). Run again after NpAllocate, which can
+//                  raise the high-water mark, for the sizes of Narrowphase and of the dual update of the contacts (AvbdDual.compute)
 //   NpRetire       one thread per slot: a slot whose body was spawned or removed since the last step (_DirtySlots) is freed, so a recycled
 //                  slot does not inherit the manifolds of the body that had it; every other used slot enters the hash table
 //   NpAllocate     one thread per candidate pair of the broadphase: a pair that has no slot yet and whose boxes collide takes one from the free
@@ -16,10 +19,14 @@
 //
 // Which pairs may get a manifold is the broadphase's decision (at least one solved body, overlapping bounding spheres, no joint or spring
 // between the bodies). A manifold that exists is tested every step, whether the broadphase lists its pair or not, like the reference solver.
+// NpRetire, NpAllocate and Narrowphase are dispatched indirectly, so the host never needs a count: they run over the slots below the
+// high-water mark and the pairs the broadphase stored, not over the capacity of the pool and of the bins. A thread compares its item with the
+// counts again, because the last group of a dispatch can overshoot.
 // A thread of the last kernel reads and writes only its own slot, so there is no ordering. Mirrored by Reference/Stages/CpuContacts.cs,
 // which tests every pair of bodies instead and must give the same manifolds.
 
 #pragma kernel NpClearTable
+#pragma kernel NpPlan
 #pragma kernel NpRetire
 #pragma kernel NpAllocate
 #pragma kernel Narrowphase
@@ -28,6 +35,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBroadphaseParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdIndirect.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactWarmStart.hlsl"
 
 StructuredBuffer<BodyStateRecord>    _BodyState;
@@ -43,9 +51,11 @@ RWStructuredBuffer<uint>             _NpControl;    // AVBD_NP_*
 StructuredBuffer<uint>               _DirtySlots;   // bit per body slot: the slot was spawned or removed since the last step
 StructuredBuffer<PairRecord>         _Pairs;        // candidate pairs of the broadphase: dynamic-dynamic bin, then dynamic-static bin
 StructuredBuffer<uint>               _BpControl;    // counters of the broadphase (AVBD_BP_*)
+RWByteAddressBuffer                  _NpArgs;       // AVBD_NP_ARGS_COUNT x (groups x, groups y, 1): an indirect arguments buffer
 
-uint _Base;                // first item to process
-uint _Count;               // end of the range: items [_Base, _Count)
+uint _Base;                // NpClearTable: first item to process
+uint _Count;               // NpClearTable: end of the range, items [_Base, _Count)
+uint _Bin;                 // NpAllocate: 0 = the dynamic-dynamic bin of the broadphase, 1 = the dynamic-static bin
 uint _ContactBase;         // index of the first contact record in _Constraints
 uint _SlotCapacity;        // manifold slots
 uint _TableMask;           // size of _PairTable (a power of two) minus one
@@ -73,6 +83,24 @@ uint HashPair(uint a, uint b)
     return h & _TableMask;
 }
 
+// Slots a dispatch has to cover: below the high-water mark every used slot is.
+uint SlotsInUse()
+{
+    return min(_NpControl[AVBD_NP_HIGH_WATER], _SlotCapacity);
+}
+
+// Pairs the broadphase stored in a bin: its counters can be above its capacity.
+uint StoredPairs(uint bin)
+{
+    return bin == 0u ? min(_BpControl[AVBD_BP_DYNAMIC_PAIRS], _DynamicPairCapacity)
+                     : min(_BpControl[AVBD_BP_STATIC_PAIRS], _StaticPairCapacity);
+}
+
+void WriteArgs(uint entry, uint count)
+{
+    _NpArgs.Store3(entry * AVBD_INDIRECT_ARGS_STRIDE, AvbdIndirectGroups(count));
+}
+
 // Gives a slot back: no pair, no contacts, and it goes on the free stack. Only the kernels of this file push, and never while NpAllocate pops.
 void FreeSlot(uint slot)
 {
@@ -92,11 +120,23 @@ void NpClearTable(uint3 id : SV_DispatchThreadID)
     _PairTable[entry] = AVBD_INVALID;
 }
 
+// Runs once before NpRetire and once after NpAllocate (the high-water mark and the pair counts are final by then).
+[numthreads(1, 1, 1)]
+void NpPlan(uint3 id : SV_DispatchThreadID)
+{
+    uint slots = SlotsInUse();
+    WriteArgs(AVBD_NP_ARGS_RETIRE, slots);
+    WriteArgs(AVBD_NP_ARGS_ALLOCATE_DYNAMIC, StoredPairs(0u));
+    WriteArgs(AVBD_NP_ARGS_ALLOCATE_STATIC, StoredPairs(1u));
+    WriteArgs(AVBD_NP_ARGS_NARROWPHASE, slots);
+    WriteArgs(AVBD_NP_ARGS_DUAL, slots * AVBD_MAX_CONTACTS);
+}
+
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void NpRetire(uint3 id : SV_DispatchThreadID)
 {
-    uint slot = _Base + id.x;
-    if (slot >= _Count)
+    uint slot = AvbdIndirectItem(id);
+    if (slot >= SlotsInUse())
         return;
 
     uint4 pair = _SlotBodies[slot];
@@ -124,18 +164,11 @@ void NpRetire(uint3 id : SV_DispatchThreadID)
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void NpAllocate(uint3 id : SV_DispatchThreadID)
 {
-    uint index = _Base + id.x; // index in _Pairs
-    if (index >= _Count)
+    // An item of one of the two bins; the static bin follows the dynamic one in _Pairs. Only the pairs the broadphase stored.
+    uint item = AvbdIndirectItem(id);
+    if (item >= StoredPairs(_Bin))
         return;
-
-    // Only the pairs the broadphase stored: its counters can be above its capacity.
-    if (index < _DynamicPairCapacity)
-    {
-        if (index >= _BpControl[AVBD_BP_DYNAMIC_PAIRS])
-            return;
-    }
-    else if (index - _DynamicPairCapacity >= _BpControl[AVBD_BP_STATIC_PAIRS])
-        return;
+    uint index = _Bin == 0u ? item : _DynamicPairCapacity + item; // index in _Pairs
 
     uint2 bodies = _Pairs[index].pair.xy;
 
@@ -178,13 +211,14 @@ void NpAllocate(uint3 id : SV_DispatchThreadID)
     uint newSlot = _FreeList[top - 1u];
     _SlotBodies[newSlot] = uint4(bodies.x, bodies.y, 0u, 0u);
     _PairCounts[newSlot] = 0u;
+    InterlockedMax(_NpControl[AVBD_NP_HIGH_WATER], newSlot + 1u);
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void Narrowphase(uint3 id : SV_DispatchThreadID)
 {
-    uint slot = _Base + id.x;
-    if (slot >= _Count)
+    uint slot = AvbdIndirectItem(id);
+    if (slot >= SlotsInUse())
         return;
 
     uint4 pair = _SlotBodies[slot];
