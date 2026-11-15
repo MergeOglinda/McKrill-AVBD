@@ -7,9 +7,9 @@
 //
 // One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
 // ordering, coloring or atomics are needed. Springs have no state and are skipped.
-// DualContact is the dual update of the contacts, one thread per slot of the manifold pool that has ever been used (below the pool's
-// high-water mark; see ContactLayout), which loops over the slot's contacts. It is dispatched indirectly with arguments the narrow phase
-// wrote, so the host never needs the number of manifolds. A contact's warm start is part of the narrow phase
+// DualContact is the dual update of the contacts, one thread per contact record of the slots of the manifold pool that have ever been used
+// (below the pool's high-water mark; see ContactLayout): records beyond the slot's contact count are skipped. It is dispatched indirectly
+// with arguments the narrow phase wrote, so the host never needs the number of manifolds. A contact's warm start is part of the narrow phase
 // (AvbdNarrowphase.compute).
 // Mirrored by Reference/Stages/CpuConstraintInit.cs and CpuDual.cs, which the tests compare against.
 
@@ -186,51 +186,45 @@ void Dual(uint3 id : SV_DispatchThreadID)
     _Constraints[index] = c;
 }
 
-// Dual update of the contacts of one manifold slot (the reference solver's Manifold.UpdateDual): stores the clamped force as the multiplier,
-// ramps the penalties and updates the stick flag. The displacements are measured from the start-of-step poses, which every body has, static
-// ones included. One thread per manifold slot, not per contact record: the contacts of a slot share their two bodies, so the poses are loaded
-// once, and only the three words that change are written back, not the whole 144-byte record. The records of slot s are
-// _ContactBase + s * AVBD_MAX_CONTACTS + k. (The previous version, one thread per record, is the other way to trade parallelism for loads.)
+// Dual update of a contact (the reference solver's Manifold.UpdateDual): stores the clamped force as the multiplier, ramps the penalties
+// and updates the stick flag. The displacements are measured from the start-of-step poses, which every body has, static ones included.
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void DualContact(uint3 id : SV_DispatchThreadID)
 {
-    // Item s of the dispatch is slot s. The last group can overshoot the slots in use.
-    uint pair = AvbdIndirectItem(id);
-    if (pair >= min(_NpControl[AVBD_NP_HIGH_WATER], _SlotCapacity))
+    // Item k of the dispatch is contact k % AVBD_MAX_CONTACTS of slot k / AVBD_MAX_CONTACTS. The last group can overshoot the slots in use.
+    uint relative = AvbdIndirectItem(id);
+    if (relative >= min(_NpControl[AVBD_NP_HIGH_WATER], _SlotCapacity) * AVBD_MAX_CONTACTS)
         return;
 
-    uint count = min(_PairCounts[pair], AVBD_MAX_CONTACTS);
-    if (count == 0u)
+    uint index = _ContactBase + relative;
+    uint pair = relative / AVBD_MAX_CONTACTS;
+    uint slot = relative % AVBD_MAX_CONTACTS;
+    if (slot >= _PairCounts[pair])
         return;
 
-    uint first = _ContactBase + pair * AVBD_MAX_CONTACTS;
-    uint2 bodies = _Constraints[first].ident.xy;
-    BodyStateRecord stateA = _BodyState[bodies.x];
-    BodyStateRecord stateB = _BodyState[bodies.y];
+    ConstraintRecord c = _Constraints[index];
+    uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+
+    BodyStateRecord stateA = _BodyState[c.ident.x];
+    BodyStateRecord stateB = _BodyState[c.ident.y];
     float3 dqALin = stateA.position.xyz - stateA.startPosition.xyz;
     float3 dqBLin = stateB.position.xyz - stateB.startPosition.xyz;
     float3 dqAAng = AvbdQuatDifference(stateA.rotation, stateA.startRotation);
     float3 dqBAng = AvbdQuatDifference(stateB.rotation, stateB.startRotation);
 
-    for (uint k = 0u; k < count; k++)
-    {
-        uint index = first + k;
-        ConstraintRecord c = _Constraints[index];
-        uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+    float3 penalty = c.penaltyLin.xyz;
+    AvbdContactEval e = AvbdEvaluateContact(
+        c.c0Ang.xyz, c.c0Lin.xyz, penalty, c.lambdaLin.xyz, c.anchorA.w, c.anchorA.xyz, c.anchorB.xyz, stateA.rotation, stateB.rotation,
+        dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
+    AvbdContactDualResult r = AvbdContactDual(e, penalty, (flags & AVBD_CONSTRAINT_FLAG_STICK) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
 
-        float3 penalty = c.penaltyLin.xyz;
-        AvbdContactEval e = AvbdEvaluateContact(
-            c.c0Ang.xyz, c.c0Lin.xyz, penalty, c.lambdaLin.xyz, c.anchorA.w, c.anchorA.xyz, c.anchorB.xyz, stateA.rotation, stateB.rotation,
-            dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
-        AvbdContactDualResult r = AvbdContactDual(e, penalty, (flags & AVBD_CONSTRAINT_FLAG_STICK) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
-
-        uint4 ident = c.ident;
-        if (r.stick)
-            ident.z |= AVBD_CONSTRAINT_FLAG_STICK;
-        else
-            ident.z &= ~AVBD_CONSTRAINT_FLAG_STICK;
-        _Constraints[index].ident = ident;
-        _Constraints[index].penaltyLin = float4(r.penalty, c.penaltyLin.w);
-        _Constraints[index].lambdaLin = float4(r.lambda, c.lambdaLin.w);
-    }
+    // Only the flags, the penalty and the multiplier change: write those three words, not the whole 144-byte record.
+    uint4 ident = c.ident;
+    if (r.stick)
+        ident.z |= AVBD_CONSTRAINT_FLAG_STICK;
+    else
+        ident.z &= ~AVBD_CONSTRAINT_FLAG_STICK;
+    _Constraints[index].ident = ident;
+    _Constraints[index].penaltyLin = float4(r.penalty, c.penaltyLin.w);
+    _Constraints[index].lambdaLin = float4(r.lambda, c.lambdaLin.w);
 }

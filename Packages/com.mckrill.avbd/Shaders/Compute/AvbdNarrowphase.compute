@@ -129,7 +129,7 @@ void NpPlan(uint3 id : SV_DispatchThreadID)
     WriteArgs(AVBD_NP_ARGS_ALLOCATE_DYNAMIC, StoredPairs(0u));
     WriteArgs(AVBD_NP_ARGS_ALLOCATE_STATIC, StoredPairs(1u));
     WriteArgs(AVBD_NP_ARGS_NARROWPHASE, slots);
-    WriteArgs(AVBD_NP_ARGS_DUAL, slots);
+    WriteArgs(AVBD_NP_ARGS_DUAL, slots * AVBD_MAX_CONTACTS);
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
