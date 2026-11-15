@@ -290,8 +290,8 @@ namespace McKrill.Avbd
             AvbdDispatch.Linear(shader, narrowphaseKernel, slots);
         }
 
-        // Stage D for the contacts, after every primal sweep: one thread per contact record of the pool (the free slots and the records beyond a
-        // slot's count skip).
+        // Stage D for the contacts, after every primal sweep: one thread per manifold slot of the pool, which loops over the slot's contacts (a
+        // free slot skips).
         internal void DispatchDualContacts()
         {
             if (constraints == null || !constraints.HasContacts)
@@ -303,7 +303,7 @@ namespace McKrill.Avbd
             shader.SetBuffer(dualContactKernel, RecordsId, constraints.Records);
             shader.SetBuffer(dualContactKernel, PairCountsId, constraints.PairCountsBuffer);
             shader.SetInt(ContactBaseId, constraints.ContactBase);
-            AvbdDispatch.Range(shader, dualContactKernel, constraints.ContactBase, constraints.ContactCapacity * ContactLayout.MaxContactsPerPair);
+            AvbdDispatch.Linear(shader, dualContactKernel, constraints.ContactCapacity);
         }
 
         // One thread per constraint. Constraints are independent, so there is no coloring and one dispatch covers them all.

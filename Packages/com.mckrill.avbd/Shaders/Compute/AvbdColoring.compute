@@ -39,6 +39,7 @@ StructuredBuffer<BodyMassRecord>    _BodyMass;
 StructuredBuffer<BodyRangeRecord>   _BodyRange;
 StructuredBuffer<ConstraintRecord>  _Constraints;
 StructuredBuffer<uint>              _ConstraintList;
+StructuredBuffer<uint>              _ConstraintOther; // per list entry: the body on the other side (stage G)
 RWStructuredBuffer<uint>            _ColorBodies;
 RWStructuredBuffer<uint>            _ColorWork;
 RWByteAddressBuffer                 _ColorArgs;  // AVBD_COLOR_MAX x (groups x, groups y, 1): an indirect arguments buffer
@@ -68,11 +69,12 @@ bool ColorsBefore(uint other, uint self)
     return hashOther != hashSelf ? hashOther > hashSelf : other > self;
 }
 
-// The other body of constraint `entry` of body `slot`, or AVBD_INVALID for a world pin.
-uint OtherBody(uint slot, uint entry)
+// The other body of list entry `entry`, or AVBD_INVALID for a world pin. Stage G writes it next to the list, so a round reads a contiguous
+// array and not a constraint record per entry. The contacts of a pair are consecutive entries with the same body, and the loops skip the
+// repeats of the entry before.
+uint OtherBody(uint entry)
 {
-    uint4 ident = _Constraints[_ConstraintList[entry]].ident;
-    return ident.x == slot ? ident.y : ident.x;
+    return _ConstraintOther[entry];
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
@@ -112,15 +114,19 @@ void ColorRound(uint3 id : SV_DispatchThreadID)
     uint2 range = _BodyRange[slot].range.xy;
 
     // Wait for every neighbor that colors before this body. A neighbor that is not solved holds AVBD_INVALID and does not count.
+    uint previous = AVBD_INVALID;
     for (uint e = 0; e < range.y; e++)
     {
-        uint other = OtherBody(slot, range.x + e);
+        uint other = OtherBody(range.x + e);
+        if (other == previous)
+            continue;
+        previous = other;
         if (other == AVBD_INVALID)
             continue;
         if (_BodyMeta[other].state.x == AVBD_COLOR_PENDING && ColorsBefore(other, slot))
         {
-            uint previous;
-            InterlockedAdd(_ColorWork[0], 1u, previous);
+            uint ignored;
+            InterlockedAdd(_ColorWork[0], 1u, ignored);
             return;
         }
     }
@@ -131,9 +137,13 @@ void ColorRound(uint3 id : SV_DispatchThreadID)
     {
         uint low = window * 32u;
         uint used = 0u;
+        uint last = AVBD_INVALID;
         for (uint f = 0; f < range.y; f++)
         {
-            uint other = OtherBody(slot, range.x + f);
+            uint other = OtherBody(range.x + f);
+            if (other == last)
+                continue;
+            last = other;
             if (other == AVBD_INVALID)
                 continue;
             uint c = _BodyMeta[other].state.x;

@@ -9,6 +9,12 @@
 // then the joints and springs from the newest (highest id) to the oldest. The fill order of the threads is arbitrary, so every list is
 // sorted afterwards; the result does not depend on the slots the pool happened to hand out or on thread timing.
 //
+// Next to the list the shader keeps two arrays with one entry per list entry:
+//   _ListKey          the sort key of the entry, written when the entry is filled, so that the sort compares contiguous keys instead of
+//                     reading a 144-byte constraint record per comparison. Contacts: (body A, body B << 3 | k). Joints and springs:
+//                     (0xFFFFFFFF, 0xFFFFFFFF - id): after every contact, newest first.
+//   _ConstraintOther  the body on the other side of the entry (AVBD_INVALID for a world pin). Written at the end of the sort; stage C reads it
+//                     instead of dereferencing the record of every entry in every coloring round.
 // Output: _ConstraintList (ids grouped per body) and _BodyRange (x = offset, y = count, z = how many of the entries are contacts, w = 0).
 // The contacts come first in a list (see below), so the joints and springs are the entries [x + z, x + y): a reader that wants only those
 // (the broadphase) skips the contacts without visiting them.
@@ -42,6 +48,8 @@ StructuredBuffer<BodyMassRecord>    _BodyMass;
 RWStructuredBuffer<BodyRangeRecord> _BodyRange;
 StructuredBuffer<ConstraintRecord>  _Constraints;
 RWStructuredBuffer<uint>            _ConstraintList;
+RWStructuredBuffer<uint2>           _ListKey;         // one per list entry, see above
+RWStructuredBuffer<uint>            _ConstraintOther; // one per list entry, see above
 RWStructuredBuffer<uint>            _ListWork;    // [0, _BodyCount): count per body. [_WorkStride, _WorkStride + _BodyCount): next free entry per body
 RWStructuredBuffer<uint>            _ListControl;
 StructuredBuffer<uint>              _PairCounts;
@@ -63,23 +71,10 @@ bool IsBroken(ConstraintRecord r)
     return (r.ident.z & AVBD_CONSTRAINT_FLAG_BROKEN) != 0u;
 }
 
-// Orders the entries of one list: contacts by (A, B, k), then joints and springs by falling id.
-uint4 ListKey(uint id)
+// Orders the entries of one list, see the key above: contacts by (A, B, k), then joints and springs by falling id.
+bool KeyLess(uint2 a, uint2 b)
 {
-    if (id >= _ContactBase)
-    {
-        uint4 ident = _Constraints[id].ident;
-        return uint4(0u, ident.x, ident.y, (id - _ContactBase) % AVBD_LIST_CONTACTS_PER_SLOT);
-    }
-    return uint4(1u, 0xFFFFFFFFu - id, 0u, 0u);
-}
-
-bool KeyLess(uint4 a, uint4 b)
-{
-    if (a.x != b.x) return a.x < b.x;
-    if (a.y != b.y) return a.y < b.y;
-    if (a.z != b.z) return a.z < b.z;
-    return a.w < b.w;
+    return a.x != b.x ? a.x < b.x : a.y < b.y;
 }
 
 // Reads the bodies of a manifold slot. False for a free slot, an empty one, or one that does not name two used bodies (counted once, by the
@@ -232,8 +227,9 @@ void ListFillRecords(uint3 id : SV_DispatchThreadID)
         return;
 
     uint at;
-    if (hasA && IsSolved(a)) { InterlockedAdd(_ListWork[_WorkStride + a], 1u, at); _ConstraintList[at] = i; }
-    if (IsSolved(b))         { InterlockedAdd(_ListWork[_WorkStride + b], 1u, at); _ConstraintList[at] = i; }
+    uint2 key = uint2(0xFFFFFFFFu, 0xFFFFFFFFu - i);
+    if (hasA && IsSolved(a)) { InterlockedAdd(_ListWork[_WorkStride + a], 1u, at); _ConstraintList[at] = i; _ListKey[at] = key; }
+    if (IsSolved(b))         { InterlockedAdd(_ListWork[_WorkStride + b], 1u, at); _ConstraintList[at] = i; _ListKey[at] = key; }
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
@@ -255,13 +251,19 @@ void ListFillContacts(uint3 id : SV_DispatchThreadID)
     {
         InterlockedAdd(_ListWork[_WorkStride + a], n, at);
         for (uint k = 0u; k < n; k++)
+        {
             _ConstraintList[at + k] = first + k;
+            _ListKey[at + k] = uint2(a, (b << 3) | k);
+        }
     }
     if (solvedB)
     {
         InterlockedAdd(_ListWork[_WorkStride + b], n, at);
         for (uint k = 0u; k < n; k++)
+        {
             _ConstraintList[at + k] = first + k;
+            _ListKey[at + k] = uint2(a, (b << 3) | k);
+        }
     }
 }
 
@@ -277,19 +279,28 @@ void ListSort(uint3 id : SV_DispatchThreadID)
     for (uint i = 0u; i < range.y; i++)
     {
         uint value = _ConstraintList[range.x + i];
-        if (value >= _ContactBase)
+        uint2 key = _ListKey[range.x + i];
+        if (key.x != 0xFFFFFFFFu)
             contacts++;
-        uint4 key = ListKey(value);
         uint j = i;
         while (j > 0u)
         {
-            uint before = _ConstraintList[range.x + j - 1u];
-            if (!KeyLess(key, ListKey(before)))
+            uint2 beforeKey = _ListKey[range.x + j - 1u];
+            if (!KeyLess(key, beforeKey))
                 break;
-            _ConstraintList[range.x + j] = before;
+            _ConstraintList[range.x + j] = _ConstraintList[range.x + j - 1u];
+            _ListKey[range.x + j] = beforeKey;
             j--;
         }
         _ConstraintList[range.x + j] = value;
+        _ListKey[range.x + j] = key;
+    }
+
+    // The body on the other side of every entry.
+    for (uint e = 0u; e < range.y; e++)
+    {
+        uint4 ident = _Constraints[_ConstraintList[range.x + e]].ident;
+        _ConstraintOther[range.x + e] = ident.x == body ? ident.y : ident.x;
     }
 
     BodyRangeRecord r;

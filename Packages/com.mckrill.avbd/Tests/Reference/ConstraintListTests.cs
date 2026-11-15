@@ -168,8 +168,10 @@ namespace McKrill.Avbd.Tests
 
             var ranges = new BodyRangeRecord[buffers.Capacity];
             var list = new uint[constraints.List.count];
+            var others = new uint[constraints.List.count];
             buffers.Range.GetData(ranges);
             constraints.List.GetData(list);
+            constraints.ListOther.GetData(others);
 
             Assert.AreEqual(oracle.ListCount, constraints.ReadListControl().Total, what + ": number of entries");
             for (int s = 0; s < bodyCount; s++)
@@ -181,6 +183,7 @@ namespace McKrill.Avbd.Tests
                 {
                     int at = (int)oracle.Ranges[s].range.x + e;
                     Assert.AreEqual(oracle.List[at], list[at], what + ": entry " + e + " of body " + s);
+                    Assert.AreEqual(oracle.ListOther[at], others[at], what + ": body on the other side of entry " + e + " of body " + s);
                 }
             }
         }
