@@ -469,7 +469,7 @@ namespace McKrill.Avbd.Tests
         }
 
         // Spawns the scene's bodies (slot = reference body index) and adds its constraints. Returns the handles in slot order.
-        static List<BodyHandle> Fill(AvbdBodyBuffers buffers, AvbdConstraintBuffers constraints, SceneArrays scene)
+        internal static List<BodyHandle> Fill(AvbdBodyBuffers buffers, AvbdConstraintBuffers constraints, SceneArrays scene)
         {
             var handles = new List<BodyHandle>();
             foreach (BodyDescriptor d in scene.descriptors)
@@ -480,7 +480,7 @@ namespace McKrill.Avbd.Tests
             return handles;
         }
 
-        static CpuBodyArrays ReadBodies(AvbdBodyBuffers buffers)
+        internal static CpuBodyArrays ReadBodies(AvbdBodyBuffers buffers)
         {
             var bodies = new CpuBodyArrays(buffers.Capacity);
             buffers.ApplyEdits();
@@ -491,7 +491,7 @@ namespace McKrill.Avbd.Tests
             return bodies;
         }
 
-        static SortedSet<ulong> ToSet(PairRecord[] pairs)
+        internal static SortedSet<ulong> ToSet(PairRecord[] pairs)
         {
             var set = new SortedSet<ulong>();
             foreach (PairRecord pair in pairs)
@@ -499,7 +499,7 @@ namespace McKrill.Avbd.Tests
             return set;
         }
 
-        static void AssertSameSets(SortedSet<ulong> expected, SortedSet<ulong> actual, string what)
+        internal static void AssertSameSets(SortedSet<ulong> expected, SortedSet<ulong> actual, string what)
         {
             var missing = new List<string>();
             var extra = new List<string>();
@@ -514,7 +514,7 @@ namespace McKrill.Avbd.Tests
 
         // Boxes of mixed sizes in a small volume around `origin` (negative coordinates included), one in six static, with joints, springs and
         // world pins between random pairs, some of them overlapping pairs.
-        static void DenseRandom(ReferenceSolver s, int seed, int count, float3 origin = default)
+        internal static void DenseRandom(ReferenceSolver s, int seed, int count, float3 origin = default)
         {
             var rng = new System.Random(seed);
             s.Clear();
@@ -563,7 +563,7 @@ namespace McKrill.Avbd.Tests
             return set.Broadphase;
         }
 
-        static void RequireCompute()
+        internal static void RequireCompute()
         {
             if (!SystemInfo.supportsComputeShaders)
                 Assert.Ignore("Compute shaders are not supported on this device.");

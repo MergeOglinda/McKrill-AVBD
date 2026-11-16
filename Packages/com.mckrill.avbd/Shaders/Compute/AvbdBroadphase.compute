@@ -14,6 +14,10 @@
 // loop. Pairs joined by a joint or spring are left out, like AvbdBody.ConstrainedTo.
 // The order of pairs inside a bin is unspecified and varies between runs (atomic append).
 //
+// The bodies are visited in the order of stage S (Morton order) when the host passes one: thread i of BpInsert, BpPairsDynamic and BpPairsStatic
+// handles slot _BodyOrder[i]. Neighboring threads then look at neighboring cells and read the same grid memory. The order changes nothing but the
+// order of the cell lists and of the atomic appends (both unspecified anyway), and it only has to be a permutation of the slots.
+//
 // Kernels, in the order the host runs them:
 //   BpReset          zeroes the control words
 //   BpClearGrid      empties the grid cells
@@ -41,6 +45,7 @@ StructuredBuffer<BodyMetaRecord>    _BodyMeta;
 StructuredBuffer<BodyRangeRecord>   _BodyRange;
 StructuredBuffer<ConstraintRecord>  _Constraints;
 StructuredBuffer<uint>              _ConstraintList;
+StructuredBuffer<uint>              _BodyOrder;  // stage S: the slots in Morton order, a permutation of [0, _Count). Read only if _UseBodyOrder is set
 
 RWStructuredBuffer<uint>            _BpControl;
 RWStructuredBuffer<uint>            _GridHead;   // per grid cell: the first body of its list, or AVBD_INVALID
@@ -54,6 +59,13 @@ uint _Count;               // end of the range: items [_Base, _Count)
 uint _GridMask;            // number of grid cells (a power of two) minus one
 uint _DynamicPairCapacity;
 uint _StaticPairCapacity;
+uint _UseBodyOrder;        // 1 if _BodyOrder holds a permutation of the slots below _Count
+
+// The slot that thread item handles.
+uint SlotAt(uint item)
+{
+    return _UseBodyOrder != 0u ? _BodyOrder[item] : item;
+}
 
 #define CLASS_FREE   0u
 #define CLASS_SOLVED 1u
@@ -185,9 +197,10 @@ void BpBounds(uint3 id : SV_DispatchThreadID)
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void BpInsert(uint3 id : SV_DispatchThreadID)
 {
-    uint slot = _Base + id.x;
-    if (slot >= _Count)
+    uint item = _Base + id.x;
+    if (item >= _Count)
         return;
+    uint slot = SlotAt(item);
 
     _BodyCell[slot] = uint4(0u, 0u, 0u, AVBD_INVALID);
     if (Classify(slot) != CLASS_SOLVED)
@@ -209,9 +222,10 @@ void BpInsert(uint3 id : SV_DispatchThreadID)
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
 {
-    uint self = _Base + id.x;
-    if (self >= _Count)
+    uint item = _Base + id.x;
+    if (item >= _Count)
         return;
+    uint self = SlotAt(item);
 
     uint4 selfCell = _BodyCell[self];
     if (selfCell.w == AVBD_INVALID)
@@ -245,9 +259,10 @@ void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void BpPairsStatic(uint3 id : SV_DispatchThreadID)
 {
-    uint self = _Base + id.x;
-    if (self >= _Count)
+    uint item = _Base + id.x;
+    if (item >= _Count)
         return;
+    uint self = SlotAt(item);
     if (Classify(self) != CLASS_SOLVED)
         return;
 
