@@ -441,9 +441,11 @@ namespace McKrill.Avbd.Tests
             using (var solver = new AvbdSolver(buffers, settings))
             {
                 Spawn(buffers, scene);
+                solver.SortBodies = true;
                 solver.Step();
                 Assert.IsNull(solver.MortonSort, "no broadphase, no sort");
 
+                solver.SortBodies = true;
                 solver.EnableBroadphase(1024);
                 solver.Step();
                 Assert.IsNotNull(solver.MortonSort, "a broadphase: the sort runs");
@@ -455,6 +457,11 @@ namespace McKrill.Avbd.Tests
             using (var solver = new AvbdSolver(buffers, settings, null, constraints))
             {
                 Spawn(buffers, scene);
+                Assert.IsFalse(solver.SortBodies, "off by default");
+                solver.Step();
+                Assert.IsNull(solver.MortonSort, "off: the sort is not even made");
+
+                solver.SortBodies = true;
                 solver.Step();
                 solver.Step();
                 Assert.AreEqual(2, solver.MortonSort.Version);

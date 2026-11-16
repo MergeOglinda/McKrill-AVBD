@@ -157,11 +157,14 @@ namespace McKrill.Avbd
         public bool BroadphaseEnabled => broadphase != null;
 
         /// <summary>
-        /// True (the default): every step sorts the bodies along a Morton curve (stage S) before the broadphase, and the broadphase and the color
-        /// bucketing visit the bodies in that order. The results are the same either way; the order only changes how well neighboring threads read
-        /// neighboring memory. Runs only while there is a broadphase. Set it to false to compare, or if the sort costs more than it saves.
+        /// False (the default): the stages visit the bodies in slot order. True: every step sorts the bodies along a Morton curve (stage S) before the
+        /// broadphase, and the broadphase and the color bucketing visit the bodies in that order. The results are the same either way; only the work
+        /// order differs. It costs 18 small dispatches a step and turns the streaming reads and writes of the body arrays into gathers, so it pays
+        /// only when the slots are NOT already spatially coherent (bodies spawned in random order, or moved far from where they started). Scenes that
+        /// spawn bodies layer by layer, like the pyramid and wall demos, are already in a good order: measured slower there. Runs only while there
+        /// is a broadphase.
         /// </summary>
-        public bool SortBodies { get; set; } = true;
+        public bool SortBodies { get; set; } = false;
 
         /// <summary>
         /// Makes <see cref="Step"/> run the broadphase (stage B) on the poses of the end of the previous step. The pairs stay in a GPU buffer.
