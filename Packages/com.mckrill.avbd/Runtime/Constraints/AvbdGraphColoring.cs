@@ -66,6 +66,7 @@ namespace McKrill.Avbd
         readonly int resetKernel, beginKernel, initKernel, roundKernel, countKernel, planKernel, bucketKernel;
         GraphicsBuffer work;
         GraphicsBuffer args;
+        GraphicsBuffer noOrder; // bound in place of the body order when there is none; never read
         bool disposed;
 
         static readonly int BodyMetaId = Shader.PropertyToID("_BodyMeta");
@@ -78,6 +79,8 @@ namespace McKrill.Avbd
         static readonly int WorkId = Shader.PropertyToID("_ColorWork");
         static readonly int ArgsId = Shader.PropertyToID("_ColorArgs");
         static readonly int OrderId = Shader.PropertyToID("_Order");
+        static readonly int BodyOrderId = Shader.PropertyToID("_BodyOrder");
+        static readonly int UseBodyOrderId = Shader.PropertyToID("_UseBodyOrder");
 
         /// <summary>Rounds the last <see cref="Run"/> dispatched (the first batch, then a multiple of the batch size).</summary>
         public int LastRounds { get; private set; }
@@ -117,18 +120,24 @@ namespace McKrill.Avbd
             }
             args = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments | GraphicsBuffer.Target.Raw, initialArgs.Length, sizeof(uint));
             args.SetData(initialArgs);
+            noOrder = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, sizeof(uint));
         }
 
         /// <summary>
         /// Colors the solved bodies among slots [0, bodyCount) and fills <paramref name="colorBodies"/> with the slots grouped by color
-        /// (order inside a color is unspecified; it does not change the result of a sweep). Returns the number of colors. The start and
+        /// (order inside a color is unspecified, see <paramref name="bodyOrder"/>; it does not change the result of a sweep). Returns the number of colors. The start and
         /// the size of every color are on the GPU (<see cref="Work"/>, <see cref="Args"/>); <see cref="ReadSchedule"/> reads them back for tests.
         /// </summary>
         /// <param name="records">Constraint records, read through the lists.</param>
         /// <param name="list">Per-body constraint lists; the offsets and counts are in the body Range array.</param>
         /// <param name="other">For each list entry, the body on the other side of the constraint (<see cref="AvbdConstraintLists.Other"/>).</param>
+        /// <param name="bodyOrder">
+        /// Null, or a permutation of the slots [0, bodyCount) (stage S, <see cref="AvbdMortonSort.Order"/>): the bucketing visits the bodies in
+        /// that order, so the bodies of a color come out roughly in Morton order (the threads take the bucket cursor in the order they run, which is
+        /// not exactly the thread order). Null visits the slots in order.
+        /// </param>
         public int Run(AvbdBodyBuffers bodies, int bodyCount, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other,
-            GraphicsBuffer colorBodies, GraphColoringOrder order)
+            GraphicsBuffer colorBodies, GraphColoringOrder order, GraphicsBuffer bodyOrder = null)
         {
             if (disposed) throw new ObjectDisposedException(nameof(AvbdGraphColoring));
 
@@ -139,6 +148,8 @@ namespace McKrill.Avbd
             foreach (int kernel in new[] { resetKernel, beginKernel, initKernel, roundKernel, countKernel, planKernel, bucketKernel })
                 Bind(kernel, bodies, records, list, other, colorBodies);
             shader.SetInt(OrderId, (int)order);
+            shader.SetBuffer(bucketKernel, BodyOrderId, bodyOrder ?? noOrder);
+            shader.SetInt(UseBodyOrderId, bodyOrder != null ? 1 : 0);
 
             AvbdDispatch.Linear(shader, resetKernel, WorkWords);
             AvbdDispatch.Linear(shader, initKernel, bodyCount);
@@ -232,6 +243,8 @@ namespace McKrill.Avbd
             work = null;
             args?.Release();
             args = null;
+            noOrder?.Release();
+            noOrder = null;
         }
     }
 

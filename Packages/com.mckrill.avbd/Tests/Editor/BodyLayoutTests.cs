@@ -346,6 +346,29 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void Hlsl_SortConstantsMatchTheCSharpMirrors()
+        {
+            Dictionary<string, uint> d = ReadDefines("AvbdSortParams.hlsl");
+
+            Assert.AreEqual((uint)AvbdMortonSort.MaxRadiusWord, d["AVBD_SORT_CONTROL_MAX_RADIUS"]);
+            Assert.AreEqual((uint)AvbdMortonSort.ControlWords, d["AVBD_SORT_CONTROL_WORDS"]);
+            Assert.AreEqual((uint)AvbdMortonSort.AxisBits, d["AVBD_SORT_AXIS_BITS"]);
+            Assert.AreEqual((uint)AvbdMortonSort.KeyBits, d["AVBD_SORT_KEY_BITS"]);
+            Assert.AreEqual(AvbdMortonSort.InvalidKey, d["AVBD_SORT_INVALID_KEY"]);
+            Assert.AreEqual((uint)AvbdMortonSort.RadixBits, d["AVBD_SORT_RADIX_BITS"]);
+            Assert.AreEqual((uint)AvbdMortonSort.Buckets, d["AVBD_SORT_BUCKETS"]);
+            Assert.AreEqual((uint)AvbdMortonSort.Passes, d["AVBD_SORT_PASSES"]);
+            Assert.AreEqual((uint)AvbdMortonSort.Tile, d["AVBD_SORT_TILE"]);
+            Assert.AreEqual((uint)AvbdMortonSort.ScanThreads, d["AVBD_SORT_SCAN_THREADS"]);
+            Assert.AreEqual((uint)AvbdMortonSort.MaxTiles, d["AVBD_SORT_MAX_TILES"]);
+
+            Assert.AreEqual(3 * AvbdMortonSort.AxisBits, AvbdMortonSort.KeyBits, "three axes");
+            Assert.AreEqual(1 << AvbdMortonSort.RadixBits, AvbdMortonSort.Buckets, "buckets = 2^radix bits");
+            Assert.GreaterOrEqual(AvbdMortonSort.Passes * AvbdMortonSort.RadixBits, AvbdMortonSort.KeyBits, "the passes cover the key");
+            Assert.AreEqual((1u << AvbdMortonSort.KeyBits) - 1u, AvbdMortonSort.InvalidKey, "the invalid key is the largest key");
+        }
+
+        [Test]
         public void Hlsl_BroadphaseConstantsMatchTheCSharpMirrors()
         {
             Dictionary<string, uint> d = ReadDefines("AvbdBroadphaseParams.hlsl");

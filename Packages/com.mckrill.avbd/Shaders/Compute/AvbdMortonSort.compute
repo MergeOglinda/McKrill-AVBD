@@ -1,0 +1,228 @@
+// Stage S: sorts the body slots along a Morton curve, so that bodies that are near each other in space are near each other in the order.
+//
+// The result (_ValuesOut of the last pass) is a permutation of the slots [0, count): the solved bodies first, in the order of their Morton keys
+// (ties by slot), then everything else (free, static and kinematic bodies, and bodies at a non-finite position, all with the largest key, in slot
+// order). It is an ORDER, nothing more: a consumer that visits the slots in this order gets the same result as one that visits them in slot
+// order, so a stale order (bodies moved since the sort) is still correct, only less useful. The consumers (stage B and the bucketing of stage C)
+// decide for themselves whether a body is solved.
+//
+// The key. A body's cell is the broadphase's grid cell of its position (cell size = 2 * the largest radius of the solved bodies * AVBD_BP_CELL_MARGIN);
+// the low AVBD_SORT_AXIS_BITS bits of each cell coordinate are interleaved into a Morton code. Cell coordinates repeat every 2^10 cells, so a scene
+// wider than 1024 cells per axis wraps around and bodies a whole period apart share a key; that only makes the order less local there.
+//
+// The sort is an LSD radix sort, AVBD_SORT_PASSES passes of AVBD_SORT_RADIX_BITS bits, stable. A pass, for every tile of AVBD_SORT_TILE keys (a tile is
+// one thread group, one key per thread):
+//   SortCount     the histogram of the digit in the tile, stored digit-major: _Histogram[digit * tiles + tile]
+//   SortScan      one group: the exclusive scan of the whole histogram, so that entry [digit * tiles + tile] is where the first key of that digit
+//                 and tile goes (the keys of smaller digits, then the keys of the same digit in earlier tiles)
+//   SortScatter   every key goes to that offset plus its rank among the keys of the same digit that come before it in the tile
+// Both ranks follow the thread order, so a pass keeps the order of equal digits and the sort is stable. Nothing in the result depends on atomics.
+//
+// Kernels, in the order the host runs them:
+//   SortBegin     zeroes the control words
+//   SortBounds    the largest radius of the solved bodies
+//   SortKeys      writes the key and the slot of every body (the input of the first pass)
+//   SortCount, SortScan, SortScatter   once per pass
+// Mirrored by Reference/Stages/CpuMortonSort.cs, which the tests compare against.
+
+#pragma kernel SortBegin
+#pragma kernel SortBounds
+#pragma kernel SortKeys
+#pragma kernel SortCount
+#pragma kernel SortScan
+#pragma kernel SortScatter
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBroadphaseParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSortParams.hlsl"
+
+StructuredBuffer<BodyStateRecord>   _BodyState;
+StructuredBuffer<BodyMassRecord>    _BodyMass;
+StructuredBuffer<BodyShapeRecord>   _BodyShape;
+StructuredBuffer<BodyMetaRecord>    _BodyMeta;
+
+RWStructuredBuffer<uint>            _SortControl;
+StructuredBuffer<uint>              _KeysIn;      // the keys the pass sorts, and the slots that go with them
+StructuredBuffer<uint>              _ValuesIn;
+RWStructuredBuffer<uint>            _KeysOut;
+RWStructuredBuffer<uint>            _ValuesOut;
+RWStructuredBuffer<uint>            _Histogram;   // AVBD_SORT_BUCKETS * tiles words
+
+uint _Base;
+uint _Count;      // end of the range: items [_Base, _Count) (SortBounds and SortKeys)
+uint _SortCount;  // keys to sort (SortCount and SortScatter)
+uint _Tiles;      // ceil(_SortCount / AVBD_SORT_TILE)
+uint _Pass;       // 0 .. AVBD_SORT_PASSES - 1
+
+bool IsSolved(uint slot)
+{
+    return (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) == 0u && _BodyMass[slot].momentMass.w > 0.0;
+}
+
+// Spreads the low 10 bits of v to every third bit of a 30-bit word.
+uint ExpandBits(uint v)
+{
+    v = (v * 0x00010001u) & 0xFF0000FFu;
+    v = (v * 0x00000101u) & 0x0F00F00Fu;
+    v = (v * 0x00000011u) & 0xC30C30C3u;
+    v = (v * 0x00000005u) & 0x49249249u;
+    return v;
+}
+
+uint MortonKey(int3 cell)
+{
+    uint3 c = (uint3)cell & ((1u << AVBD_SORT_AXIS_BITS) - 1u);
+    return (ExpandBits(c.x) << 2) | (ExpandBits(c.y) << 1) | ExpandBits(c.z);
+}
+
+[numthreads(1, 1, 1)]
+void SortBegin(uint3 id : SV_DispatchThreadID)
+{
+    for (uint w = 0u; w < AVBD_SORT_CONTROL_WORDS; w++)
+        _SortControl[w] = 0u;
+}
+
+groupshared uint g_radius;
+
+// One atomic per group for the largest radius: the threads of the group take the maximum in groupshared memory first.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void SortBounds(uint3 id : SV_DispatchThreadID, uint t : SV_GroupIndex)
+{
+    if (t == 0u)
+        g_radius = 0u;
+    GroupMemoryBarrierWithGroupSync();
+
+    uint slot = _Base + id.x;
+    if (slot < _Count && IsSolved(slot))
+    {
+        float radius = length(_BodyShape[slot].sizeFriction.xyz * 0.5);
+        if (isfinite(radius))
+        {
+            uint previous;
+            InterlockedMax(g_radius, asuint(radius), previous);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (t == 0u && g_radius != 0u)
+    {
+        uint previous;
+        InterlockedMax(_SortControl[AVBD_SORT_CONTROL_MAX_RADIUS], g_radius, previous);
+    }
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void SortKeys(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    uint key = AVBD_SORT_INVALID_KEY;
+    if (IsSolved(slot))
+    {
+        float3 position = _BodyState[slot].position.xyz;
+        if (all(isfinite(position)))
+        {
+            float cellSize = max(2.0 * asfloat(_SortControl[AVBD_SORT_CONTROL_MAX_RADIUS]) * AVBD_BP_CELL_MARGIN, 1.0e-4);
+            int3 cell = (int3)clamp(floor(position / cellSize), -1.0e9, 1.0e9); // the same cell as the broadphase
+            key = MortonKey(cell);
+        }
+    }
+    _KeysOut[slot] = key;
+    _ValuesOut[slot] = slot;
+}
+
+groupshared uint g_hist[AVBD_SORT_BUCKETS];
+
+uint DigitOf(uint key)
+{
+    return (key >> (_Pass * AVBD_SORT_RADIX_BITS)) & (AVBD_SORT_BUCKETS - 1u);
+}
+
+// Every thread reaches both barriers: a thread past the end of the keys only counts nothing.
+[numthreads(AVBD_SORT_TILE, 1, 1)]
+void SortCount(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
+{
+    if (t < AVBD_SORT_BUCKETS)
+        g_hist[t] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+
+    uint item = gid.x * AVBD_SORT_TILE + t;
+    if (item < _SortCount)
+    {
+        uint ignored;
+        InterlockedAdd(g_hist[DigitOf(_KeysIn[item])], 1u, ignored);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (t < AVBD_SORT_BUCKETS)
+        _Histogram[t * _Tiles + gid.x] = g_hist[t];
+}
+
+groupshared uint g_scan[AVBD_SORT_SCAN_THREADS];
+
+// Inclusive scan of one value per thread of the group (Hillis-Steele). Every thread of the group must call it.
+uint GroupScanInclusive(uint t, uint value)
+{
+    g_scan[t] = value;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 1u; stride < AVBD_SORT_SCAN_THREADS; stride <<= 1)
+    {
+        uint add = t >= stride ? g_scan[t - stride] : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        g_scan[t] += add;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    return g_scan[t];
+}
+
+// One group. Every thread owns a run of consecutive entries of the histogram: it adds the run up, the group scans the sums, and the thread rewrites
+// its run as exclusive prefix sums. The histogram holds a few hundred words per thousand bodies, so a run is short.
+[numthreads(AVBD_SORT_SCAN_THREADS, 1, 1)]
+void SortScan(uint t : SV_GroupIndex)
+{
+    uint total = AVBD_SORT_BUCKETS * _Tiles;
+    uint run = (total + AVBD_SORT_SCAN_THREADS - 1u) / AVBD_SORT_SCAN_THREADS;
+    uint begin = min(t * run, total);
+    uint end = min(begin + run, total);
+
+    uint sum = 0u;
+    for (uint i = begin; i < end; i++)
+        sum += _Histogram[i];
+
+    uint offset = GroupScanInclusive(t, sum) - sum;
+    for (uint j = begin; j < end; j++)
+    {
+        uint count = _Histogram[j];
+        _Histogram[j] = offset;
+        offset += count;
+    }
+}
+
+groupshared uint g_digit[AVBD_SORT_TILE];
+
+// The rank of a key among the keys of its digit that come before it in the tile is the number of threads before it with the same digit. A
+// thread past the end of the keys holds a digit that no key has.
+[numthreads(AVBD_SORT_TILE, 1, 1)]
+void SortScatter(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
+{
+    uint item = gid.x * AVBD_SORT_TILE + t;
+    bool valid = item < _SortCount;
+    uint key = valid ? _KeysIn[item] : 0u;
+    uint digit = valid ? DigitOf(key) : AVBD_INVALID;
+
+    g_digit[t] = digit;
+    GroupMemoryBarrierWithGroupSync();
+
+    uint rank = 0u;
+    for (uint u = 0u; u < t; u++)
+        rank += g_digit[u] == digit ? 1u : 0u;
+
+    if (valid)
+    {
+        uint at = _Histogram[digit * _Tiles + gid.x] + rank;
+        _KeysOut[at] = key;
+        _ValuesOut[at] = _ValuesIn[item];
+    }
+}

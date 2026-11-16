@@ -60,6 +60,8 @@ namespace McKrill.Avbd
         static readonly int BodyCellId = Shader.PropertyToID("_BodyCell");
         static readonly int StaticListId = Shader.PropertyToID("_StaticList");
         static readonly int PairsId = Shader.PropertyToID("_Pairs");
+        static readonly int BodyOrderId = Shader.PropertyToID("_BodyOrder");
+        static readonly int UseBodyOrderId = Shader.PropertyToID("_UseBodyOrder");
         static readonly int GridMaskId = Shader.PropertyToID("_GridMask");
         static readonly int DynamicCapacityId = Shader.PropertyToID("_DynamicPairCapacity");
         static readonly int StaticCapacityId = Shader.PropertyToID("_StaticPairCapacity");
@@ -122,8 +124,10 @@ namespace McKrill.Avbd
         /// <summary>
         /// Runs the broadphase over the slots [0, bodies.HighWaterMark). Pending body edits are applied first. The constraints are the
         /// ones whose pairs are excluded; their lists must be built (<see cref="AvbdConstraintBuffers.Rebuild"/>). Pass null for none.
+        /// With a <paramref name="sort"/> (stage S) that covers all the slots, the bodies are visited in its Morton order; the pairs are the same,
+        /// only the order of the work (and so the speed) differs. A sort made for another body count is ignored.
         /// </summary>
-        public void Run(AvbdBodyBuffers bodies, AvbdConstraintBuffers constraints)
+        public void Run(AvbdBodyBuffers bodies, AvbdConstraintBuffers constraints, AvbdMortonSort sort = null)
         {
             if (disposed) throw new ObjectDisposedException(nameof(AvbdBroadphase));
             if (bodies == null) throw new ArgumentNullException(nameof(bodies));
@@ -133,14 +137,16 @@ namespace McKrill.Avbd
             bodies.ApplyEdits();
             int count = bodies.HighWaterMark;
 
-            // Without constraint buffers nothing is excluded. The body ranges are then all empty, so these are never read.
-            if (constraints == null && emptyRecords == null)
-            {
+            // Without constraint buffers nothing is excluded. The body ranges are then all empty, so these are never read. The one-word list
+            // is also bound in place of the body order when there is none.
+            if (emptyRecords == null)
                 emptyRecords = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, ConstraintRecordStrides.Constraint);
+            if (emptyList == null)
                 emptyList = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, sizeof(uint));
-            }
             GraphicsBuffer records = constraints != null ? constraints.Records : emptyRecords;
             GraphicsBuffer list = constraints != null ? constraints.List : emptyList;
+            bool ordered = sort != null && sort.Covers(count);
+            GraphicsBuffer order = ordered ? sort.Order : emptyList;
 
             foreach (int kernel in new[] { resetKernel, clearGridKernel, boundsKernel, insertKernel, pairsDynamicKernel, pairsStaticKernel })
             {
@@ -153,7 +159,9 @@ namespace McKrill.Avbd
                 shader.SetBuffer(kernel, PairsId, pairs);
                 shader.SetBuffer(kernel, RecordsId, records);
                 shader.SetBuffer(kernel, ListId, list);
+                shader.SetBuffer(kernel, BodyOrderId, order);
             }
+            shader.SetInt(UseBodyOrderId, ordered ? 1 : 0);
             shader.SetInt(GridMaskId, gridCells - 1);
             shader.SetInt(DynamicCapacityId, DynamicPairCapacity);
             shader.SetInt(StaticCapacityId, StaticPairCapacity);

@@ -266,6 +266,13 @@ namespace McKrill.Avbd
         /// <summary>For each entry of <see cref="List"/>, the body on the other side of the constraint (AVBD_INVALID for a world pin).</summary>
         internal GraphicsBuffer ListOther => lists.Other;
 
+        /// <summary>
+        /// The Morton sort (stage S) whose order the color bucketing follows, so that the bodies of a color are next to their neighbors in space.
+        /// Null (the default): slot order. A sort that does not cover the current body count is ignored. The order inside a color does not change
+        /// the result of a sweep.
+        /// </summary>
+        internal AvbdMortonSort BodyOrder { get; set; }
+
         internal GraphicsBuffer ColorWork => coloring.Work;
 
         /// <summary>Indirect dispatch arguments of the primal sweep, <see cref="AvbdGraphColoring.ArgsStride"/> bytes per color.</summary>
@@ -497,7 +504,8 @@ namespace McKrill.Avbd
         // Stage C: colors the graph and buckets the bodies. The number of colors comes back; the size of each color stays on the GPU.
         void Recolor(int bodyCount)
         {
-            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, lists.Other, colorBuffer, coloringOrder);
+            GraphicsBuffer bodyOrder = BodyOrder != null && BodyOrder.Covers(bodyCount) ? BodyOrder.Order : null;
+            colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, lists.Other, colorBuffer, coloringOrder, bodyOrder);
             scheduleValid = false;
         }
 
