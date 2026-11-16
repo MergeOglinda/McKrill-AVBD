@@ -12,10 +12,13 @@
 
 // Words of the control buffer. Cleared at the start of every broadphase run.
 #define AVBD_BP_MAX_RADIUS     0 // largest bounding-sphere radius of a solved body, as float bits (non-negative floats order like uints)
-#define AVBD_BP_STATIC_COUNT   1 // bodies in the static list
+#define AVBD_BP_STATIC_COUNT   1 // bodies in the large-static list (statics too big for the grid, see AvbdBroadphase.compute)
 #define AVBD_BP_DYNAMIC_PAIRS  2 // pairs found in the dynamic-dynamic bin. May exceed the bin's capacity: then the pairs beyond it are dropped
 #define AVBD_BP_STATIC_PAIRS   3 // the same for the dynamic-static bin
 #define AVBD_BP_CONTROL_WORDS  4
+
+// Bit of _BodyCell.w that marks a static (or kinematic) body in the grid. The cell index itself is below 2^30.
+#define AVBD_BP_STATIC_FLAG 0x80000000u
 
 // Cells are a little larger than the largest possible contact distance (twice the largest radius), so that two spheres that
 // overlap are always in the same or in adjacent cells, even after the rounding of position / cell size.

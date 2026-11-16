@@ -217,6 +217,52 @@ namespace McKrill.Avbd.Tests
             }
         }
 
+        // Static bodies that fit a grid cell are found through the grid, the ones larger than every solved body through the list: a floor of small
+        // static tiles, a big slab, moving kinematic bodies and solved bodies in a range of sizes.
+        [Test]
+        public void Gpu_MatchesTheOracle_WithManyStaticBodiesOfDifferentSizes()
+        {
+            RequireCompute();
+            const int capacity = 2048;
+            using (var buffers = new AvbdBodyBuffers(capacity))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), capacity, 1 << 16, 1 << 16))
+            {
+                for (int x = 0; x < 20; x++)
+                    for (int z = 0; z < 20; z++)
+                        buffers.Spawn(BodyDescriptor.Box(new float3(1f), 0f, new float3(x * 0.9f, 0f, z * 0.9f)));            // 400 small static tiles
+                buffers.Spawn(BodyDescriptor.Box(new float3(200f, 1f, 200f), 0f, new float3(9f, -1f, 9f)));                   // a large static slab
+                buffers.Spawn(BodyDescriptor.Box(new float3(6f, 1f, 1f), 0f, new float3(4f, 3f, 4f)));                        // a static body a bit larger than the solved ones
+
+                var rng = new System.Random(11);
+                for (int i = 0; i < 300; i++)
+                {
+                    float s = Range(rng, 0.4f, 1.2f);
+                    buffers.Spawn(BodyDescriptor.Box(new float3(s, s * 0.7f, s * 1.3f), 1f, new float3(Range(rng, -1f, 19f), Range(rng, 0.2f, 3f), Range(rng, -1f, 19f))));
+                }
+
+                var kinematic = new BodyHandle[4];
+                for (int i = 0; i < kinematic.Length; i++)
+                {
+                    BodyDescriptor descriptor = BodyDescriptor.Box(new float3(1.5f), 1f, new float3(3f + 4f * i, 0.8f, 5f));
+                    descriptor.kinematic = true;
+                    kinematic[i] = buffers.Spawn(descriptor);
+                }
+
+                broadphase.Run(buffers, null);
+                SortedSet<ulong> got = ToSet(broadphase.ReadPairs());
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0), got, "static scene");
+                Assert.Greater(broadphase.StaticPairCount, 300, "the solved bodies should touch many static ones");
+                Assert.Greater(broadphase.DynamicPairCount, 50, "and each other");
+
+                // The kinematic bodies move: the static grid is rebuilt by every run, so the pairs follow them.
+                for (int i = 0; i < kinematic.Length; i++)
+                    buffers.SetPose(kinematic[i], new float3(15f - 3f * i, 1.2f, 12f - i), quaternion.identity);
+                broadphase.Run(buffers, null);
+                got = ToSet(broadphase.ReadPairs());
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0), got, "after the kinematic bodies moved");
+            }
+        }
+
         [Test]
         public void Gpu_SkipsPairsJoinedByAJointOrSpring_UntilTheListsDropABrokenOne_ButNotByAContact()
         {

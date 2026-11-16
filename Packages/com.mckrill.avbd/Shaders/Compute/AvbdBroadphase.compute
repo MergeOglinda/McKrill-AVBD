@@ -5,9 +5,15 @@
 //
 // Bodies are "solved" (not free, not kinematic, mass above zero) or "static" (live, but not solved: mass 0 or kinematic).
 //   dynamic-dynamic pairs   found with the grid: every solved body sits in the cell of its position, and a body looks at its own cell
-//                           and the 26 around it. The cell size is a little more than twice the largest radius, so a pair is never missed.
-//   dynamic-static pairs    every solved body is tested against every static body (a compacted list). Fine for a few large static
-//                           bodies such as a ground slab; a grid of static colliders is for later.
+//                           and the 26 around it. The cell size is a little more than twice the largest radius of a solved body, so a
+//                           pair is never missed.
+//   dynamic-static pairs    a static body whose radius is at most the largest radius of a solved body (a "small" static body) sits in the
+//                           same grid, flagged (AVBD_BP_STATIC_FLAG in _BodyCell.w), and a solved body finds it in the same walk over the 27
+//                           cells: two spheres closer than rSolved + rStatic <= the cell size are in the same or in adjacent cells. The cost
+//                           of a solved body does not depend on how many static bodies there are in total, only on those near it. The grid is
+//                           rebuilt every run, so a kinematic body that moves needs nothing special. A static body with a radius above that
+//                           of every solved body (a ground slab) is too big for a cell: it goes into a short list that every solved body
+//                           is tested against (BpPairsStatic). That test costs the number of large static bodies per solved body.
 //   static-static pairs     are not generated.
 //
 // Pairs go into two bins of one buffer (pair kinds). Body A of a pair is the one with the higher slot, like the reference solver's pair
@@ -17,10 +23,11 @@
 // Kernels, in the order the host runs them:
 //   BpReset          zeroes the control words
 //   BpClearGrid      empties the grid cells
-//   BpBounds         largest radius of the solved bodies, and the list of static bodies
-//   BpInsert         puts every solved body into the grid (a linked list per cell, built with an atomic exchange)
-//   BpPairsDynamic   dynamic-dynamic pairs
-//   BpPairsStatic    dynamic-static pairs
+//   BpBounds         largest radius of the solved bodies
+//   BpInsert         puts every solved body and every small static body into the grid (a linked list per cell, built with an atomic
+//                    exchange), and the large static bodies into the list
+//   BpPairsDynamic   a solved body walks the 27 cells: dynamic-dynamic pairs and the dynamic-static pairs of the small static bodies
+//   BpPairsStatic    dynamic-static pairs of the large static bodies
 // Mirrored by Reference/Stages/CpuBroadphase.cs, which the tests compare against.
 
 #pragma kernel BpReset
@@ -45,8 +52,8 @@ StructuredBuffer<uint>              _ConstraintList;
 RWStructuredBuffer<uint>            _BpControl;
 RWStructuredBuffer<uint>            _GridHead;   // per grid cell: the first body of its list, or AVBD_INVALID
 RWStructuredBuffer<uint>            _GridNext;   // per body: the next body in its cell's list
-RWStructuredBuffer<uint4>           _BodyCell;   // per body: xyz = cell coordinates (int bits), w = grid cell index, or AVBD_INVALID if not in the grid
-RWStructuredBuffer<uint>            _StaticList;
+RWStructuredBuffer<uint4>           _BodyCell;   // per body: xyz = cell coordinates (int bits), w = grid cell index (| AVBD_BP_STATIC_FLAG for a static body), or AVBD_INVALID if not in the grid
+RWStructuredBuffer<uint>            _StaticList;   // the large static bodies
 RWStructuredBuffer<PairRecord>      _Pairs;      // bin 0 (dynamic-dynamic) at [0, _DynamicPairCapacity), then bin 1 (dynamic-static)
 
 uint _Base;
@@ -164,8 +171,7 @@ void BpBounds(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    uint kind = Classify(slot);
-    if (kind == CLASS_SOLVED)
+    if (Classify(slot) == CLASS_SOLVED)
     {
         float radius = Radius(slot);
         if (isfinite(radius))
@@ -173,12 +179,6 @@ void BpBounds(uint3 id : SV_DispatchThreadID)
             uint previous;
             InterlockedMax(_BpControl[AVBD_BP_MAX_RADIUS], asuint(radius), previous);
         }
-    }
-    else if (kind == CLASS_STATIC)
-    {
-        uint index;
-        InterlockedAdd(_BpControl[AVBD_BP_STATIC_COUNT], 1u, index);
-        _StaticList[index] = slot;
     }
 }
 
@@ -190,16 +190,34 @@ void BpInsert(uint3 id : SV_DispatchThreadID)
         return;
 
     _BodyCell[slot] = uint4(0u, 0u, 0u, AVBD_INVALID);
-    if (Classify(slot) != CLASS_SOLVED)
+    uint kind = Classify(slot);
+    if (kind == CLASS_FREE)
         return;
 
     float3 position = _BodyState[slot].position.xyz;
     if (!IsFinite3(position))
         return; // a body at a non-finite position makes no pairs
 
+    uint flag = 0u;
+    if (kind == CLASS_STATIC)
+    {
+        float radius = Radius(slot);
+        if (!isfinite(radius))
+            return;
+        if (radius > asfloat(_BpControl[AVBD_BP_MAX_RADIUS]))
+        {
+            // Too big for a cell: rSolved + rStatic could be more than the cell size. Every solved body is tested against these.
+            uint listIndex;
+            InterlockedAdd(_BpControl[AVBD_BP_STATIC_COUNT], 1u, listIndex);
+            _StaticList[listIndex] = slot;
+            return;
+        }
+        flag = AVBD_BP_STATIC_FLAG;
+    }
+
     int3 cell = CellOf(position, CellSize());
     uint index = HashCell(cell);
-    _BodyCell[slot] = uint4(asuint(cell), index);
+    _BodyCell[slot] = uint4(asuint(cell), index | flag);
 
     uint previous;
     InterlockedExchange(_GridHead[index], slot, previous);
@@ -214,14 +232,14 @@ void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
         return;
 
     uint4 selfCell = _BodyCell[self];
-    if (selfCell.w == AVBD_INVALID)
-        return; // not in the grid: not solved, or not finite
-
+    if (selfCell.w == AVBD_INVALID || (selfCell.w & AVBD_BP_STATIC_FLAG))
+        return; // not in the grid (free, not finite), or a static body: only solved bodies look for pairs
     float3 selfPosition = _BodyState[self].position.xyz;
     float selfRadius = Radius(self);
     int3 cell = asint(selfCell.xyz);
 
-    // Pairs are found by the body with the higher slot, which is body A.
+    // A pair of two solved bodies is found by the one with the higher slot, which is body A. A static body never looks, so the pair of a solved
+    // and a static body is found once, by the solved body.
     for (int dz = -1; dz <= 1; dz++)
     for (int dy = -1; dy <= 1; dy++)
     for (int dx = -1; dx <= 1; dx++)
@@ -231,11 +249,16 @@ void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
         while (other != AVBD_INVALID)
         {
             // A cell index can be shared by several cells; only the bodies of the cell asked for count, so no body is seen twice.
-            if (other < self && all(asint(_BodyCell[other].xyz) == neighborCell)
+            uint4 otherCell = _BodyCell[other];
+            bool otherStatic = (otherCell.w & AVBD_BP_STATIC_FLAG) != 0u;
+            if ((otherStatic || other < self) && all(asint(otherCell.xyz) == neighborCell)
                 && SpheresOverlap(selfPosition, selfRadius, _BodyState[other].position.xyz, Radius(other))
                 && !Constrained(self, other))
             {
-                Emit(self, other, AVBD_PAIR_DYNAMIC_DYNAMIC);
+                if (otherStatic)
+                    Emit(max(self, other), min(self, other), AVBD_PAIR_DYNAMIC_STATIC);
+                else
+                    Emit(self, other, AVBD_PAIR_DYNAMIC_DYNAMIC);
             }
             other = _GridNext[other];
         }

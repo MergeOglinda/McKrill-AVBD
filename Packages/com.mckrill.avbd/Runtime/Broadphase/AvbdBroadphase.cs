@@ -7,6 +7,9 @@ namespace McKrill.Avbd
     /// Stage B: finds the pairs of bodies whose bounding spheres overlap (<c>AvbdBroadphase.compute</c>), the candidates of the
     /// narrowphase. See the shader header for what a pair is and which pairs are left out.
     ///
+    /// Solved bodies and the static bodies that fit a grid cell share one grid, so the cost of a solved body does not grow with the total
+    /// number of static bodies; static bodies larger than every solved body (a ground slab) are tested against every solved body.
+    ///
     /// The pair list has two bins in one buffer: dynamic-dynamic pairs first, then dynamic-static pairs. Each bin has a capacity; pairs
     /// beyond it are counted but not stored, see <see cref="DynamicPairCount"/> and <see cref="Overflowed"/>.
     ///
@@ -24,6 +27,9 @@ namespace McKrill.Avbd
         public const int DynamicPairsWord = 2;
         public const int StaticPairsWord = 3;
         public const float CellMargin = 1.01f;
+
+        /// <summary>Mirrors AVBD_BP_STATIC_FLAG: the bit of the grid cell word that marks a static body.</summary>
+        public const uint StaticCellFlag = 0x80000000u;
 
         /// <summary>Bytes of one <see cref="PairRecord"/>.</summary>
         public const int PairStride = 16;
