@@ -357,6 +357,7 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)AvbdBroadphase.DynamicPairsWord, d["AVBD_BP_DYNAMIC_PAIRS"]);
             Assert.AreEqual((uint)AvbdBroadphase.StaticPairsWord, d["AVBD_BP_STATIC_PAIRS"]);
             Assert.AreEqual((uint)AvbdBroadphase.ControlWords, d["AVBD_BP_CONTROL_WORDS"]);
+            Assert.AreEqual(AvbdBroadphase.StaticCellFlag, d["AVBD_BP_STATIC_FLAG"]);
             StringAssert.Contains("AVBD_BP_CELL_MARGIN " + AvbdBroadphase.CellMargin.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture),
                 ReadInclude("AvbdBroadphaseParams.hlsl"));
 
