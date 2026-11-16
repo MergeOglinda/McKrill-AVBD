@@ -55,11 +55,11 @@ namespace McKrill.Avbd.Samples
         [SerializeField] Vector3 blockSize = new Vector3(1f, 0.5f, 0.5f);
         [SerializeField, Min(0.01f)] float blockDensity = 1f;
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
-        [SerializeField] bool rigidJoints = true;
+        [SerializeField] bool rigidJoints = false;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
-        [SerializeField, Min(1f)] float jointStiffness = 1e3f;
+        [SerializeField, Min(1f)] float jointStiffness = 2e3f;
         [Tooltip("A joint breaks when the norm of its angular multiplier is above this.")]
-        [SerializeField, Min(0.01f)] float fractureThreshold = 13f;
+        [SerializeField, Min(0.01f)] float fractureThreshold = 19f;
 
         [Header("Solver")]
         [SerializeField, Range(1, 30)] int iterations = 10;
@@ -70,9 +70,9 @@ namespace McKrill.Avbd.Samples
         [Tooltip("Speed of a shot in meters per second.")]
         [SerializeField, Range(5f, 80f)] float shotSpeed = 30f;
         [Tooltip("Edge length of the shot, a cube.")]
-        [SerializeField, Range(0.2f, 2f)] float shotSize = 0.8f;
+        [SerializeField, Range(0.2f, 2f)] float shotSize = 2f;
         [Tooltip("Mass of the shot. A wall block weighs its volume times the block density (0.25 by default).")]
-        [SerializeField, Range(0.1f, 200f)] float shotMass = 5f;
+        [SerializeField, Range(0.1f, 200f)] float shotMass = 200f;
         [Tooltip("Shots alive at once. Shooting more removes the oldest.")]
         [SerializeField, Min(1)] int maxShots = 100;
 
