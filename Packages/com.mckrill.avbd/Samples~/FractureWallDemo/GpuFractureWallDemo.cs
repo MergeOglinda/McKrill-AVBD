@@ -18,8 +18,9 @@ namespace McKrill.Avbd.Samples
     /// <see cref="AvbdSolver.Step"/> advances them. Collisions are part of that step: the broadphase finds the touching pairs, the narrow
     /// phase keeps a manifold for each, and the solver solves the contacts, so this demo contains no collision code.
     ///
-    /// Drawing is the simple part: each frame the poses are read back from the GPU and copied to one cube per body. That is a
-    /// stall and a per-body GameObject, fine for a few hundred boxes and not what the package's own renderer will do.
+    /// Drawing never leaves the GPU: one instanced draw call (<c>Graphics.RenderMeshPrimitives</c>) draws every box, and the vertex shader
+    /// (<c>AvbdInstancedBoxes</c>) reads each box's pose from the solver's own body state buffer. There is no readback and no object per body,
+    /// so the cost of drawing does not grow with the number of bodies the way a GameObject per body does. The shader has no shadows.
     ///
     /// The scene is y-up (the package default), so solver positions and rotations are used as Unity world positions and rotations.
     /// Input is read through IMGUI events, so it works with the Input Manager and with the Input System package.
@@ -29,7 +30,7 @@ namespace McKrill.Avbd.Samples
     public sealed class GpuFractureWallDemo : MonoBehaviour
     {
         // Mirror of the package's state record (design doc, section 3): position, rotation, start-of-step position and rotation.
-        // The package keeps its own struct internal; the demo reads the public buffer with this copy and checks the stride.
+        // The package keeps its own struct internal; the demo only checks the stride of the public buffer against this copy (the draw shader reads the buffer).
         struct BodyStateRecord
         {
             public float4 position;
@@ -38,11 +39,18 @@ namespace McKrill.Avbd.Samples
             public float4 startRotation;
         }
 
-        struct Visual
+        // What the shader reads for each box (32 B, mirrors Instance in AvbdInstancedBoxes.shader): the body slot, the size and the color.
+        struct InstanceData
+        {
+            public uint slot;
+            public float sizeX, sizeY, sizeZ;
+            public float4 color;
+        }
+
+        struct Shot
         {
             public BodyHandle handle;
-            public Transform transform;
-            public Material material;
+            public float size;
         }
 
         [Header("Wall (applied on Reset)")]
@@ -97,12 +105,16 @@ namespace McKrill.Avbd.Samples
         AvbdBodyBuffers bodies;
         AvbdConstraintBuffers constraints;
         AvbdSolver solver;
-        BodyStateRecord[] poses;
+        // Drawing: one instance per body. The first staticCount instances (the ground and the walls) are written once per Reset, the shots follow.
+        InstanceData[] instances;
+        GraphicsBuffer instanceBuffer;
+        int staticCount;
+        bool shotsChanged;
         int jointCount;
 
-        readonly List<Visual> staticVisuals = new List<Visual>(); // ground and wall
-        readonly List<Visual> shots = new List<Visual>();          // oldest first
-        Shader boxShader;
+        readonly List<InstanceData> staticInstances = new List<InstanceData>(); // ground and walls
+        readonly List<Shot> shots = new List<Shot>();                            // oldest first
+        Material boxMaterial;
         Mesh cubeMesh;
         GameObject meshSource;
 
@@ -136,7 +148,14 @@ namespace McKrill.Avbd.Samples
 
         void OnEnable()
         {
-            boxShader = FindShader("Universal Render Pipeline/Lit", "Standard", "Sprites/Default", "Hidden/Internal-Colored");
+            Shader boxShader = AvbdShaderSet.Load()?.InstancedBoxes;
+            if (boxShader == null || !boxShader.isSupported)
+            {
+                Debug.LogError("GPU Fracture Wall Demo: the package's instanced box shader is missing or not supported on this device (it needs compute buffers in the vertex shader, shader model 4.5).");
+                enabled = false;
+                return;
+            }
+            boxMaterial = new Material(boxShader) { hideFlags = HideFlags.HideAndDontSave };
 
             // The cube mesh comes from a primitive that is destroyed again: it keeps the demo free of mesh assets.
             meshSource = GameObject.CreatePrimitive(PrimitiveType.Cube);
@@ -158,6 +177,8 @@ namespace McKrill.Avbd.Samples
             if (meshSource != null) Destroy(meshSource);
             meshSource = null;
             cubeMesh = null;
+            if (boxMaterial != null) Destroy(boxMaterial);
+            boxMaterial = null;
 
             if (createdLight != null) Destroy(createdLight);
             createdLight = null;
@@ -237,7 +258,7 @@ namespace McKrill.Avbd.Samples
                     accumulator = 0f;
             }
 
-            SyncVisuals();
+            DrawBodies();
         }
 
         void LateUpdate()
@@ -269,7 +290,7 @@ namespace McKrill.Avbd.Samples
             bodies = new AvbdBodyBuffers(capacity);
             if (bodies.State.stride != UnsafeUtility.SizeOf<BodyStateRecord>())
                 throw new System.InvalidOperationException("The package's body state record changed; update BodyStateRecord in GpuFractureWallDemo.");
-            poses = new BodyStateRecord[capacity];
+            staticInstances.Clear();
 
             AvbdSolverSettings settings = AvbdSolverSettings.Default; // 60 Hz, gravity (0, -10, 0): Unity's y-up
             settings.iterations = iterations;
@@ -282,7 +303,7 @@ namespace McKrill.Avbd.Samples
 
             // Ground: a static slab whose top face is the plane y = 0.
             var ground = new float3(GroundHalfExtent * 2f, 1f, GroundHalfExtent * 2f);
-            AddStaticVisual(bodies.Spawn(BodyDescriptor.Box(ground, 0f, new float3(0f, -0.5f, 0f))), ground, new Color(0.30f, 0.33f, 0.36f));
+            AddStaticInstance(bodies.Spawn(BodyDescriptor.Box(ground, 0f, new float3(0f, -0.5f, 0f))), ground, new Color(0.30f, 0.33f, 0.36f));
 
             // Walls: wall w stands at z = w * WallSpacing, the first one in front. Row r is shifted by half a block when r is odd (a running bond),
             // so every block rests on two blocks of the row under it.
@@ -306,7 +327,7 @@ namespace McKrill.Avbd.Samples
                         // The bottom row is immobile: a body without mass is static.
                         handles[r, c] = bodies.Spawn(BodyDescriptor.Box(size, r == 0 ? 0f : blockDensity, position));
                         positions[r, c] = position;
-                        AddStaticVisual(handles[r, c], size, color);
+                        AddStaticInstance(handles[r, c], size, color);
                     }
                 }
 
@@ -330,9 +351,10 @@ namespace McKrill.Avbd.Samples
             }
             bodies.ApplyEdits();
 
+            CreateInstanceBuffer();
+
             accumulator = 0f;
             stepMs = 0f;
-            SyncVisuals();
         }
 
         // A ball-socket joint at the middle between the two blocks (the middle of the face or of the part of it they share), with a rigid
@@ -347,52 +369,57 @@ namespace McKrill.Avbd.Samples
                 jointCount++;
         }
 
-        void AddStaticVisual(BodyHandle handle, float3 size, Color color)
+        void AddStaticInstance(BodyHandle handle, float3 size, Color color)
         {
             if (!handle.IsValid)
                 return;
-            staticVisuals.Add(CreateVisual(handle, size, color));
+            staticInstances.Add(MakeInstance(handle, size, color));
         }
 
-        Visual CreateVisual(BodyHandle handle, float3 size, Color color)
+        static InstanceData MakeInstance(BodyHandle handle, float3 size, Color color)
         {
-            var go = new GameObject("Body " + handle.Slot);
-            go.transform.SetParent(transform, false);
-            go.AddComponent<MeshFilter>().sharedMesh = cubeMesh;
-            var material = new Material(boxShader) { color = color };
-            go.AddComponent<MeshRenderer>().sharedMaterial = material;
-            go.transform.localScale = new Vector3(size.x, size.y, size.z);
-            return new Visual { handle = handle, transform = go.transform, material = material };
+            // The shader outputs the color as it is, so a project in the linear color space needs the linear value.
+            if (QualitySettings.activeColorSpace == ColorSpace.Linear)
+                color = color.linear;
+            return new InstanceData { slot = (uint)handle.Slot, sizeX = size.x, sizeY = size.y, sizeZ = size.z, color = new float4(color.r, color.g, color.b, 1f) };
+        }
+
+        // The buffer holds the static instances (written now) and room for the most shots that can exist; the shots are written when they change.
+        void CreateInstanceBuffer()
+        {
+            staticCount = staticInstances.Count;
+            instances = new InstanceData[staticCount + maxShots];
+            staticInstances.CopyTo(instances);
+            instanceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, instances.Length, UnsafeUtility.SizeOf<InstanceData>());
+            instanceBuffer.SetData(instances, 0, 0, staticCount);
+            shotsChanged = false;
+
+            boxMaterial.SetBuffer("_Poses", bodies.State);
+            boxMaterial.SetBuffer("_Instances", instanceBuffer);
         }
 
         void DestroySimulation()
         {
-            DestroyVisuals(staticVisuals);
-            DestroyVisuals(shots);
+            shots.Clear();
+            staticInstances.Clear();
+            if (instanceBuffer != null) instanceBuffer.Release();
+            instanceBuffer = null;
+            instances = null;
+            staticCount = 0;
             if (solver != null) solver.Dispose();
             if (constraints != null) constraints.Dispose();
             if (bodies != null) bodies.Dispose();
             solver = null;
             constraints = null;
             bodies = null;
-            poses = null;
-        }
-
-        static void DestroyVisuals(List<Visual> visuals)
-        {
-            for (int i = 0; i < visuals.Count; i++)
-            {
-                if (visuals[i].material != null) Destroy(visuals[i].material);
-                if (visuals[i].transform != null) Destroy(visuals[i].transform.gameObject);
-            }
-            visuals.Clear();
         }
 
         void Shoot()
         {
             if (cam == null)
                 return;
-            while (shots.Count >= maxShots)
+            int shotLimit = Mathf.Min(maxShots, instances.Length - staticCount); // what the instance buffer was made for
+            while (shots.Count >= shotLimit)
                 RemoveShot(0);
 
             Transform t = cam.transform;
@@ -408,18 +435,15 @@ namespace McKrill.Avbd.Samples
             if (!handle.IsValid)
                 return;
 
-            Visual visual = CreateVisual(handle, new float3(size), new Color(1f, 0.25f, 0.15f));
-            visual.transform.SetPositionAndRotation(t.position + t.forward * (size + 0.6f), t.rotation);
-            shots.Add(visual);
+            shots.Add(new Shot { handle = handle, size = size });
+            shotsChanged = true;
         }
 
         void RemoveShot(int index)
         {
-            Visual visual = shots[index];
-            bodies.Remove(visual.handle);
-            if (visual.material != null) Destroy(visual.material);
-            if (visual.transform != null) Destroy(visual.transform.gameObject);
+            bodies.Remove(shots[index].handle);
             shots.RemoveAt(index);
+            shotsChanged = true;
         }
 
         void ClearShots()
@@ -437,29 +461,41 @@ namespace McKrill.Avbd.Samples
             stepMs = stepMs <= 0f ? ms : Mathf.Lerp(stepMs, ms, 0.1f);
         }
 
-        // One readback of the used slots, then every visual takes the pose of its slot.
-        void SyncVisuals()
+        // One instanced draw of every body. The poses stay in the solver's buffer; the only data that goes to the GPU is the list of shots, and only
+        // when a shot was fired or removed.
+        void DrawBodies()
         {
-            int count = Mathf.Min(bodies.HighWaterMark, poses.Length);
-            if (count == 0)
-                return;
-            bodies.State.GetData(poses, 0, 0, count);
-            ApplyPoses(staticVisuals, count);
-            ApplyPoses(shots, count);
-        }
-
-        void ApplyPoses(List<Visual> visuals, int count)
-        {
-            for (int i = 0; i < visuals.Count; i++)
+            if (shotsChanged)
             {
-                int slot = visuals[i].handle.Slot;
-                if (slot >= count)
-                    continue;
-                BodyStateRecord s = poses[slot];
-                visuals[i].transform.SetPositionAndRotation(
-                    new Vector3(s.position.x, s.position.y, s.position.z),
-                    new Quaternion(s.rotation.x, s.rotation.y, s.rotation.z, s.rotation.w));
+                for (int i = 0; i < shots.Count; i++)
+                    instances[staticCount + i] = MakeInstance(shots[i].handle, new float3(shots[i].size), ShotColor);
+                if (shots.Count > 0)
+                    instanceBuffer.SetData(instances, staticCount, staticCount, shots.Count);
+                shotsChanged = false;
             }
+
+            // The light is the scene's sun if there is one (the direction towards it), else a fixed direction.
+            Vector3 toLight = new Vector3(0.45f, 0.75f, -0.45f).normalized;
+            Color lightColor = new Color(0.85f, 0.85f, 0.85f);
+            Light sun = RenderSettings.sun != null ? RenderSettings.sun : createdLight != null ? createdLight.GetComponent<Light>() : null;
+            if (sun != null && sun.isActiveAndEnabled)
+            {
+                toLight = -sun.transform.forward;
+                lightColor = sun.color * sun.intensity;
+            }
+            boxMaterial.SetVector("_LightDirection", toLight);
+            boxMaterial.SetColor("_LightColor", lightColor);
+            boxMaterial.SetColor("_AmbientColor", new Color(0.35f, 0.37f, 0.40f));
+
+            var renderParams = new RenderParams(boxMaterial)
+            {
+                // The bodies move on the GPU, so the CPU does not know where they are: a bounds that contains the scene keeps them from being culled.
+                worldBounds = new Bounds(Vector3.zero, new Vector3(100000f, 100000f, 100000f)),
+                shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off,
+                receiveShadows = false,
+                layer = gameObject.layer,
+            };
+            Graphics.RenderMeshPrimitives(renderParams, cubeMesh, 0, staticCount + shots.Count);
         }
 
         // ---- camera and light --------------------------------------------------------------------------
@@ -604,7 +640,7 @@ namespace McKrill.Avbd.Samples
             GUILayout.EndHorizontal();
 
             GUILayout.Space(4f);
-            GUILayout.Label("bodies " + (staticVisuals.Count + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
+            GUILayout.Label("bodies " + (staticCount + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
             GUILayout.Label("joints broken " + (constraints != null ? constraints.BrokenCount : 0) + " / " + jointCount);
             GUILayout.Label("step " + stepMs.ToString("0.00") + " ms (CPU side)   frame " + frameMs.ToString("0.0") + " ms");
             if (behindRealTime)
@@ -663,16 +699,7 @@ namespace McKrill.Avbd.Samples
 
         // ---- helpers -----------------------------------------------------------------------------------
 
-        static Shader FindShader(params string[] names)
-        {
-            for (int i = 0; i < names.Length; i++)
-            {
-                Shader shader = Shader.Find(names[i]);
-                if (shader != null)
-                    return shader;
-            }
-            return null;
-        }
+        static readonly Color ShotColor = new Color(1f, 0.25f, 0.15f);
     }
 
 #if UNITY_EDITOR

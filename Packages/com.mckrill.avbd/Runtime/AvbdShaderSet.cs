@@ -23,6 +23,7 @@ namespace McKrill.Avbd
         [SerializeField] ComputeShader coloring;
         [SerializeField] ComputeShader broadphase;
         [SerializeField] ComputeShader lists;
+        [SerializeField] Shader instancedBoxes;
 
         /// <summary>Trivial kernel that writes a known pattern into a buffer. Proves the toolchain.</summary>
         public ComputeShader Smoke => smoke;
@@ -53,6 +54,12 @@ namespace McKrill.Avbd
 
         /// <summary>Stage G: per-body constraint lists (CSR), built from the constraint records and the manifold pool.</summary>
         public ComputeShader Lists => lists;
+
+        /// <summary>
+        /// Draw shader for boxes read straight from the body state buffer, one instance per box (<c>Shaders/Rendering/AvbdInstancedBoxes.shader</c>).
+        /// Not a compute shader: it is for rendering only, and the solver does not use it.
+        /// </summary>
+        public Shader InstancedBoxes => instancedBoxes;
 
         /// <summary>Loads the shader set, or returns null if the asset is missing.</summary>
         public static AvbdShaderSet Load()
