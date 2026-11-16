@@ -26,6 +26,7 @@ namespace McKrill.Avbd
     /// <summary>
     /// Stage G: builds the constraint list of every solved body on the GPU (<c>AvbdLists.compute</c>), with no readback: it counts the
     /// constraints of each body, scans the counts into offsets (written to the body Range array), fills the lists and sorts each one.
+    /// The contact kernels visit only the manifold slots below the pool's high-water mark (an indirect dispatch with the narrow phase's arguments).
     /// The order matches <see cref="ConstraintTopology"/>, the CPU oracle: contacts first by pair and k, then joints and springs newest first.
     /// A fractured joint or spring is left out.
     /// </summary>
@@ -38,14 +39,18 @@ namespace McKrill.Avbd
         public const int ControlWords = 4;
         public const int ScanGroup = 1024;
 
+        /// <summary>Mirrors AVBD_LIST_SORT_LANES: threads that sort the list of one body.</summary>
+        public const int SortLanes = 8;
+
         readonly ComputeShader shader;
-        readonly int beginKernel, clearKernel, countRecordsKernel, countContactsKernel, scanKernel, fillRecordsKernel, fillContactsKernel, sortKernel;
+        readonly int clearKernel, countRecordsKernel, countContactsKernel, scanBlockKernel, scanTopKernel, scanApplyKernel, fillRecordsKernel, fillContactsKernel, sortKernel;
         readonly int[] allKernels;
         readonly int bodyCapacity;
         GraphicsBuffer work;
         GraphicsBuffer control;
-        GraphicsBuffer keys;   // one per list entry: the sort key
-        GraphicsBuffer other;  // one per list entry: the body on the other side of the constraint
+        GraphicsBuffer keys;   // one per list entry, unsorted: the sort key
+        GraphicsBuffer items;  // one per list entry, unsorted: the constraint id and the body on the other side
+        GraphicsBuffer other;  // one per list entry, sorted: the body on the other side of the constraint
         bool disposed;
 
         static readonly int BodyMetaId = Shader.PropertyToID("_BodyMeta");
@@ -54,6 +59,9 @@ namespace McKrill.Avbd
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
         static readonly int KeysId = Shader.PropertyToID("_ListKey");
+        static readonly int ItemsId = Shader.PropertyToID("_ListItem");
+        static readonly int NpControlId = Shader.PropertyToID("_NpControl");
+        static readonly int SlotCapacityId = Shader.PropertyToID("_SlotCapacity");
         static readonly int OtherId = Shader.PropertyToID("_ConstraintOther");
         static readonly int WorkId = Shader.PropertyToID("_ListWork");
         static readonly int ControlId = Shader.PropertyToID("_ListControl");
@@ -73,20 +81,30 @@ namespace McKrill.Avbd
         public AvbdConstraintLists(ComputeShader shader, int bodyCapacity, int listCapacity)
         {
             this.shader = shader != null ? shader : throw new InvalidOperationException("The AvbdShaderSet has no lists shader.");
+            if (bodyCapacity > ScanGroup * ScanGroup)
+                throw new ArgumentOutOfRangeException(nameof(bodyCapacity), "The list scan handles at most " + ScanGroup * ScanGroup + " bodies.");
             this.bodyCapacity = bodyCapacity;
-            beginKernel = shader.FindKernel("ListBegin");
             clearKernel = shader.FindKernel("ListClear");
             countRecordsKernel = shader.FindKernel("ListCountRecords");
             countContactsKernel = shader.FindKernel("ListCountContacts");
-            scanKernel = shader.FindKernel("ListScan");
+            scanBlockKernel = shader.FindKernel("ListScanBlock");
+            scanTopKernel = shader.FindKernel("ListScanTop");
+            scanApplyKernel = shader.FindKernel("ListScanApply");
             fillRecordsKernel = shader.FindKernel("ListFillRecords");
             fillContactsKernel = shader.FindKernel("ListFillContacts");
             sortKernel = shader.FindKernel("ListSort");
-            allKernels = new[] { beginKernel, clearKernel, countRecordsKernel, countContactsKernel, scanKernel, fillRecordsKernel, fillContactsKernel, sortKernel };
+            allKernels = new[]
+            {
+                clearKernel, countRecordsKernel, countContactsKernel, scanBlockKernel, scanTopKernel, scanApplyKernel,
+                fillRecordsKernel, fillContactsKernel, sortKernel,
+            };
 
-            work = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Math.Max(1, bodyCapacity * 2), sizeof(uint));
+            // Counts, cursors, contacts per body and the sums of the scan blocks (see AvbdLists.compute).
+            int blocks = (bodyCapacity + ScanGroup - 1) / ScanGroup;
+            work = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Math.Max(1, bodyCapacity * 3 + blocks), sizeof(uint));
             control = new GraphicsBuffer(GraphicsBuffer.Target.Structured, ControlWords, sizeof(uint));
             keys = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Math.Max(1, listCapacity), 2 * sizeof(uint));
+            items = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Math.Max(1, listCapacity), 2 * sizeof(uint));
             other = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Math.Max(1, listCapacity), sizeof(uint));
             work.SetData(new uint[work.count]);
             control.SetData(new uint[ControlWords]);
@@ -100,8 +118,11 @@ namespace McKrill.Avbd
         /// <param name="pairCounts">Contacts per manifold slot, or null without contacts.</param>
         /// <param name="slotBodies">The pair of bodies of each manifold slot (AVBD_INVALID = free).</param>
         /// <param name="slotCount">Number of manifold slots.</param>
+        /// <param name="poolControl">The pool's control words (the high-water mark), or null without contacts.</param>
+        /// <param name="poolArgs">The narrow phase's indirect arguments; its retire entry is one thread per slot below the high-water mark.</param>
         public void Run(AvbdBodyBuffers bodies, int bodyCount, GraphicsBuffer records, int recordCount, GraphicsBuffer list,
-            GraphicsBuffer pairCounts, GraphicsBuffer slotBodies, int slotCount, int contactBase)
+            GraphicsBuffer pairCounts, GraphicsBuffer slotBodies, int slotCount, int contactBase,
+            GraphicsBuffer poolControl, GraphicsBuffer poolArgs)
         {
             if (disposed) throw new ObjectDisposedException(nameof(AvbdConstraintLists));
             if (bodyCount > bodyCapacity) throw new ArgumentOutOfRangeException(nameof(bodyCount));
@@ -109,7 +130,7 @@ namespace McKrill.Avbd
             if (bodyCount <= 0)
                 return;
 
-            bool contacts = slotCount > 0 && pairCounts != null && slotBodies != null;
+            bool contacts = slotCount > 0 && pairCounts != null && slotBodies != null && poolControl != null && poolArgs != null;
             foreach (int kernel in allKernels)
             {
                 shader.SetBuffer(kernel, BodyMetaId, bodies.Meta);
@@ -118,6 +139,7 @@ namespace McKrill.Avbd
                 shader.SetBuffer(kernel, RecordsId, records);
                 shader.SetBuffer(kernel, ListId, list);
                 shader.SetBuffer(kernel, KeysId, keys);
+                shader.SetBuffer(kernel, ItemsId, items);
                 shader.SetBuffer(kernel, OtherId, other);
                 shader.SetBuffer(kernel, WorkId, work);
                 shader.SetBuffer(kernel, ControlId, control);
@@ -125,22 +147,30 @@ namespace McKrill.Avbd
                 {
                     shader.SetBuffer(kernel, PairCountsId, pairCounts);
                     shader.SetBuffer(kernel, SlotBodiesId, slotBodies);
+                    shader.SetBuffer(kernel, NpControlId, poolControl);
                 }
             }
             shader.SetInt(BodyCountId, bodyCount);
             shader.SetInt(ContactBaseId, contactBase);
             shader.SetInt(WorkStrideId, bodyCapacity);
+            shader.SetInt(SlotCapacityId, contacts ? slotCount : 0);
 
-            shader.Dispatch(beginKernel, 1, 1, 1);
+            uint retireArgs = (uint)(ContactLayout.PoolArgsRetire * AvbdIndirect.ArgsStride);
+
             AvbdDispatch.Linear(shader, clearKernel, bodyCount);
             AvbdDispatch.Linear(shader, countRecordsKernel, recordCount);
             if (contacts)
-                AvbdDispatch.Linear(shader, countContactsKernel, slotCount);
-            shader.Dispatch(scanKernel, 1, 1, 1);
+                shader.DispatchIndirect(countContactsKernel, poolArgs, retireArgs);
+
+            // Scan of the counts: inside blocks of ScanGroup bodies, then over the blocks, then the offsets.
+            shader.Dispatch(scanBlockKernel, (bodyCount + ScanGroup - 1) / ScanGroup, 1, 1);
+            shader.Dispatch(scanTopKernel, 1, 1, 1);
+            AvbdDispatch.Linear(shader, scanApplyKernel, bodyCount);
+
             AvbdDispatch.Linear(shader, fillRecordsKernel, recordCount);
             if (contacts)
-                AvbdDispatch.Linear(shader, fillContactsKernel, slotCount);
-            AvbdDispatch.Linear(shader, sortKernel, bodyCount);
+                shader.DispatchIndirect(fillContactsKernel, poolArgs, retireArgs);
+            AvbdDispatch.Linear(shader, sortKernel, bodyCount * SortLanes);
         }
 
         /// <summary>Reads the counters of the last build back (this waits for the GPU).</summary>
@@ -163,6 +193,8 @@ namespace McKrill.Avbd
             control = null;
             keys?.Release();
             keys = null;
+            items?.Release();
+            items = null;
             other?.Release();
             other = null;
         }

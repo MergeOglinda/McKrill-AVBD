@@ -9,8 +9,12 @@
 #define AVBD_LIST_CONTROL_INVALID 2 // records or manifolds left out because they name a body slot that is not in use (or too many contacts)
 #define AVBD_LIST_CONTROL_WORDS   4
 
-// Threads of the scan kernel: one group scans the per-body counts.
+// Threads of a scan group: a group scans the counts of AVBD_LIST_SCAN_GROUP bodies, and one group scans the sums of the groups, so the scan
+// handles at most AVBD_LIST_SCAN_GROUP * AVBD_LIST_SCAN_GROUP bodies.
 #define AVBD_LIST_SCAN_GROUP 1024
+
+// Threads that sort the list of one body (a power of two that divides AVBD_GROUP_SIZE).
+#define AVBD_LIST_SORT_LANES 8u
 
 // Contact records per manifold slot (mirrors ContactLayout.MaxContactsPerPair).
 #define AVBD_LIST_CONTACTS_PER_SLOT 8
