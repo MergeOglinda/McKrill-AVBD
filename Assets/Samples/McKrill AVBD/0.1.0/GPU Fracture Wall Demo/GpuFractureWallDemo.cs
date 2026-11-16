@@ -7,6 +7,7 @@ namespace McKrill.Avbd.Samples
 {
     /// <summary>
     /// A brick wall of 225 or more blocks (15 x 15 by default) with an immobile bottom row, on the GPU solver, held together by joints that fracture, and a camera you can shoot boxes from.
+    /// The panel can set up several walls, one behind the other, 4 m apart (one by default).
     ///
     /// Every block is joined to its neighbors (the one beside it and the two under it in a running bond) by a ball-socket joint at the
     /// middle of the shared face, with a hard angle lock. A joint breaks when its angular multiplier exceeds the fracture threshold
@@ -49,14 +50,16 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Range(MinColumns, MaxColumns)] int columns = 15;
         [Tooltip("Rows of blocks. The bottom row is immobile.")]
         [SerializeField, Range(MinRows, MaxRows)] int rows = 15;
+        [Tooltip("Walls one behind the other, 4 meters apart along the camera's viewing direction (z). Each has the size above.")]
+        [SerializeField, Range(MinWalls, MaxWalls)] int walls = 1;
         [SerializeField] Vector3 blockSize = new Vector3(1f, 0.5f, 0.5f);
         [SerializeField, Min(0.01f)] float blockDensity = 1f;
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
-        [SerializeField] bool rigidJoints = true;
+        [SerializeField] bool rigidJoints = false;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
-        [SerializeField, Min(1f)] float jointStiffness = 1e3f;
+        [SerializeField, Min(1f)] float jointStiffness = 2e3f;
         [Tooltip("A joint breaks when the norm of its angular multiplier is above this.")]
-        [SerializeField, Min(0.01f)] float fractureThreshold = 13f;
+        [SerializeField, Min(0.01f)] float fractureThreshold = 19f;
 
         [Header("Solver")]
         [SerializeField, Range(1, 30)] int iterations = 10;
@@ -67,9 +70,9 @@ namespace McKrill.Avbd.Samples
         [Tooltip("Speed of a shot in meters per second.")]
         [SerializeField, Range(5f, 80f)] float shotSpeed = 30f;
         [Tooltip("Edge length of the shot, a cube.")]
-        [SerializeField, Range(0.2f, 2f)] float shotSize = 0.8f;
+        [SerializeField, Range(0.2f, 2f)] float shotSize = 2f;
         [Tooltip("Mass of the shot. A wall block weighs its volume times the block density (0.25 by default).")]
-        [SerializeField, Range(0.1f, 200f)] float shotMass = 5f;
+        [SerializeField, Range(0.1f, 200f)] float shotMass = 200f;
         [Tooltip("Shots alive at once. Shooting more removes the oldest.")]
         [SerializeField, Min(1)] int maxShots = 100;
 
@@ -85,6 +88,9 @@ namespace McKrill.Avbd.Samples
         const int MaxColumns = 75;
         const int MinRows = 15;
         const int MaxRows = 75;
+        const int MinWalls = 1;
+        const int MaxWalls = 10;
+        const float WallSpacing = 4f; // meters between the walls (from the middle of one to the middle of the next, along z)
         const float GroundHalfExtent = 100f;
         const float BlockGap = 0.01f; // between neighbors; the wall starts almost at rest
 
@@ -246,13 +252,17 @@ namespace McKrill.Avbd.Samples
         /// <summary>Number of blocks of a wall.</summary>
         public static int BlockCount(int columns, int rows) => columns * rows;
 
+        /// <summary>Number of blocks of <paramref name="walls"/> walls.</summary>
+        public static int BlockCount(int columns, int rows, int walls) => columns * rows * walls;
+
         void BuildSimulation()
         {
             DestroySimulation();
 
             columns = Mathf.Clamp(columns, MinColumns, MaxColumns);
             rows = Mathf.Clamp(rows, MinRows, MaxRows);
-            int blocks = BlockCount(columns, rows);
+            walls = Mathf.Clamp(walls, MinWalls, MaxWalls);
+            int blocks = BlockCount(columns, rows, walls); // of all the walls
             // Bodies: the ground, the blocks and the shots.
             maxShots = Mathf.Max(maxShots, 1);
             int capacity = 1 + blocks + maxShots + 8;
@@ -274,45 +284,50 @@ namespace McKrill.Avbd.Samples
             var ground = new float3(GroundHalfExtent * 2f, 1f, GroundHalfExtent * 2f);
             AddStaticVisual(bodies.Spawn(BodyDescriptor.Box(ground, 0f, new float3(0f, -0.5f, 0f))), ground, new Color(0.30f, 0.33f, 0.36f));
 
-            // Wall: row r is shifted by half a block when r is odd (a running bond), so every block rests on two blocks of the row under it.
-            float3 size = new float3(blockSize.x, blockSize.y, blockSize.z);
-            float stepX = size.x + BlockGap;
-            float stepY = size.y + BlockGap;
-            float centerColumn = (columns - 1) * 0.5f + 0.25f;
-            var handles = new BodyHandle[rows, columns];
-            var positions = new float3[rows, columns];
-            for (int r = 0; r < rows; r++)
-            {
-                float y = size.y * 0.5f + BlockGap + r * stepY;
-                Color color = Color.HSVToRGB(0.02f + 0.08f * (r % 2), 0.55f + 0.1f * (r % 3) / 2f, 0.85f);
-                for (int c = 0; c < columns; c++)
-                {
-                    var position = new float3((c + 0.5f * (r & 1) - centerColumn) * stepX, y, 0f);
-                    // The bottom row is immobile: a body without mass is static.
-                    handles[r, c] = bodies.Spawn(BodyDescriptor.Box(size, r == 0 ? 0f : blockDensity, position));
-                    positions[r, c] = position;
-                    AddStaticVisual(handles[r, c], size, color);
-                }
-            }
-
-            // Joints. The bottom row is not joined to itself, only to the row above it. A block is joined to the block on its left, and to the two blocks under it: with a shift of half a block, those are
-            // (c, c + 1) in an odd row and (c - 1, c) in an even one.
+            // Walls: wall w stands at z = w * WallSpacing, the first one in front. Row r is shifted by half a block when r is odd (a running bond),
+            // so every block rests on two blocks of the row under it.
             jointCount = 0;
-            for (int r = 0; r < rows; r++)
-                for (int c = 0; c < columns; c++)
+            for (int w = 0; w < walls; w++)
+            {
+                float z = w * WallSpacing;
+                float3 size = new float3(blockSize.x, blockSize.y, blockSize.z);
+                float stepX = size.x + BlockGap;
+                float stepY = size.y + BlockGap;
+                float centerColumn = (columns - 1) * 0.5f + 0.25f;
+                var handles = new BodyHandle[rows, columns];
+                var positions = new float3[rows, columns];
+                for (int r = 0; r < rows; r++)
                 {
-                    if (r == 0)
-                        continue; // the bottom row is static: its blocks need no joints to each other
-                    if (c > 0)
-                        Join(handles[r, c], positions[r, c], handles[r, c - 1], positions[r, c - 1]);
-                    int firstBelow = (r & 1) == 1 ? c : c - 1;
-                    for (int k = 0; k < 2; k++)
+                    float y = size.y * 0.5f + BlockGap + r * stepY;
+                    Color color = Color.HSVToRGB(0.02f + 0.08f * (r % 2), 0.55f + 0.1f * (r % 3) / 2f, 0.85f);
+                    for (int c = 0; c < columns; c++)
                     {
-                        int below = firstBelow + k;
-                        if (below >= 0 && below < columns)
-                            Join(handles[r, c], positions[r, c], handles[r - 1, below], positions[r - 1, below]);
+                        var position = new float3((c + 0.5f * (r & 1) - centerColumn) * stepX, y, z);
+                        // The bottom row is immobile: a body without mass is static.
+                        handles[r, c] = bodies.Spawn(BodyDescriptor.Box(size, r == 0 ? 0f : blockDensity, position));
+                        positions[r, c] = position;
+                        AddStaticVisual(handles[r, c], size, color);
                     }
                 }
+
+                // Joints. The bottom row is not joined to itself, only to the row above it. A block is joined to the block on its left, and to the two blocks under it: with a shift of half a block, those are
+                // (c, c + 1) in an odd row and (c - 1, c) in an even one.
+                for (int r = 0; r < rows; r++)
+                    for (int c = 0; c < columns; c++)
+                    {
+                        if (r == 0)
+                            continue; // the bottom row is static: its blocks need no joints to each other
+                        if (c > 0)
+                            Join(handles[r, c], positions[r, c], handles[r, c - 1], positions[r, c - 1]);
+                        int firstBelow = (r & 1) == 1 ? c : c - 1;
+                        for (int k = 0; k < 2; k++)
+                        {
+                            int below = firstBelow + k;
+                            if (below >= 0 && below < columns)
+                                Join(handles[r, c], positions[r, c], handles[r - 1, below], positions[r - 1, below]);
+                        }
+                    }
+            }
             bodies.ApplyEdits();
 
             accumulator = 0f;
@@ -567,6 +582,8 @@ namespace McKrill.Avbd.Samples
             GUILayout.Label("Columns: " + columns + "   Rows: " + rows + "   (" + BlockCount(columns, rows) + " blocks)");
             columns = Mathf.RoundToInt(GUILayout.HorizontalSlider(columns, MinColumns, MaxColumns));
             rows = Mathf.RoundToInt(GUILayout.HorizontalSlider(rows, MinRows, MaxRows));
+            GUILayout.Label("Walls: " + walls + "   (" + BlockCount(columns, rows, walls) + " blocks, " + WallSpacing.ToString("0") + " m apart)");
+            walls = Mathf.RoundToInt(GUILayout.HorizontalSlider(walls, MinWalls, MaxWalls));
 
             // Density, stiffness and the threshold on log scales.
             GUILayout.Label("Block density: " + blockDensity.ToString("0.00") + "   (" + (blockDensity * blockSize.x * blockSize.y * blockSize.z).ToString("0.00") + " kg per block)");

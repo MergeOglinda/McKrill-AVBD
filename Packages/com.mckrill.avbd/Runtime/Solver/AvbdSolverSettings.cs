@@ -45,7 +45,7 @@ namespace McKrill.Avbd
             dt = 1f / 60f,
             gravity = new float3(0f, -10f, 0f),
             iterations = 10,
-            alpha = 0.99f,
+            alpha = 0.925f,
             betaLin = 1e4f,
             betaAng = 100f,
             gamma = 0.999f,
