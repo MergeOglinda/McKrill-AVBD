@@ -234,8 +234,8 @@ namespace McKrill.Avbd
         public int ColorCount => colorCount;
 
         /// <summary>
-        /// Which body colors first (see <see cref="GraphColoringOrder"/>). The default, <see cref="GraphColoringOrder.SlotOrder"/>, gives the
-        /// reference solver's coloring. Changing it recolors at the next <see cref="Rebuild"/>.
+        /// Which body colors first (see <see cref="GraphColoringOrder"/>). The default is <see cref="GraphColoringOrder.Hashed"/> (few rounds);
+        /// <see cref="GraphColoringOrder.SlotOrder"/> gives the reference solver's coloring. Changing it recolors at the next <see cref="Rebuild"/>.
         /// </summary>
         public GraphColoringOrder ColoringOrder
         {
@@ -504,7 +504,8 @@ namespace McKrill.Avbd
         // Stage G: the lists of the per-body constraints, from the joints and springs on the GPU and the manifold pool.
         void BuildLists(int bodyCount)
         {
-            lists.Run(bodies, bodyCount, recordBuffer, uploadedCount, listBuffer, pairCountBuffer, slotBodiesBuffer, contactSlots, ContactBase);
+            lists.Run(bodies, bodyCount, recordBuffer, uploadedCount, listBuffer, pairCountBuffer, slotBodiesBuffer, contactSlots, ContactBase,
+                poolControlBuffer, npArgsBuffer);
         }
 
         /// <summary>Reads the manifold pool back from the GPU (this waits for the GPU): the pairs, their slots and contact counts, the free slots and the overflow count.</summary>

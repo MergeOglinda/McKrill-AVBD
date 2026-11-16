@@ -311,6 +311,8 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)AvbdGraphColoring.ArgsStride, d["AVBD_COLOR_ARGS_STRIDE"]);
             Assert.AreEqual((uint)AvbdGraphColoring.RowGroups, d["AVBD_COLOR_ROW_GROUPS"]);
             Assert.AreEqual((uint)AvbdGraphColoring.PrimalLanes, d["AVBD_PRIMAL_LANES"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.RoundLanes, d["AVBD_COLOR_LANES"]);
+            Assert.AreEqual(0, AvbdConst.GroupSize % AvbdGraphColoring.RoundLanes, "the lanes of a body are in one thread group");
             Assert.AreEqual(0, AvbdConst.GroupSize % AvbdGraphColoring.PrimalLanes, "the lanes of a body are in one thread group");
             Assert.AreEqual(0, AvbdGraphColoring.PrimalLanes & (AvbdGraphColoring.PrimalLanes - 1), "a power of two");
             Assert.AreEqual((uint)GraphColoringOrder.SlotOrder, d["AVBD_COLOR_ORDER_SLOT"]);
@@ -338,6 +340,8 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)AvbdConstraintLists.ControlInvalid, d["AVBD_LIST_CONTROL_INVALID"]);
             Assert.AreEqual((uint)AvbdConstraintLists.ControlWords, d["AVBD_LIST_CONTROL_WORDS"]);
             Assert.AreEqual((uint)AvbdConstraintLists.ScanGroup, d["AVBD_LIST_SCAN_GROUP"]);
+            Assert.AreEqual((uint)AvbdConstraintLists.SortLanes, d["AVBD_LIST_SORT_LANES"]);
+            Assert.AreEqual(0, AvbdConst.GroupSize % AvbdConstraintLists.SortLanes, "the lanes of a body are in one thread group");
             Assert.AreEqual((uint)ContactLayout.MaxContactsPerPair, d["AVBD_LIST_CONTACTS_PER_SLOT"]);
         }
 

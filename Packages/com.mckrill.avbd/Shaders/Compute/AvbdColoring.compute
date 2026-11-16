@@ -16,7 +16,7 @@
 //   ColorReset   zeroes the work buffer
 //   ColorInit    marks the bodies: PENDING (solved) or INVALID
 //   ColorBegin   zeroes the counter of bodies left (one thread, before the last round of a batch)
-//   ColorRound   one coloring round; counts the bodies that are still without a color
+//   ColorRound   one coloring round, AVBD_COLOR_LANES threads per body; counts the bodies that are still without a color
 //   ColorCount   counts the bodies of each color
 //   ColorPlan    one thread; the start of each color (also the bucket cursors) and the indirect dispatch arguments of the primal sweep
 //   ColorBucket  writes the body slots into the color buckets, at the cursors ColorPlan set
@@ -102,41 +102,91 @@ void ColorInit(uint3 id : SV_DispatchThreadID)
     _BodyMeta[slot].state.x = solved ? AVBD_COLOR_PENDING : AVBD_INVALID;
 }
 
+// Partial results of the lanes of a body, see ColorRound.
+groupshared uint g_waiting[AVBD_GROUP_SIZE];
+groupshared uint g_used[AVBD_GROUP_SIZE];
+
+// AVBD_COLOR_LANES adjacent threads per body (item i of the dispatch is lane i % lanes of body i / lanes): lane l looks at the l-th chunk of the
+// neighbor entries of its body and reports two things from a single read of each neighbor's color: whether a neighbor that colors before the
+// body is still waiting, and which of the colors 0..31 the neighbors have. The reports are or-ed in groupshared memory and lane 0 decides. Before,
+// one thread walked the entries twice (the wait check, then the colors), which made a round as slow as the body with the longest list.
+// Every thread reaches the barrier, so nothing returns before it.
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
-void ColorRound(uint3 id : SV_DispatchThreadID)
+void ColorRound(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 {
-    uint slot = _Base + id.x;
-    if (slot >= _Count)
-        return;
-    if (_BodyMeta[slot].state.x != AVBD_COLOR_PENDING)
-        return;
+    uint item = _Base + id.x;
+    uint slot = item / AVBD_COLOR_LANES;
+    uint lane = item % AVBD_COLOR_LANES;
+    uint first = tid - lane; // the thread of lane 0 of this body
 
-    uint2 range = _BodyRange[slot].range.xy;
+    bool pending = false;
+    if (item < _Count)
+        pending = _BodyMeta[slot].state.x == AVBD_COLOR_PENDING;
+    uint2 range = uint2(0u, 0u);
+    uint waiting = 0u;
+    uint used = 0u;
 
-    // Wait for every neighbor that colors before this body. A neighbor that is not solved holds AVBD_INVALID and does not count.
-    uint previous = AVBD_INVALID;
-    for (uint e = 0; e < range.y; e++)
+    if (pending)
     {
-        uint other = OtherBody(range.x + e);
-        if (other == previous)
-            continue;
-        previous = other;
-        if (other == AVBD_INVALID)
-            continue;
-        if (_BodyMeta[other].state.x == AVBD_COLOR_PENDING && ColorsBefore(other, slot))
+        range = _BodyRange[slot].range.xy;
+        uint chunk = (range.y + AVBD_COLOR_LANES - 1u) / AVBD_COLOR_LANES;
+        uint begin = min(lane * chunk, range.y);
+        uint end = min(begin + chunk, range.y);
+
+        // A neighbor that is not solved holds AVBD_INVALID and does not count. A neighbor without a color holds AVBD_COLOR_PENDING, above the last color.
+        uint previous = AVBD_INVALID;
+        for (uint e = begin; e < end; e++)
         {
-            uint ignored;
-            InterlockedAdd(_ColorWork[0], 1u, ignored);
-            return;
+            uint other = OtherBody(range.x + e);
+            if (other == previous)
+                continue;
+            previous = other;
+            if (other == AVBD_INVALID)
+                continue;
+
+            uint c = _BodyMeta[other].state.x;
+            if (c == AVBD_COLOR_PENDING)
+            {
+                if (ColorsBefore(other, slot))
+                    waiting = 1u;
+            }
+            else if (c < 32u)
+                used |= 1u << c;
         }
     }
 
-    // Lowest color that no neighbor has, looking at 32 colors at a time. Neighbors without a color hold values above the last color.
+    g_waiting[tid] = waiting;
+    g_used[tid] = used;
+    GroupMemoryBarrierWithGroupSync();
+
+    if (!pending || lane != 0u)
+        return;
+
+    uint anyWaiting = 0u;
+    uint usedLow = 0u;
+    [unroll]
+    for (uint l = 0u; l < AVBD_COLOR_LANES; l++)
+    {
+        anyWaiting |= g_waiting[first + l];
+        usedLow |= g_used[first + l];
+    }
+
+    // Wait for every neighbor that colors before this body.
+    if (anyWaiting != 0u)
+    {
+        uint ignored;
+        InterlockedAdd(_ColorWork[0], 1u, ignored);
+        return;
+    }
+
+    // Lowest color that no neighbor has. Almost always among the first 32; a body whose neighbors have all of those looks at the next 32 at a time.
     uint color = AVBD_COLOR_MAX;
-    for (uint window = 0; window < AVBD_COLOR_MAX / 32 && color == AVBD_COLOR_MAX; window++)
+    if (usedLow != 0xFFFFFFFFu)
+        color = firstbitlow(~usedLow);
+    for (uint window = 1u; window < AVBD_COLOR_MAX / 32u && color == AVBD_COLOR_MAX; window++)
     {
         uint low = window * 32u;
-        uint used = 0u;
+        uint usedWindow = 0u;
         uint last = AVBD_INVALID;
         for (uint f = 0; f < range.y; f++)
         {
@@ -148,10 +198,10 @@ void ColorRound(uint3 id : SV_DispatchThreadID)
                 continue;
             uint c = _BodyMeta[other].state.x;
             if (c >= low && c < low + 32u)
-                used |= 1u << (c - low);
+                usedWindow |= 1u << (c - low);
         }
-        if (used != 0xFFFFFFFFu)
-            color = low + firstbitlow(~used);
+        if (usedWindow != 0xFFFFFFFFu)
+            color = low + firstbitlow(~usedWindow);
     }
 
     if (color == AVBD_COLOR_MAX)

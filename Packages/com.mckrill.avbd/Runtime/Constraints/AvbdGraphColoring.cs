@@ -53,7 +53,13 @@ namespace McKrill.Avbd
         /// <summary>Mirrors AVBD_PRIMAL_LANES: threads that solve one body in the primal sweep.</summary>
         public const int PrimalLanes = 8;
 
-        /// <summary>Rounds dispatched between two readbacks.</summary>
+        /// <summary>Mirrors AVBD_COLOR_LANES: threads that look at the neighbors of one body in a coloring round.</summary>
+        public const int RoundLanes = 8;
+
+        // Rounds dispatched before the first readback, and between the later ones. A round after the coloring is done finds every body colored
+        // and ends at once, so a long first batch costs little and, for the usual graph (a few rounds with the hashed order), saves the second
+        // wait for the GPU.
+        const int FirstBatchRounds = 16;
         const int RoundsPerBatch = 8;
 
         readonly ComputeShader shader;
@@ -73,7 +79,7 @@ namespace McKrill.Avbd
         static readonly int ArgsId = Shader.PropertyToID("_ColorArgs");
         static readonly int OrderId = Shader.PropertyToID("_Order");
 
-        /// <summary>Rounds the last <see cref="Run"/> dispatched (a multiple of the batch size).</summary>
+        /// <summary>Rounds the last <see cref="Run"/> dispatched (the first batch, then a multiple of the batch size).</summary>
         public int LastRounds { get; private set; }
 
         /// <summary>The work buffer: the body count and the start of every color, as of the last <see cref="Run"/>. The primal sweep reads it.</summary>
@@ -140,16 +146,18 @@ namespace McKrill.Avbd
             // Rounds. Before the last round of a batch the counter of waiting bodies is cleared, so after the batch it holds the
             // number that were still waiting after that round.
             var control = new uint[ControlWords];
-            int limit = bodyCount + RoundsPerBatch; // the highest-priority waiting body colors in every round, so this is never reached
+            int limit = bodyCount + FirstBatchRounds; // the highest-priority waiting body colors in every round, so this is never reached
+            int batch = FirstBatchRounds;
             while (true)
             {
-                for (int i = 0; i < RoundsPerBatch; i++)
+                for (int i = 0; i < batch; i++)
                 {
-                    if (i == RoundsPerBatch - 1)
+                    if (i == batch - 1)
                         shader.Dispatch(beginKernel, 1, 1, 1);
-                    AvbdDispatch.Linear(shader, roundKernel, bodyCount);
+                    AvbdDispatch.Linear(shader, roundKernel, bodyCount * RoundLanes);
                 }
-                LastRounds += RoundsPerBatch;
+                LastRounds += batch;
+                batch = RoundsPerBatch;
 
                 work.GetData(control, 0, 0, ControlWords);
                 if (control[0] == 0u)

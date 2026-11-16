@@ -19,6 +19,9 @@
 #define AVBD_COLOR_STARTS_OFFSET 132
 #define AVBD_COLOR_WORK_WORDS 196
 
+// Threads that look at the neighbors of one body in a coloring round (a power of two that divides AVBD_GROUP_SIZE).
+#define AVBD_COLOR_LANES 8u
+
 // Threads that solve one body in the primal sweep (they stamp its constraints in parallel and add up the partial systems in groupshared
 // memory). A power of two that divides AVBD_GROUP_SIZE, so the lanes of a body are in one group.
 #define AVBD_PRIMAL_LANES 8u
