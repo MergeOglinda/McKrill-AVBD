@@ -20,6 +20,9 @@
 // Bit of _BodyCell.w that marks a static (or kinematic) body in the grid. The cell index itself is below 2^30.
 #define AVBD_BP_STATIC_FLAG 0x80000000u
 
+// Threads of a scan group of the cell counts (the sorted grid): a group scans this many cells, one group scans the sums of the groups.
+#define AVBD_BP_SCAN_GROUP 1024
+
 // Cells are a little larger than the largest possible contact distance (twice the largest radius), so that two spheres that
 // overlap are always in the same or in adjacent cells, even after the rounding of position / cell size.
 #define AVBD_BP_CELL_MARGIN 1.01

@@ -7,6 +7,9 @@ namespace McKrill.Avbd
     /// Stage B: finds the pairs of bodies whose bounding spheres overlap (<c>AvbdBroadphase.compute</c>), the candidates of the
     /// narrowphase. See the shader header for what a pair is and which pairs are left out.
     ///
+    /// The grid is a counting sort of the bodies by hashed cell (count, scan, scatter into packed 32 B records), so the bodies of a cell are
+    /// contiguous in memory and the pair kernel reads them as runs.
+    ///
     /// Solved bodies and the static bodies that fit a grid cell share one grid, so the cost of a solved body does not grow with the total
     /// number of static bodies; static bodies larger than every solved body (a ground slab) are tested against every solved body.
     ///
@@ -31,19 +34,30 @@ namespace McKrill.Avbd
         /// <summary>Mirrors AVBD_BP_STATIC_FLAG: the bit of the grid cell word that marks a static body.</summary>
         public const uint StaticCellFlag = 0x80000000u;
 
+        /// <summary>Mirrors AVBD_BP_SCAN_GROUP: cells per group of the scan of the cell counts.</summary>
+        public const int ScanGroup = 1024;
+
         /// <summary>Bytes of one <see cref="PairRecord"/>.</summary>
         public const int PairStride = 16;
 
         const int MinGridCells = 64;
 
+        // The scan of the cell counts handles at most ScanGroup * ScanGroup cells (a block scan, then one group over the block sums).
+        const int MaxGridCells = ScanGroup * ScanGroup;
+
+        // Bytes of one packed body of the grid (SortedBody in the shader).
+        const int SortedBodyStride = 32;
+
         readonly ComputeShader shader;
-        readonly int resetKernel, clearGridKernel, boundsKernel, insertKernel, pairsDynamicKernel, pairsStaticKernel;
+        readonly int resetKernel, clearGridKernel, boundsKernel, cellKernel, scanBlockKernel, scanTopKernel, scanApplyKernel, scatterKernel, pairsDynamicKernel, pairsStaticKernel;
 
         readonly int bodyCapacity;
         readonly int gridCells;
         GraphicsBuffer control;
-        GraphicsBuffer gridHead;
-        GraphicsBuffer gridNext;
+        GraphicsBuffer cellStart;
+        GraphicsBuffer blockSums;
+        GraphicsBuffer bodyRank;
+        GraphicsBuffer sorted;
         GraphicsBuffer bodyCell;
         GraphicsBuffer staticList;
         GraphicsBuffer pairs;
@@ -61,8 +75,10 @@ namespace McKrill.Avbd
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
         static readonly int ControlId = Shader.PropertyToID("_BpControl");
-        static readonly int GridHeadId = Shader.PropertyToID("_GridHead");
-        static readonly int GridNextId = Shader.PropertyToID("_GridNext");
+        static readonly int CellStartId = Shader.PropertyToID("_CellStart");
+        static readonly int BlockSumsId = Shader.PropertyToID("_BlockSums");
+        static readonly int BodyRankId = Shader.PropertyToID("_BodyRank");
+        static readonly int SortedId = Shader.PropertyToID("_Sorted");
         static readonly int BodyCellId = Shader.PropertyToID("_BodyCell");
         static readonly int StaticListId = Shader.PropertyToID("_StaticList");
         static readonly int PairsId = Shader.PropertyToID("_Pairs");
@@ -85,7 +101,11 @@ namespace McKrill.Avbd
             resetKernel = shader.FindKernel("BpReset");
             clearGridKernel = shader.FindKernel("BpClearGrid");
             boundsKernel = shader.FindKernel("BpBounds");
-            insertKernel = shader.FindKernel("BpInsert");
+            cellKernel = shader.FindKernel("BpCell");
+            scanBlockKernel = shader.FindKernel("BpScanBlock");
+            scanTopKernel = shader.FindKernel("BpScanTop");
+            scanApplyKernel = shader.FindKernel("BpScanApply");
+            scatterKernel = shader.FindKernel("BpScatter");
             pairsDynamicKernel = shader.FindKernel("BpPairsDynamic");
             pairsStaticKernel = shader.FindKernel("BpPairsStatic");
 
@@ -93,15 +113,17 @@ namespace McKrill.Avbd
             DynamicPairCapacity = dynamicPairCapacity;
             StaticPairCapacity = staticPairCapacity;
 
-            // A power of two, at least twice the number of bodies, so that a cell holds few bodies on average.
+            // A power of two, at least twice the number of bodies, so that a cell holds few bodies on average (and at most what the scan handles).
             int cells = MinGridCells;
-            while (cells < bodyCapacity * 2 && cells < (1 << 30))
+            while (cells < bodyCapacity * 2 && cells < MaxGridCells)
                 cells <<= 1;
             gridCells = cells;
 
             control = new GraphicsBuffer(GraphicsBuffer.Target.Structured, ControlWords, sizeof(uint));
-            gridHead = new GraphicsBuffer(GraphicsBuffer.Target.Structured, gridCells, sizeof(uint));
-            gridNext = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
+            cellStart = new GraphicsBuffer(GraphicsBuffer.Target.Structured, gridCells + 1, sizeof(uint));
+            blockSums = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (gridCells + ScanGroup - 1) / ScanGroup + 1, sizeof(uint));
+            bodyRank = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
+            sorted = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, SortedBodyStride);
             bodyCell = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, 4 * sizeof(uint));
             staticList = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
             pairs = new GraphicsBuffer(GraphicsBuffer.Target.Structured, dynamicPairCapacity + staticPairCapacity, PairStride);
@@ -148,12 +170,18 @@ namespace McKrill.Avbd
             GraphicsBuffer records = constraints != null ? constraints.Records : emptyRecords;
             GraphicsBuffer list = constraints != null ? constraints.List : emptyList;
 
-            foreach (int kernel in new[] { resetKernel, clearGridKernel, boundsKernel, insertKernel, pairsDynamicKernel, pairsStaticKernel })
+            foreach (int kernel in new[]
+            {
+                resetKernel, clearGridKernel, boundsKernel, cellKernel, scanBlockKernel, scanTopKernel, scanApplyKernel, scatterKernel,
+                pairsDynamicKernel, pairsStaticKernel,
+            })
             {
                 bodies.BindTo(shader, kernel);
                 shader.SetBuffer(kernel, ControlId, control);
-                shader.SetBuffer(kernel, GridHeadId, gridHead);
-                shader.SetBuffer(kernel, GridNextId, gridNext);
+                shader.SetBuffer(kernel, CellStartId, cellStart);
+                shader.SetBuffer(kernel, BlockSumsId, blockSums);
+                shader.SetBuffer(kernel, BodyRankId, bodyRank);
+                shader.SetBuffer(kernel, SortedId, sorted);
                 shader.SetBuffer(kernel, BodyCellId, bodyCell);
                 shader.SetBuffer(kernel, StaticListId, staticList);
                 shader.SetBuffer(kernel, PairsId, pairs);
@@ -170,7 +198,15 @@ namespace McKrill.Avbd
 
             AvbdDispatch.Linear(shader, clearGridKernel, gridCells);
             AvbdDispatch.Linear(shader, boundsKernel, count);
-            AvbdDispatch.Linear(shader, insertKernel, count);
+            AvbdDispatch.Linear(shader, cellKernel, count);
+
+            // Scan of the cell counts into the start of every cell: blocks of ScanGroup cells, then the block sums, then the offsets (one extra item
+            // for the total after the last cell).
+            shader.Dispatch(scanBlockKernel, (gridCells + ScanGroup - 1) / ScanGroup, 1, 1);
+            shader.Dispatch(scanTopKernel, 1, 1, 1);
+            AvbdDispatch.Linear(shader, scanApplyKernel, gridCells + 1);
+
+            AvbdDispatch.Linear(shader, scatterKernel, count);
             AvbdDispatch.Linear(shader, pairsDynamicKernel, count);
             AvbdDispatch.Linear(shader, pairsStaticKernel, count);
         }
@@ -222,8 +258,10 @@ namespace McKrill.Avbd
                 return;
             disposed = true;
             Release(ref control);
-            Release(ref gridHead);
-            Release(ref gridNext);
+            Release(ref cellStart);
+            Release(ref blockSums);
+            Release(ref bodyRank);
+            Release(ref sorted);
             Release(ref bodyCell);
             Release(ref staticList);
             Release(ref pairs);

@@ -263,6 +263,35 @@ namespace McKrill.Avbd.Tests
             }
         }
 
+        // A grid of 8192 cells, which the scan of the cell counts handles in 8 blocks, with thousands of bodies: many cells share a hash index, many
+        // bodies share a cell, some bodies are static, some are large.
+        [Test]
+        public void Gpu_MatchesTheOracle_OnAThousandsOfBodiesScene_WithSeveralScanBlocks()
+        {
+            RequireCompute();
+            const int capacity = 4096;
+            using (var buffers = new AvbdBodyBuffers(capacity))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), capacity, 1 << 18, 1 << 16))
+            {
+                var rng = new System.Random(23);
+                for (int i = 0; i < 3000; i++)
+                {
+                    float s = Range(rng, 0.5f, 1.5f);
+                    float density = i % 9 == 0 ? 0f : 1f;                  // one in nine is static
+                    if (i % 400 == 7)
+                        s *= 6f;                                           // a few large bodies (static ones are too big for a cell, or not)
+                    buffers.Spawn(BodyDescriptor.Box(new float3(s, s * 0.6f, s * 1.4f), density, new float3(Range(rng, 0f, 24f), Range(rng, 0f, 6f), Range(rng, 0f, 24f))));
+                }
+
+                broadphase.Run(buffers, null);
+                SortedSet<ulong> got = ToSet(broadphase.ReadPairs());
+                SortedSet<ulong> expected = CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0);
+                Assert.IsFalse(broadphase.Overflowed);
+                Assert.Greater(expected.Count, 2000, "the scene should have many pairs");
+                AssertSameSets(expected, got, "thousands of bodies");
+            }
+        }
+
         [Test]
         public void Gpu_SkipsPairsJoinedByAJointOrSpring_UntilTheListsDropABrokenOne_ButNotByAContact()
         {

@@ -1,11 +1,14 @@
-// Stage B: broadphase. Finds the pairs of bodies whose bounding spheres overlap, with a hashed uniform grid.
+// Stage B: broadphase. Finds the pairs of bodies whose bounding spheres overlap, with a hashed uniform grid that is sorted by cell.
 //
 // A body's bounding sphere is centered on its position and has the radius |size| / 2 (half the box diagonal), which is what the
 // reference solver's broadphase uses: two bodies are a pair when |dp|^2 <= (rA + rB)^2 and no constraint joins them.
 //
 // Bodies are "solved" (not free, not kinematic, mass above zero) or "static" (live, but not solved: mass 0 or kinematic).
 //   dynamic-dynamic pairs   found with the grid: every solved body sits in the cell of its position, and a body looks at its own cell
-//                           and the 26 around it. The cell size is a little more than twice the largest radius of a solved body, so a
+//                           and the 26 around it. The grid is a counting sort of the bodies by (hashed) cell: the bodies of a cell are
+//                           contiguous in _Sorted, each with its position, radius, cell and slot packed in one 32 B record, so a cell is read
+//                           as one run and a body's data is not gathered from four buffers. The pair kernel runs over the sorted array,
+//                           so the threads of a group are bodies of the same cell and read the same runs. The cell size is a little more than twice the largest radius of a solved body, so a
 //                           pair is never missed.
 //   dynamic-static pairs    a static body whose radius is at most the largest radius of a solved body (a "small" static body) sits in the
 //                           same grid, flagged (AVBD_BP_STATIC_FLAG in _BodyCell.w), and a solved body finds it in the same walk over the 27
@@ -22,24 +25,40 @@
 //
 // Kernels, in the order the host runs them:
 //   BpReset          zeroes the control words
-//   BpClearGrid      empties the grid cells
+//   BpClearGrid      zeroes the cell counts
 //   BpBounds         largest radius of the solved bodies
-//   BpInsert         puts every solved body and every small static body into the grid (a linked list per cell, built with an atomic
-//                    exchange), and the large static bodies into the list
-//   BpPairsDynamic   a solved body walks the 27 cells: dynamic-dynamic pairs and the dynamic-static pairs of the small static bodies
+//   BpCell           the cell of every solved body and small static body: counts it in its (hashed) cell (the atomic gives its rank
+//                    inside the cell) and stores the cell; the large static bodies go into the list
+//   BpScanBlock      scan of the cell counts, 1: every group scans AVBD_BP_SCAN_GROUP cells; writes the sum of the block
+//   BpScanTop        scan, 2: one group scans the block sums; writes the total
+//   BpScanApply      scan, 3: start of every cell (and, one past the last cell, the number of bodies in the grid)
+//   BpScatter        writes the packed record of every body to start of its cell + its rank
+//   BpPairsDynamic   a solved body (one thread per sorted entry) walks the runs of the 27 cells: dynamic-dynamic pairs and the
+//                    dynamic-static pairs of the small static bodies
 //   BpPairsStatic    dynamic-static pairs of the large static bodies
 // Mirrored by Reference/Stages/CpuBroadphase.cs, which the tests compare against.
 
 #pragma kernel BpReset
 #pragma kernel BpClearGrid
 #pragma kernel BpBounds
-#pragma kernel BpInsert
+#pragma kernel BpCell
+#pragma kernel BpScanBlock
+#pragma kernel BpScanTop
+#pragma kernel BpScanApply
+#pragma kernel BpScatter
 #pragma kernel BpPairsDynamic
 #pragma kernel BpPairsStatic
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBroadphaseParams.hlsl"
+
+// 32 B: everything a pair test needs about a body of the grid, so that the run of a cell is read without gathering from the body buffers.
+struct SortedBody
+{
+    float4 positionRadius; // xyz = position, w = bounding-sphere radius
+    uint4 cellSlot;        // xyz = cell coordinates (int bits), w = slot | AVBD_BP_STATIC_FLAG for a static body
+};
 
 StructuredBuffer<BodyStateRecord>   _BodyState;
 StructuredBuffer<BodyMassRecord>    _BodyMass;
@@ -50,8 +69,10 @@ StructuredBuffer<ConstraintRecord>  _Constraints;
 StructuredBuffer<uint>              _ConstraintList;
 
 RWStructuredBuffer<uint>            _BpControl;
-RWStructuredBuffer<uint>            _GridHead;   // per grid cell: the first body of its list, or AVBD_INVALID
-RWStructuredBuffer<uint>            _GridNext;   // per body: the next body in its cell's list
+RWStructuredBuffer<uint>            _CellStart;  // gridCells + 1 words: the number of bodies in a cell while counting, then the start of the cell's run in _Sorted (and the total at the end)
+RWStructuredBuffer<uint>            _BlockSums;  // per scan block: its sum, then its offset; one more word at the end: the total
+RWStructuredBuffer<uint>            _BodyRank;   // per body: its place inside its cell's run
+RWStructuredBuffer<SortedBody>      _Sorted;     // the bodies of the grid, grouped by cell
 RWStructuredBuffer<uint4>           _BodyCell;   // per body: xyz = cell coordinates (int bits), w = grid cell index (| AVBD_BP_STATIC_FLAG for a static body), or AVBD_INVALID if not in the grid
 RWStructuredBuffer<uint>            _StaticList;   // the large static bodies
 RWStructuredBuffer<PairRecord>      _Pairs;      // bin 0 (dynamic-dynamic) at [0, _DynamicPairCapacity), then bin 1 (dynamic-static)
@@ -161,7 +182,7 @@ void BpClearGrid(uint3 id : SV_DispatchThreadID)
     uint cell = _Base + id.x;
     if (cell >= _Count)
         return;
-    _GridHead[cell] = AVBD_INVALID;
+    _CellStart[cell] = 0u;
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
@@ -183,7 +204,7 @@ void BpBounds(uint3 id : SV_DispatchThreadID)
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
-void BpInsert(uint3 id : SV_DispatchThreadID)
+void BpCell(uint3 id : SV_DispatchThreadID)
 {
     uint slot = _Base + id.x;
     if (slot >= _Count)
@@ -219,24 +240,107 @@ void BpInsert(uint3 id : SV_DispatchThreadID)
     uint index = HashCell(cell);
     _BodyCell[slot] = uint4(asuint(cell), index | flag);
 
-    uint previous;
-    InterlockedExchange(_GridHead[index], slot, previous);
-    _GridNext[slot] = previous;
+    uint rank;
+    InterlockedAdd(_CellStart[index], 1u, rank);
+    _BodyRank[slot] = rank;
+}
+
+groupshared uint g_scan[AVBD_BP_SCAN_GROUP];
+
+// Inclusive scan of one value per thread of the group (Hillis-Steele). Every thread of the group must call it.
+uint GroupScanInclusive(uint t, uint value)
+{
+    g_scan[t] = value;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 1u; stride < AVBD_BP_SCAN_GROUP; stride <<= 1)
+    {
+        uint add = t >= stride ? g_scan[t - stride] : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        g_scan[t] += add;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    return g_scan[t];
+}
+
+// One group per AVBD_BP_SCAN_GROUP cells: the offset of every cell inside its block replaces its count, the sum of the block goes to _BlockSums.
+[numthreads(AVBD_BP_SCAN_GROUP, 1, 1)]
+void BpScanBlock(uint3 id : SV_DispatchThreadID, uint t : SV_GroupIndex, uint3 gid : SV_GroupID)
+{
+    uint cell = id.x;
+    bool inRange = cell <= _GridMask;
+    uint count = inRange ? _CellStart[cell] : 0u;
+    uint inclusive = GroupScanInclusive(t, count);
+
+    if (inRange)
+        _CellStart[cell] = inclusive - count;
+    if (t == AVBD_BP_SCAN_GROUP - 1u)
+        _BlockSums[gid.x] = inclusive;
+}
+
+// One group: the exclusive scan of the block sums (at most AVBD_BP_SCAN_GROUP blocks, which the host guarantees) and the total after the last one.
+[numthreads(AVBD_BP_SCAN_GROUP, 1, 1)]
+void BpScanTop(uint t : SV_GroupIndex)
+{
+    uint blocks = (_GridMask + AVBD_BP_SCAN_GROUP) / AVBD_BP_SCAN_GROUP; // (cells + group - 1) / group
+    bool inRange = t < blocks;
+    uint sum = inRange ? _BlockSums[t] : 0u;
+    uint inclusive = GroupScanInclusive(t, sum);
+
+    if (inRange)
+        _BlockSums[t] = inclusive - sum;
+    if (t == AVBD_BP_SCAN_GROUP - 1u)
+        _BlockSums[blocks] = inclusive;
+}
+
+// Items [0, cells]: the start of every cell, and the number of bodies in the grid in the word after the last cell.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BpScanApply(uint3 id : SV_DispatchThreadID)
+{
+    uint cell = _Base + id.x;
+    if (cell >= _Count)
+        return;
+
+    uint blocks = (_GridMask + AVBD_BP_SCAN_GROUP) / AVBD_BP_SCAN_GROUP;
+    if (cell > _GridMask)
+        _CellStart[cell] = _BlockSums[blocks];
+    else
+        _CellStart[cell] += _BlockSums[cell / AVBD_BP_SCAN_GROUP];
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
-void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
+void BpScatter(uint3 id : SV_DispatchThreadID)
 {
-    uint self = _Base + id.x;
-    if (self >= _Count)
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
         return;
 
-    uint4 selfCell = _BodyCell[self];
-    if (selfCell.w == AVBD_INVALID || (selfCell.w & AVBD_BP_STATIC_FLAG))
-        return; // not in the grid (free, not finite), or a static body: only solved bodies look for pairs
-    float3 selfPosition = _BodyState[self].position.xyz;
-    float selfRadius = Radius(self);
-    int3 cell = asint(selfCell.xyz);
+    uint4 cell = _BodyCell[slot];
+    if (cell.w == AVBD_INVALID)
+        return; // not in the grid
+
+    SortedBody record;
+    record.positionRadius = float4(_BodyState[slot].position.xyz, Radius(slot));
+    record.cellSlot = uint4(cell.xyz, slot | (cell.w & AVBD_BP_STATIC_FLAG));
+    _Sorted[_CellStart[cell.w & ~AVBD_BP_STATIC_FLAG] + _BodyRank[slot]] = record;
+}
+
+// One thread per entry of the sorted array (bodies of the same cell are neighbors, so a group reads the same runs). A static entry does nothing:
+// only solved bodies search.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
+{
+    uint entry = _Base + id.x;
+    if (entry >= _Count || entry >= _CellStart[_GridMask + 1u])
+        return;
+
+    SortedBody me = _Sorted[entry];
+    if (me.cellSlot.w & AVBD_BP_STATIC_FLAG)
+        return;
+
+    uint self = me.cellSlot.w;
+    float3 selfPosition = me.positionRadius.xyz;
+    float selfRadius = me.positionRadius.w;
+    int3 cell = asint(me.cellSlot.xyz);
 
     // A pair of two solved bodies is found by the one with the higher slot, which is body A. A static body never looks, so the pair of a solved
     // and a static body is found once, by the solved body.
@@ -245,22 +349,25 @@ void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
     for (int dx = -1; dx <= 1; dx++)
     {
         int3 neighborCell = cell + int3(dx, dy, dz);
-        uint other = _GridHead[HashCell(neighborCell)];
-        while (other != AVBD_INVALID)
+        uint index = HashCell(neighborCell);
+        uint end = _CellStart[index + 1u];
+        for (uint k = _CellStart[index]; k < end; k++)
         {
+            SortedBody other = _Sorted[k];
             // A cell index can be shared by several cells; only the bodies of the cell asked for count, so no body is seen twice.
-            uint4 otherCell = _BodyCell[other];
-            bool otherStatic = (otherCell.w & AVBD_BP_STATIC_FLAG) != 0u;
-            if ((otherStatic || other < self) && all(asint(otherCell.xyz) == neighborCell)
-                && SpheresOverlap(selfPosition, selfRadius, _BodyState[other].position.xyz, Radius(other))
-                && !Constrained(self, other))
+            if (!all(asint(other.cellSlot.xyz) == neighborCell))
+                continue;
+            bool otherStatic = (other.cellSlot.w & AVBD_BP_STATIC_FLAG) != 0u;
+            uint otherSlot = other.cellSlot.w & ~AVBD_BP_STATIC_FLAG;
+            if ((otherStatic || otherSlot < self)
+                && SpheresOverlap(selfPosition, selfRadius, other.positionRadius.xyz, other.positionRadius.w)
+                && !Constrained(self, otherSlot))
             {
                 if (otherStatic)
-                    Emit(max(self, other), min(self, other), AVBD_PAIR_DYNAMIC_STATIC);
+                    Emit(max(self, otherSlot), min(self, otherSlot), AVBD_PAIR_DYNAMIC_STATIC);
                 else
-                    Emit(self, other, AVBD_PAIR_DYNAMIC_DYNAMIC);
+                    Emit(self, otherSlot, AVBD_PAIR_DYNAMIC_DYNAMIC);
             }
-            other = _GridNext[other];
         }
     }
 }
