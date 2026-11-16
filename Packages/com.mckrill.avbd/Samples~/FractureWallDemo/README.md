@@ -40,6 +40,7 @@ The panel also shows how many joints have broken, out of all.
 
 ## The wall
 
+- **Walls.** The *Walls* slider (1 to 10, default 1) builds several identical walls one behind the other along z, 4 m apart (the first stands in front, nearest the starting camera). Like the other wall settings it takes effect on **Reset**. The block, joint and body counts grow with the number of walls, so a scene of many walls is a bigger scene for the solver.
 - Blocks are 1 x 0.5 x 0.5 m in a running bond: odd rows are shifted by half a block, so every block rests on two blocks of the row under it. The wall stands on a static ground slab whose top is the plane y = 0. **The bottom row is immobile** (static bodies, no mass); the blocks of the row above are joined to it, and its blocks have no joints to each other.
 - Every block has a ball-socket joint to the block on its left and to the two blocks under it, at the middle of the face they share. Each joint has a **rigid angle lock**. The fracture test looks at the angular multiplier, and only a rigid angle lock stores a multiplier, so the angle lock is not an option in the panel.
 - A joint breaks in the step its angular multiplier exceeds the threshold. The next step removes it from the solver's lists, and from the step after that its two blocks collide with each other again, like any other pair (the reference solver's timing). Blocks that were joined do not collide while the joint holds.
