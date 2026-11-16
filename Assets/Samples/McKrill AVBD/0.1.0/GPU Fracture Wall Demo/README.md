@@ -50,4 +50,4 @@ The panel also shows how many joints have broken, out of all.
 
 - The wall is limited to 396 blocks because that is the largest size that was tried. The constraint lists are built on the GPU (stage G) and nothing is read back for them; the graph coloring still reads two small things back every step (the number of colors), which is the remaining stall.
 - The "joints broken" counter is a counter on the GPU that the panel reads once per step.
-- The demo reads the poses back every frame and draws one cube per body, as the pyramid demo does.
+- **Drawing is instanced and stays on the GPU.** One `Graphics.RenderMeshPrimitives` call draws every box with the package's `AvbdInstancedBoxes` shader, which reads each box's pose from the solver's body state buffer: no pose readback and no GameObject per body (the pyramid demo still does both). The shader is unlit-style, with one directional light (the scene's sun if there is one) and ambient, so it works in the built-in pipeline and in URP, but **it has no shadows**. A player build needs the shader included, which it is: the package's shader set references it.
