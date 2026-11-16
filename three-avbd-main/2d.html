@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>2D physics playground · three-avbd</title>
+    <meta name="description" content="The 2D scenes of Augmented Vertex Block Descent (SIGGRAPH 2025): the authors' demo ported to TypeScript, on the CPU or entirely on the GPU in your browser." />
+    <link rel="stylesheet" href="/src/ui/page.css" />
+    <style>
+      #hud {
+        left: 16px;
+        bottom: 16px;
+        max-width: calc(100vw - 48px);
+        padding: 6px 10px;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre-wrap;
+        color: var(--muted);
+        pointer-events: none;
+      }
+      #hud:empty {
+        display: none;
+      }
+      @media (max-width: 760px) {
+        #hud {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="card" class="panel">
+      <div id="card-head">
+        <h1><img src="/favicon.svg" width="28" height="28" alt="" style="vertical-align:middle;margin-right:8px">three-avbd · 2D</h1>
+        <button id="card-toggle" type="button" title="Hide">–</button>
+      </div>
+      <div class="body">
+        <p>
+          The 2D scenes of <em>Augmented Vertex Block Descent</em> (Giles, Diaz &amp; Yuksel, SIGGRAPH 2025): the
+          authors' demo ported to TypeScript, on the CPU reference or entirely on your GPU.
+        </p>
+        <p class="pointer-only">Drag bodies to pull them · right-click drops a box · wheel zooms, space or shift + drag pans</p>
+        <p class="touch-only">Drag bodies to pull them · pinch to zoom</p>
+        <p id="no-webgpu" class="warning" hidden>
+          This browser doesn't support WebGPU, so the scenes run on the CPU solvers and the GPU-only scenes don't
+          run. For those use a recent Chrome or Edge, or Safari 26 or later.
+        </p>
+        <div class="links">
+          <a href="/">3D demo</a>
+          <a href="https://doi.org/10.1145/3731195" target="_blank" rel="noopener">Paper</a>
+          <a href="results.html">3D results vs the paper</a>
+          <a href="examples/index.html">Demo gallery</a>
+        </div>
+        <p class="credits">
+          Ported from the authors'
+          <a href="https://github.com/savant117/avbd-demo2d" target="_blank" rel="noopener">avbd-demo2d</a> (MIT).
+          Rendering with three.js. <a href="THIRD_PARTY_NOTICES.md">Notices</a>
+        </p>
+      </div>
+    </div>
+    <div id="hud" class="panel"></div>
+    <div id="notice" class="panel notice" role="status" hidden></div>
+    <script type="module" src="/src/app2d/main.ts"></script>
+  </body>
+</html>

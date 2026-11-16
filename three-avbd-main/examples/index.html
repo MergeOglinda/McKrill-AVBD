@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Demo gallery · three-avbd</title>
+    <meta name="description" content="Every three-avbd demo, scene collection, Rapier comparison, example and benchmark in one place, with search and filters." />
+  </head>
+  <body>
+    <a class="skip" href="#results">Skip to the gallery</a>
+    <header class="masthead">
+      <div class="wrap">
+        <p class="crumbs"><a href="../index.html">← 3D demo</a> · <a href="../2d.html">2D demo</a></p>
+        <div class="brand">
+          <img src="/favicon.svg" width="44" height="44" alt="" />
+          <div>
+            <h1>Demo gallery</h1>
+            <p class="lede">three-avbd: GPU rigid-body physics for Three.js. Play, compare with Rapier, or build your own scene.</p>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <div id="filters" class="toolbar" role="search" aria-label="Search the gallery" hidden>
+        <div class="search-row">
+          <label class="sr-only" for="search">Search demos and scenes</label>
+          <input id="search" type="search" placeholder="Search scenes, e.g. bridge, torus, 28k" autocomplete="off" spellcheck="false" maxlength="200" />
+          <kbd class="hint" aria-hidden="true">/</kbd>
+          <span id="count" class="count" role="status" aria-live="polite"></span>
+          <button id="clear" type="button" class="btn" hidden>Clear</button>
+        </div>
+      </div>
+      <div id="filter-rows" class="filter-rows" hidden></div>
+
+      <div id="start"></div>
+
+      <noscript>
+        <p>The gallery needs JavaScript. Direct links: <a href="../index.html">3D demo</a> · <a href="../2d.html">2D demo</a> ·
+          <a href="../sdf.html">SDF playground</a> · <a href="./interlocking-rapier.html">Interlocking study (Rapier)</a> ·
+          <a href="./interlocking-avbd.html">(AVBD)</a> · <a href="../compare-side.html">Side by side with Rapier</a> · <a href="./basic.html">Basic world</a>.</p>
+      </noscript>
+
+      <div id="results" tabindex="-1"></div>
+
+      <footer class="foot-notes">
+        <p>Thumbnails are illustrations of each scene, not screenshots or measured results. Comparisons are observations of
+          the same physical intent in each engine, not certification that either engine is faster or more correct. Planned
+          studies are not listed until they exist.</p>
+        <p><a href="https://github.com/sbobyn/three-avbd">Source on GitHub</a> · <a href="https://github.com/sbobyn/three-avbd/blob/main/docs/USER_GUIDE.md">User guide</a> ·
+          <a href="https://github.com/sbobyn/three-avbd/blob/main/docs/COMPARISON.md">Rapier comparison notes</a> · <a href="../THIRD_PARTY_NOTICES.md">Notices</a></p>
+      </footer>
+    </main>
+    <script type="module" src="/src/gallery/main.ts"></script>
+  </body>
+</html>

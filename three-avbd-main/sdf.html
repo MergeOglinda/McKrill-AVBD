@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head><link rel="icon" type="image/svg+xml" href="/favicon.svg"><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Interactive non-convex SDF collisions on the GPU. Grab rings, twisted solids and baked meshes in three-avbd."><title>SDF playground · three-avbd</title></head>
+<body>
+<header><a class="brand" href="/"><img src="/favicon.svg" width="24" height="24" alt="">three-avbd</a><span>SDF / INTERACTIVE STUDY</span><nav aria-label="Related pages"><a href="/examples/">Demo gallery</a><a href="/sdf-gears.html">Gear train</a><a href="/sdf-released.html">SDF collision studies</a></nav></header>
+<aside aria-label="Simulation controls">
+  <div class="eyebrow">GPU PHYSICS · EXPERIMENTAL</div>
+  <h1>Beyond convex.</h1><p>Real contact. Through holes, around curves, across baked meshes.</p>
+  <label>Scene<select id="preset"><option value="rings">01 · Rings</option><option value="warps">02 · Twisted solids</option><option value="gears">03 · Baked gears</option></select></label>
+  <div class="row"><button id="pause" class="primary">Play</button><button id="reset">Reset</button><button id="view" aria-label="Frame the scene" title="Frame the scene">Frame</button></div>
+  <output id="status" role="status">Preparing fields…</output>
+  <div class="section-heading">Add to the scene</div>
+  <div class="row spawn-row"><label class="sr-only" for="shape">Spawn shape</label><select id="shape"><option value="rings">Ring</option><option value="warps">Twisted solid</option><option value="gears">Baked gear</option></select><button id="spawn">Drop one +</button></div>
+  <label class="check"><input id="contacts" type="checkbox"> Contact points & normals</label>
+  <section class="performance" aria-label="Browser performance">
+    <div class="section-heading">On your device</div>
+    <output id="performance">Press Play to explore.</output>
+    <div class="row"><button id="measure" title="Warm up for 1 second, sample browser frames for 4 seconds, then pause">Measure 4s</button><button id="save-performance" disabled>Save JSON</button></div>
+    <details><summary>Measurement details</summary><p class="hint">Includes rendering, physics and enabled overlays. Reports browser frame cadence and simulation speed separately. One second of warmup; pauses after capture.</p><pre id="performance-data">No capture yet.</pre></details>
+  </section>
+  <p class="hint instructions"><kbd>Drag</kbd> grab a body<br><kbd>Right-drag</kbd> orbit · <kbd>Scroll</kbd> zoom</p>
+  <details><summary>About this study</summary><p class="hint">12 initial bodies · 36-body limit. Analytic rings and twisted boxes; a resolution-32 mesh bake for the gears. Approximate box mass/inertia. This playground demonstrates collision geometry, not paper benchmark performance.</p><a href="https://github.com/sbobyn/three-avbd/blob/main/docs/SDF_WORLD.md">API & limitations ↗</a></details>
+</aside>
+<script type="module" src="/src/sdf-showcase/main.ts"></script>
+</body></html>

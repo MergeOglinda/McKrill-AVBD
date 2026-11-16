@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head><link rel="icon" type="image/svg+xml" href="/favicon.svg"><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Explore eleven released SDF collision scenes with GPU AVBD, original mass properties and an optional CPU-reference comparison."><title>SDF collision studies · three-avbd</title></head>
+<body>
+<header><a class="brand" href="/"><img src="/favicon.svg" width="24" height="24" alt="">three-avbd</a><span>SDF / COLLISION STUDIES</span><nav aria-label="Related pages"><a href="/examples/">Demo gallery</a><a href="/sdf.html">SDF playground</a></nav></header>
+<aside aria-label="Scene controls">
+  <div class="eyebrow">ORIGINAL ASSETS · GPU AVBD</div>
+  <h1>SDF collision studies.</h1><p>Complex geometry. Original mass and inertia. Explore the method at a useful scale.</p>
+  <label>Scene<select id="scene"><option value="0">Box Stack · 28 bodies</option><option value="1">Gear Stack · 10 bodies</option><option value="2">Falling Boxes · 12 bodies</option><option value="3">Falling Boxes: Bend · 12 bodies</option><option value="4">Falling Boxes: Twist · 12 bodies</option><option value="5">Falling Boxes: Displace · 12 bodies</option><option value="6">Pile of Chairs · 27 bodies</option><option value="7">Spiky Wheel · 11 bodies</option><option value="8">Cows on Spikes · 19 bodies</option><option value="9">Bunny Pile · 27 bodies</option><option value="10">Primitives · 48 bodies</option></select></label>
+  <label>Contact settings<select id="profile"><option value="mesh-quality">Mesh quality</option><option value="reference">Released settings</option></select></label>
+  <div class="row"><button id="run" class="primary" disabled>Play</button><button id="reset" disabled>Reset</button><button id="view">Frame</button></div>
+  <output id="status" role="status">Loading reference assets…</output>
+  <section class="performance" aria-label="Browser performance">
+    <div class="section-heading">On your device</div>
+    <output id="performance">Press Play to explore.</output>
+    <div class="row"><button id="measure" disabled title="Warm up for 1 second, sample browser frames for 4 seconds, then pause">Measure 4s</button><button id="save-performance" disabled>Save JSON</button></div>
+    <details><summary>Measurement details</summary><p class="hint">Includes physics and rendering. Simulation speed is reported separately from frame cadence. Capture pauses automatically. Reference readbacks must be off.</p><pre id="performance-data">No capture yet.</pre></details>
+  </section>
+  <p class="hint instructions"><kbd>Drag</kbd> orbit · <kbd>Scroll</kbd> zoom</p>
+  <details id="comparison-details"><summary>Reference comparison</summary>
+    <label class="check"><input id="comparison" type="checkbox"> Measure against CPU reference</label>
+    <p id="reference-note" class="hint">Smooth playback · reference readbacks off</p>
+    <table><thead><tr><th>Metric</th><th>GPU AVBD</th><th>CPU SI</th></tr></thead><tbody id="metrics"></tbody></table>
+    <p class="hint">This mode resets the scene and reads back every substep. Stops after six simulated seconds. It is for numerical inspection, not FPS measurement.</p>
+  </details>
+  <details><summary>Method & limitations</summary><p class="hint">Four substeps, 20 AVBD iterations and five candidates per pair. Mesh quality activates contacts earlier and adds mesh vertex witnesses. Mesh fields retain the original resolution-100 bake. The CPU reference uses sequential impulses; trajectories differ. This is not a reproduction of the paper's GPU performance.</p><a href="https://github.com/sbobyn/three-avbd/blob/main/docs/SDF_WORLD.md">API & limitations ↗</a></details>
+</aside>
+<script type="module" src="/src/sdf-released/main.ts"></script>
+</body></html>
