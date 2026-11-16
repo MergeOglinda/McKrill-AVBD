@@ -37,7 +37,7 @@ The **GPU Pyramid Demo** sample builds a pyramid of 140 or more boxes on the GPU
 | `Editor/` | `McKrill.Avbd.Editor` | Editor-only code. |
 | `Shaders/Compute/` | | One `.compute` file per pipeline stage. |
 | `Shaders/Include/` | | Shared `.hlsl` headers, included by package path. |
-| `Shaders/Rendering/` | | URP-compatible draw shaders. |
+| `Shaders/Rendering/` | | Draw shaders (`AvbdInstancedBoxes`: boxes drawn straight from the body state buffer, built-in pipeline and URP). |
 | `Tests/` | `McKrill.Avbd.Tests.*` | Edit Mode and Play Mode tests. |
 | `Samples~/` | | Importable samples (not compiled until imported). |
 
