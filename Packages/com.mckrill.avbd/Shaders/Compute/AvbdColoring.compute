@@ -19,7 +19,7 @@
 //   ColorRound   one coloring round, AVBD_COLOR_LANES threads per body; counts the bodies that are still without a color
 //   ColorCount   counts the bodies of each color
 //   ColorPlan    one thread; the start of each color (also the bucket cursors) and the indirect dispatch arguments of the primal sweep
-//   ColorBucket  writes the body slots into the color buckets, at the cursors ColorPlan set
+//   ColorBucket  writes the body slots into the color buckets, at the cursors ColorPlan set; visits the bodies in the Morton order of stage S if the host has one
 // Mirrored by Reference/Stages/CpuGraphColoring.cs, which the tests compare against.
 
 #pragma kernel ColorReset
@@ -40,6 +40,7 @@ StructuredBuffer<BodyRangeRecord>   _BodyRange;
 StructuredBuffer<ConstraintRecord>  _Constraints;
 StructuredBuffer<uint>              _ConstraintList;
 StructuredBuffer<uint>              _ConstraintOther; // per list entry: the body on the other side (stage G)
+StructuredBuffer<uint>              _BodyOrder;       // stage S: the slots in Morton order, a permutation of [0, _Count). Read only if _UseBodyOrder is set (ColorBucket)
 RWStructuredBuffer<uint>            _ColorBodies;
 RWStructuredBuffer<uint>            _ColorWork;
 RWByteAddressBuffer                 _ColorArgs;  // AVBD_COLOR_MAX x (groups x, groups y, 1): an indirect arguments buffer
@@ -47,6 +48,7 @@ RWByteAddressBuffer                 _ColorArgs;  // AVBD_COLOR_MAX x (groups x, 
 uint _Base;
 uint _Count; // end of the range: items [_Base, _Count)
 uint _Order; // AVBD_COLOR_ORDER_*
+uint _UseBodyOrder; // 1 if _BodyOrder holds a permutation of the slots below _Count
 
 uint HashSlot(uint x)
 {
@@ -251,9 +253,10 @@ void ColorPlan(uint3 id : SV_DispatchThreadID)
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void ColorBucket(uint3 id : SV_DispatchThreadID)
 {
-    uint slot = _Base + id.x;
-    if (slot >= _Count)
+    uint item = _Base + id.x;
+    if (item >= _Count)
         return;
+    uint slot = _UseBodyOrder != 0u ? _BodyOrder[item] : item; // Morton order: the bodies of a color end up next to their neighbors in space
 
     uint color = _BodyMeta[slot].state.x;
     if (color < AVBD_COLOR_MAX)

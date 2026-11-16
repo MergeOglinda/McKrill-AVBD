@@ -17,6 +17,7 @@ namespace McKrill.Avbd
         AvbdConstraintBuffers constraints;
         bool ownsConstraints;
         AvbdBroadphase broadphase;
+        AvbdMortonSort mortonSort;
         readonly int predictKernel;
         readonly int primalKernel;
         readonly int initKernel;
@@ -117,7 +118,8 @@ namespace McKrill.Avbd
         /// velocity update (U).
         /// The constraint lists (stage G) are built and the graph is colored (stage C) on the GPU. With contacts, both are rebuilt every step after the
         /// narrow phase; the lists need no readback, and the coloring reads back one small thing (whether bodies are still waiting, which is also the number of colors), a stall.
-        /// Stages S, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
+        /// Stage S (the Morton sort of the bodies, see <see cref="SortBodies"/>) runs before the broadphase. Stages Z and R do not exist yet; the
+        /// constraints come from <see cref="AvbdConstraintBuffers"/>.
         /// Must be called from the main thread. The previous step's results are the next step's input, so call it once per time step.
         /// </summary>
         public void Step()
@@ -155,6 +157,13 @@ namespace McKrill.Avbd
         public bool BroadphaseEnabled => broadphase != null;
 
         /// <summary>
+        /// True (the default): every step sorts the bodies along a Morton curve (stage S) before the broadphase, and the broadphase and the color
+        /// bucketing visit the bodies in that order. The results are the same either way; the order only changes how well neighboring threads read
+        /// neighboring memory. Runs only while there is a broadphase. Set it to false to compare, or if the sort costs more than it saves.
+        /// </summary>
+        public bool SortBodies { get; set; } = true;
+
+        /// <summary>
         /// Makes <see cref="Step"/> run the broadphase (stage B) on the poses of the end of the previous step. The pairs stay in a GPU buffer.
         /// With contacts the solver runs the broadphase anyway (the narrow phase reads its pairs), with capacities derived from the contact
         /// capacity; this replaces it with one of the given capacities. Without contacts nothing reads the pairs, so this only costs time and is
@@ -187,6 +196,11 @@ namespace McKrill.Avbd
         {
             broadphase?.Dispose();
             broadphase = null;
+            mortonSort?.Dispose();
+            mortonSort = null;
+            SortInUse = null;
+            if (constraints != null)
+                constraints.BodyOrder = null;
             if (ownsConstraints)
                 constraints.Dispose();
             constraints = null;
@@ -253,8 +267,32 @@ namespace McKrill.Avbd
         {
             if (broadphase == null && constraints != null && constraints.HasContacts)
                 broadphase = new AvbdBroadphase(shaders.Broadphase, bodies.Capacity, constraints.CandidateCapacity, constraints.StaticCandidateCapacity);
-            broadphase?.Run(bodies, constraints);
+            DispatchSort();
+            broadphase?.Run(bodies, constraints, SortInUse);
         }
+
+        // Stage S, before the broadphase: the Morton order of the bodies, read by the broadphase now and by the color bucketing after the narrow phase.
+        // Needs the sort shader (an asset made before stage S has none: the solver then visits the slots in order) and a broadphase.
+        void DispatchSort()
+        {
+            if (SortBodies && broadphase != null && shaders.MortonSort != null && bodies.Capacity <= AvbdMortonSort.MaxBodies)
+            {
+                if (mortonSort == null)
+                    mortonSort = new AvbdMortonSort(shaders.MortonSort, bodies.Capacity);
+                mortonSort.Run(bodies);
+                SortInUse = mortonSort;
+            }
+            else
+                SortInUse = null;
+            if (constraints != null)
+                constraints.BodyOrder = SortInUse;
+        }
+
+        // The sort of this step, or null if it did not run.
+        AvbdMortonSort SortInUse { get; set; }
+
+        /// <summary>The Morton sort (stage S), or null before the first step that ran it. For tests and tools.</summary>
+        internal AvbdMortonSort MortonSort => mortonSort;
 
         // Stage N, after stage B and stage P (it reads the start-of-step poses): frees the slots of recycled bodies, lets the new pairs of the
         // broadphase take slots, and collides every used slot. Every kernel but the first is dispatched indirectly, with sizes that NpPlan computed
