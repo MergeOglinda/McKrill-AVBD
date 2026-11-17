@@ -14,8 +14,9 @@ namespace McKrill.Avbd
         Spring = 1,
 
         /// <summary>
-        /// One contact point of a box-box manifold, written by the narrowphase (stage N) every step. Lives in the contact region of the
-        /// constraint array, not in the list of constraints added by the user. See <see cref="ContactLayout"/>.
+        /// One contact point of a box-box manifold, in the form the CPU oracle (<c>CpuContacts</c>) stores it. The GPU keeps the manifolds of the
+        /// pool as <see cref="ContactPairRecord"/>s and <see cref="ContactPointRecord"/>s, and <see cref="ContactCodec.ToRecord"/> converts a point
+        /// to this form. Never added by the user. See <see cref="ContactLayout"/>.
         /// </summary>
         Contact = 2,
     }
@@ -45,7 +46,10 @@ namespace McKrill.Avbd
         /// <summary>The joint has fractured and exerts no force. Owner: stage D (not written by stage V).</summary>
         Broken = 1u << 3,
 
-        /// <summary>The contact held static friction in the last dual update. Owner: stage D (stage N only carries it over, to decide which anchors to keep).</summary>
+        /// <summary>
+        /// A contact record of the CPU oracle held static friction in the last dual update. Owner: stage D (stage N only carries it over, to decide which
+        /// anchors to keep). The GPU keeps these bits in the pair record (<see cref="ContactPairRecord.ident"/>.w, bit k for point k).
+        /// </summary>
         Stick = 1u << 4,
     }
 
@@ -120,12 +124,12 @@ namespace McKrill.Avbd
 namespace McKrill.Avbd
 {
     /// <summary>
-    /// Layout of the contacts in the constraint array, and the constants of box-box collision (the reference solver's COLLISION_MARGIN and
-    /// STICK_THRESH). Mirrors AvbdContacts.hlsl.
+    /// Layout of the contacts, and the constants of box-box collision (the reference solver's COLLISION_MARGIN and STICK_THRESH). Mirrors AvbdContacts.hlsl.
     ///
-    /// Manifolds live in a pool of slots. Slot s has a contact count (<see cref="AvbdConstraintBuffers"/> reads it back), the pair of bodies it
-    /// belongs to (body A the higher slot) and room for <see cref="MaxContactsPerPair"/> contact records starting at
-    /// <c>contactBase + s * MaxContactsPerPair</c>, where contactBase is the capacity of the joint and spring records in the same array.
+    /// Manifolds live in a pool of slots. Slot s has a <see cref="ContactPairRecord"/> (the pair of bodies it belongs to, body A the higher slot, the
+    /// contact count, the stick bits, the normal and the friction) and room for <see cref="MaxContactsPerPair"/> <see cref="ContactPointRecord"/>s
+    /// starting at <c>s * MaxContactsPerPair</c> in the point array. The CPU oracle stores a contact as a <see cref="ConstraintRecord"/> at
+    /// <c>contactBase + pair * MaxContactsPerPair + k</c> of its own array instead.
     /// A pair keeps its slot while it has contacts, which is how the warm start finds the previous contacts; the narrow phase takes a free
     /// slot for a new pair (from the pairs of the broadphase) and gives it back when the pair has no contacts.
     ///

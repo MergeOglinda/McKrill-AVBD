@@ -36,8 +36,8 @@ namespace McKrill.Avbd
         static readonly int ColorWorkId = Shader.PropertyToID("_ColorWork");
         static readonly int ColorId = Shader.PropertyToID("_Color");
         static readonly int StatusId = Shader.PropertyToID("_Status");
-        static readonly int PairCountsId = Shader.PropertyToID("_PairCounts");
-        static readonly int SlotBodiesId = Shader.PropertyToID("_SlotBodies");
+        static readonly int ContactPairsId = Shader.PropertyToID("_ContactPairs");
+        static readonly int ContactPointsId = Shader.PropertyToID("_ContactPoints");
         static readonly int PairTableId = Shader.PropertyToID("_PairTable");
         static readonly int FreeListId = Shader.PropertyToID("_FreeList");
         static readonly int NpControlId = Shader.PropertyToID("_NpControl");
@@ -50,7 +50,6 @@ namespace McKrill.Avbd
         static readonly int DynamicPairCapacityId = Shader.PropertyToID("_DynamicPairCapacity");
         static readonly int StaticPairCapacityId = Shader.PropertyToID("_StaticPairCapacity");
         static readonly int DirtySlotsId = Shader.PropertyToID("_DirtySlots");
-        static readonly int ContactBaseId = Shader.PropertyToID("_ContactBase");
 
         /// <param name="constraints">Joints and springs, or null for a solver of free bodies only.</param>
         public AvbdSolver(AvbdBodyBuffers bodies, AvbdSolverSettings settings, AvbdShaderSet shaderSet = null, AvbdConstraintBuffers constraints = null)
@@ -223,6 +222,8 @@ namespace McKrill.Avbd
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, primalKernel);
             shader.SetBuffer(primalKernel, RecordsId, constraints.Records);
+            shader.SetBuffer(primalKernel, ContactPairsId, constraints.ContactPairsBuffer);
+            shader.SetBuffer(primalKernel, ContactPointsId, constraints.ContactPointsBuffer);
             shader.SetBuffer(primalKernel, ListId, constraints.List);
             shader.SetBuffer(primalKernel, ColorBodiesId, constraints.ColorBodies);
             shader.SetBuffer(primalKernel, ColorWorkId, constraints.ColorWork);
@@ -274,9 +275,8 @@ namespace McKrill.Avbd
             foreach (int kernel in new[] { npClearKernel, npPlanKernel, npRetireKernel, npAllocateKernel, narrowphaseKernel })
             {
                 bodies.BindTo(shader, kernel);
-                shader.SetBuffer(kernel, RecordsId, constraints.Records);
-                shader.SetBuffer(kernel, PairCountsId, constraints.PairCountsBuffer);
-                shader.SetBuffer(kernel, SlotBodiesId, constraints.SlotBodiesBuffer);
+                shader.SetBuffer(kernel, ContactPairsId, constraints.ContactPairsBuffer);
+                shader.SetBuffer(kernel, ContactPointsId, constraints.ContactPointsBuffer);
                 shader.SetBuffer(kernel, PairTableId, constraints.PairTableBuffer);
                 shader.SetBuffer(kernel, FreeListId, constraints.FreeListBuffer);
                 shader.SetBuffer(kernel, NpControlId, constraints.PoolControlBuffer);
@@ -286,7 +286,6 @@ namespace McKrill.Avbd
                 shader.SetBuffer(kernel, NpArgsId, constraints.NpArgsBuffer);
             }
             SolverUniforms.Bind(shader, settings);
-            shader.SetInt(ContactBaseId, constraints.ContactBase);
             shader.SetInt(SlotCapacityId, slots);
             shader.SetInt(TableMaskId, constraints.PairTableSize - 1);
             shader.SetInt(DynamicPairCapacityId, broadphase.DynamicPairCapacity);
@@ -307,8 +306,8 @@ namespace McKrill.Avbd
 
         static uint NpArgsOffset(int entry) => (uint)(entry * AvbdIndirect.ArgsStride);
 
-        // Stage D for the contacts, after every primal sweep: one thread per contact record of the slots below the pool's high-water mark (the free
-        // slots and the records beyond a slot's count skip). Dispatched indirectly with the arguments the narrow phase of this step planned.
+        // Stage D for the contacts, after every primal sweep: one thread per manifold slot below the pool's high-water mark (a free slot skips), which
+        // updates the points of its pair. Dispatched indirectly with the arguments the narrow phase of this step planned.
         internal void DispatchDualContacts()
         {
             if (constraints == null || !constraints.HasContacts)
@@ -317,10 +316,9 @@ namespace McKrill.Avbd
             ComputeShader shader = shaders.Dual;
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, dualContactKernel);
-            shader.SetBuffer(dualContactKernel, RecordsId, constraints.Records);
-            shader.SetBuffer(dualContactKernel, PairCountsId, constraints.PairCountsBuffer);
+            shader.SetBuffer(dualContactKernel, ContactPairsId, constraints.ContactPairsBuffer);
+            shader.SetBuffer(dualContactKernel, ContactPointsId, constraints.ContactPointsBuffer);
             shader.SetBuffer(dualContactKernel, NpControlId, constraints.PoolControlBuffer);
-            shader.SetInt(ContactBaseId, constraints.ContactBase);
             shader.SetInt(SlotCapacityId, constraints.ContactCapacity);
             shader.DispatchIndirect(dualContactKernel, constraints.NpArgsBuffer, NpArgsOffset(ContactLayout.PoolArgsDual));
         }

@@ -11,20 +11,20 @@
 #define AVBD_CONSTRAINT_FLAG_HARD_ANG    (1u << 1) // angular part is hard. Stored stiffness is ignored
 #define AVBD_CONSTRAINT_FLAG_FRACTURABLE (1u << 2) // breaks above the stored fracture threshold
 #define AVBD_CONSTRAINT_FLAG_BROKEN      (1u << 3) // fractured. Owner: D
-#define AVBD_CONSTRAINT_FLAG_STICK       (1u << 4) // contact: held static friction in the last dual update. Owner: D
+// Bit 4 is the CPU oracle's stick flag of a contact record. On the GPU the stick bits are in the pair record of the manifold (AvbdContactRecords.hlsl).
 
 #define AVBD_CONSTRAINT_FLAGS_MASK 0x00FFFFFFu
 #define AVBD_CONSTRAINT_KIND_SHIFT 24
 
 #define AVBD_CONSTRAINT_KIND_JOINT  0u
 #define AVBD_CONSTRAINT_KIND_SPRING 1u
-#define AVBD_CONSTRAINT_KIND_CONTACT 2u
+// Kind 2 is the CPU oracle's contact record. The GPU stores contacts as manifolds (pair record + 64 B points, AvbdContactRecords.hlsl), not as
+// constraint records.
 
-// 160 B. A contact uses the same record: anchorA = (rA, friction), anchorB = (rB, unused), c0Lin = C0 in the contact basis,
-// c0Ang = contact normal pointing from B to A, penaltyLin = per-row penalty, lambdaLin = per-row multiplier. The rest is zero.
+// 160 B: a joint or a spring.
 struct ConstraintRecord
 {
-    uint4  ident;      // x = body A (AVBD_INVALID = world), y = body B, z = flags | kind << 24, w = feature key (contact)
+    uint4  ident;      // x = body A (AVBD_INVALID = world), y = body B, z = flags | kind << 24, w = unused
     float4 anchorA;    // xyz = anchor on A, w = linear stiffness (joint) / stiffness (spring)
     float4 anchorB;    // xyz = anchor on B, w = angular stiffness (joint) / rest length (spring)
     float4 c0Lin;      // xyz = linear constraint at the step start, w = torque arm

@@ -2,16 +2,17 @@
 //
 // A body is "solved" (not free, not kinematic, mass above zero) or not. Only a solved body gets a list. A constraint to a body that is not
 // solved (and the world) is listed for its solved side only. A fractured joint or spring (flag Broken, set by stage D) is left out: the
-// reference solver removes it. Contacts come from the manifold pool: slot s holds _PairCounts[s] contacts of the pair
-// (_SlotBodies[s].x = body A, .y = body B, AVBD_INVALID = free slot), whose records are at _ContactBase + s * 8 + k. Only the slots below the
-// pool's high-water mark are visited (the contact kernels are dispatched indirectly with the narrow phase's arguments for them).
+// reference solver removes it. Contacts come from the manifold pool: slot s is a pair record (_ContactPairs[s]: .ident.x = body A, .y = body B,
+// AVBD_INVALID = free slot, .z = the number of contact points) and is listed once for each of its solved bodies, with the entry
+// AVBD_LIST_CONTACT_FLAG | s, however many points it has. Only the slots below the pool's high-water mark are visited (the contact kernels are
+// dispatched indirectly with the narrow phase's arguments for them).
 //
-// The list of a body is ordered like the CPU oracle (ConstraintTopology): the contacts first, by pair (body A, then body B, ascending) and by k,
-// then the joints and springs from the newest (highest id) to the oldest. The fill order of the threads is arbitrary, so every list is
+// The list of a body is ordered like the CPU oracle (ConstraintTopology): the contacts first, by pair (body A, then body B, ascending), then the
+// joints and springs from the newest (highest id) to the oldest. The fill order of the threads is arbitrary, so every list is
 // sorted afterwards; the result does not depend on the slots the pool happened to hand out or on thread timing.
 //
-// The fill kernels write an unsorted copy of every entry: _ListKey (the sort key: contacts (body A, body B << 3 | k), joints and springs
-// (0xFFFFFFFF, 0xFFFFFFFF - id), so after every contact and newest first) and _ListItem (the constraint id and the body on the other side,
+// The fill kernels write an unsorted copy of every entry: _ListKey (the sort key: contacts (body A, body B), joints and springs
+// (0xFFFFFFFF, 0xFFFFFFFF - id), so after every contact and newest first) and _ListItem (the entry (see above) and the body on the other side,
 // AVBD_INVALID for a world pin). The sort reads those and writes the sorted _ConstraintList and _ConstraintOther (stage C reads the latter
 // instead of dereferencing the record of every entry in every coloring round), so it never reads a constraint record and needs no barriers.
 // Output: _ConstraintList (ids grouped per body) and _BodyRange (x = offset, y = count, z = how many of the entries are contacts, w = 0).
@@ -45,6 +46,7 @@
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdListParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContacts.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdIndirect.hlsl"
@@ -59,14 +61,12 @@ RWStructuredBuffer<uint2>           _ListItem;        // one per list entry, uns
 RWStructuredBuffer<uint>            _ConstraintOther; // one per list entry, sorted, see above
 RWStructuredBuffer<uint>            _ListWork;        // see above
 RWStructuredBuffer<uint>            _ListControl;
-StructuredBuffer<uint>              _PairCounts;
-StructuredBuffer<uint4>             _SlotBodies;
+StructuredBuffer<ContactPairRecord> _ContactPairs;
 StructuredBuffer<uint>              _NpControl;       // the manifold pool's control words (the high-water mark)
 
 uint _Base;
 uint _Count;       // end of the range: items [_Base, _Count)
 uint _BodyCount;   // body slots in use
-uint _ContactBase; // id of the first contact record
 uint _WorkStride;  // start of the cursors in _ListWork
 uint _SlotCapacity; // manifold slots
 
@@ -80,7 +80,7 @@ bool IsBroken(ConstraintRecord r)
     return (r.ident.z & AVBD_CONSTRAINT_FLAG_BROKEN) != 0u;
 }
 
-// Orders the entries of one list, see the key above: contacts by (A, B, k), then joints and springs by falling id.
+// Orders the entries of one list, see the key above: contacts by (A, B), then joints and springs by falling id.
 bool KeyLess(uint2 a, uint2 b)
 {
     return a.x != b.x ? a.x < b.x : a.y < b.y;
@@ -92,8 +92,8 @@ bool ReadSlot(uint slot, bool report, out uint a, out uint b, out uint count)
 {
     a = AVBD_INVALID;
     b = AVBD_INVALID;
-    count = _PairCounts[slot];
-    uint4 bodies = _SlotBodies[slot];
+    uint4 bodies = _ContactPairs[slot].ident;
+    count = bodies.z;
     if (count == 0u || bodies.x == AVBD_INVALID)
         return false;
 
@@ -176,13 +176,13 @@ void ListCountContacts(uint3 id : SV_DispatchThreadID)
     uint old;
     if (IsSolved(a))
     {
-        InterlockedAdd(_ListWork[a], n, old);
-        InterlockedAdd(_ListWork[2u * _WorkStride + a], n, old);
+        InterlockedAdd(_ListWork[a], 1u, old);
+        InterlockedAdd(_ListWork[2u * _WorkStride + a], 1u, old);
     }
     if (IsSolved(b))
     {
-        InterlockedAdd(_ListWork[b], n, old);
-        InterlockedAdd(_ListWork[2u * _WorkStride + b], n, old);
+        InterlockedAdd(_ListWork[b], 1u, old);
+        InterlockedAdd(_ListWork[2u * _WorkStride + b], 1u, old);
     }
 }
 
@@ -288,19 +288,17 @@ void ListFillContacts(uint3 id : SV_DispatchThreadID)
     if (!ReadSlot(slot, false, a, b, n))
         return;
 
-    uint first = _ContactBase + slot * AVBD_LIST_CONTACTS_PER_SLOT;
+    uint entry = AVBD_LIST_CONTACT_FLAG | slot;
     uint at;
     if (IsSolved(a))
     {
-        InterlockedAdd(_ListWork[_WorkStride + a], n, at);
-        for (uint k = 0u; k < n; k++)
-            PutEntry(at + k, first + k, b, uint2(a, (b << 3) | k));
+        InterlockedAdd(_ListWork[_WorkStride + a], 1u, at);
+        PutEntry(at, entry, b, uint2(a, b));
     }
     if (IsSolved(b))
     {
-        InterlockedAdd(_ListWork[_WorkStride + b], n, at);
-        for (uint k = 0u; k < n; k++)
-            PutEntry(at + k, first + k, a, uint2(a, (b << 3) | k));
+        InterlockedAdd(_ListWork[_WorkStride + b], 1u, at);
+        PutEntry(at, entry, a, uint2(a, b));
     }
 }
 

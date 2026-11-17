@@ -27,7 +27,8 @@ namespace McKrill.Avbd
     /// Stage G: builds the constraint list of every solved body on the GPU (<c>AvbdLists.compute</c>), with no readback: it counts the
     /// constraints of each body, scans the counts into offsets (written to the body Range array), fills the lists and sorts each one.
     /// The contact kernels visit only the manifold slots below the pool's high-water mark (an indirect dispatch with the narrow phase's arguments).
-    /// The order matches <see cref="ConstraintTopology"/>, the CPU oracle: contacts first by pair and k, then joints and springs newest first.
+    /// A manifold is one entry (the slot with the <c>AVBD_LIST_CONTACT_FLAG</c> bit), whatever its number of contact points.
+    /// The order matches <see cref="ConstraintTopology"/>, the CPU oracle: contacts first by pair, then joints and springs newest first.
     /// A fractured joint or spring is left out.
     /// </summary>
     internal sealed class AvbdConstraintLists : IDisposable
@@ -38,6 +39,9 @@ namespace McKrill.Avbd
         public const int ControlInvalid = 2;
         public const int ControlWords = 4;
         public const int ScanGroup = 1024;
+
+        /// <summary>Mirrors AVBD_LIST_CONTACT_FLAG: a list entry with this bit is a manifold slot, not a constraint id.</summary>
+        public const uint ContactFlag = 0x80000000u;
 
         /// <summary>Mirrors AVBD_LIST_SORT_LANES: threads that sort the list of one body.</summary>
         public const int SortLanes = 8;
@@ -65,10 +69,8 @@ namespace McKrill.Avbd
         static readonly int OtherId = Shader.PropertyToID("_ConstraintOther");
         static readonly int WorkId = Shader.PropertyToID("_ListWork");
         static readonly int ControlId = Shader.PropertyToID("_ListControl");
-        static readonly int PairCountsId = Shader.PropertyToID("_PairCounts");
-        static readonly int SlotBodiesId = Shader.PropertyToID("_SlotBodies");
+        static readonly int ContactPairsId = Shader.PropertyToID("_ContactPairs");
         static readonly int BodyCountId = Shader.PropertyToID("_BodyCount");
-        static readonly int ContactBaseId = Shader.PropertyToID("_ContactBase");
         static readonly int WorkStrideId = Shader.PropertyToID("_WorkStride");
 
         /// <summary>Number of builds so far. Anything cached from <see cref="ReadControl"/> is out of date when this changes.</summary>
@@ -113,16 +115,14 @@ namespace McKrill.Avbd
         /// <summary>
         /// Builds the lists of the solved bodies among slots [0, bodyCount) and writes their offsets and counts into the body Range array.
         /// </summary>
-        /// <param name="records">Constraint records. The joints and springs are [0, recordCount); the contacts are at contactBase and above.</param>
-        /// <param name="list">Receives the constraint ids. It must hold twice the number of records (joints, springs and contact records), and as many entries as the listCapacity of the constructor.</param>
-        /// <param name="pairCounts">Contacts per manifold slot, or null without contacts.</param>
-        /// <param name="slotBodies">The pair of bodies of each manifold slot (AVBD_INVALID = free).</param>
+        /// <param name="records">Joint and spring records, [0, recordCount).</param>
+        /// <param name="list">Receives the entries: constraint ids, and manifold slots with <see cref="ContactFlag"/>. It must hold as many entries as the listCapacity of the constructor.</param>
+        /// <param name="contactPairs">The pair records of the manifold slots (the bodies, AVBD_INVALID = free, and the contact count), or null without contacts.</param>
         /// <param name="slotCount">Number of manifold slots.</param>
         /// <param name="poolControl">The pool's control words (the high-water mark), or null without contacts.</param>
         /// <param name="poolArgs">The narrow phase's indirect arguments; its retire entry is one thread per slot below the high-water mark.</param>
         public void Run(AvbdBodyBuffers bodies, int bodyCount, GraphicsBuffer records, int recordCount, GraphicsBuffer list,
-            GraphicsBuffer pairCounts, GraphicsBuffer slotBodies, int slotCount, int contactBase,
-            GraphicsBuffer poolControl, GraphicsBuffer poolArgs)
+            GraphicsBuffer contactPairs, int slotCount, GraphicsBuffer poolControl, GraphicsBuffer poolArgs)
         {
             if (disposed) throw new ObjectDisposedException(nameof(AvbdConstraintLists));
             if (bodyCount > bodyCapacity) throw new ArgumentOutOfRangeException(nameof(bodyCount));
@@ -130,7 +130,7 @@ namespace McKrill.Avbd
             if (bodyCount <= 0)
                 return;
 
-            bool contacts = slotCount > 0 && pairCounts != null && slotBodies != null && poolControl != null && poolArgs != null;
+            bool contacts = slotCount > 0 && contactPairs != null && poolControl != null && poolArgs != null;
             foreach (int kernel in allKernels)
             {
                 shader.SetBuffer(kernel, BodyMetaId, bodies.Meta);
@@ -145,13 +145,11 @@ namespace McKrill.Avbd
                 shader.SetBuffer(kernel, ControlId, control);
                 if (contacts)
                 {
-                    shader.SetBuffer(kernel, PairCountsId, pairCounts);
-                    shader.SetBuffer(kernel, SlotBodiesId, slotBodies);
+                    shader.SetBuffer(kernel, ContactPairsId, contactPairs);
                     shader.SetBuffer(kernel, NpControlId, poolControl);
                 }
             }
             shader.SetInt(BodyCountId, bodyCount);
-            shader.SetInt(ContactBaseId, contactBase);
             shader.SetInt(WorkStrideId, bodyCapacity);
             shader.SetInt(SlotCapacityId, contacts ? slotCount : 0);
 

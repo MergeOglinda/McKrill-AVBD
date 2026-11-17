@@ -7,10 +7,9 @@
 //
 // One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
 // ordering, coloring or atomics are needed. Springs have no state and are skipped.
-// DualContact is the dual update of the contacts, one thread per contact record of the slots of the manifold pool that have ever been used
-// (below the pool's high-water mark; see ContactLayout): records beyond the slot's contact count are skipped. It is dispatched indirectly
-// with arguments the narrow phase wrote, so the host never needs the number of manifolds. A contact's warm start is part of the narrow phase
-// (AvbdNarrowphase.compute).
+// DualContact is the dual update of the contacts, one thread per slot of the manifold pool that has ever been used (below the pool's high-water
+// mark; see ContactLayout), which updates the points of its pair: a free slot skips. It is dispatched indirectly with arguments the narrow phase
+// wrote, so the host never needs the number of manifolds. A contact's warm start is part of the narrow phase (AvbdNarrowphase.compute).
 // Mirrored by Reference/Stages/CpuConstraintInit.cs and CpuDual.cs, which the tests compare against.
 
 #pragma kernel ConstraintInit
@@ -19,6 +18,7 @@
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactSolve.hlsl"
@@ -27,12 +27,12 @@
 StructuredBuffer<BodyStateRecord>      _BodyState;
 RWStructuredBuffer<ConstraintRecord>   _Constraints;
 
-StructuredBuffer<uint>                 _PairCounts; // contacts per manifold slot (DualContact)
-StructuredBuffer<uint>                 _NpControl;  // the manifold pool's control words (DualContact): the high-water mark
+RWStructuredBuffer<ContactPairRecord>  _ContactPairs;  // manifold slots (DualContact): the pair of bodies, the contact count, the stick bits, the normal and the friction
+RWStructuredBuffer<ContactPointRecord> _ContactPoints; // their contact points, AVBD_MAX_CONTACTS per slot
+StructuredBuffer<uint>                 _NpControl;     // the manifold pool's control words (DualContact): the high-water mark
 
 uint _Base;        // first constraint to process
 uint _Count;       // end of the range: constraints [_Base, _Count)
-uint _ContactBase; // DualContact: index of the first contact record
 uint _SlotCapacity; // DualContact: manifold slots
 
 // Pose of body slot `id`: the start-of-step pose or the current pose. A body of AVBD_INVALID is the world.
@@ -186,45 +186,50 @@ void Dual(uint3 id : SV_DispatchThreadID)
     _Constraints[index] = c;
 }
 
-// Dual update of a contact (the reference solver's Manifold.UpdateDual): stores the clamped force as the multiplier, ramps the penalties
-// and updates the stick flag. The displacements are measured from the start-of-step poses, which every body has, static ones included.
+// Dual update of a manifold (the reference solver's Manifold.UpdateDual): one thread per manifold slot, which walks the points of its pair. It
+// loads the two bodies and makes the contact basis once, then for every point stores the clamped force as the multiplier, ramps the penalties and
+// updates the stick bit. The displacements are measured from the start-of-step poses, which every body has, static ones included.
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void DualContact(uint3 id : SV_DispatchThreadID)
 {
-    // Item k of the dispatch is contact k % AVBD_MAX_CONTACTS of slot k / AVBD_MAX_CONTACTS. The last group can overshoot the slots in use.
-    uint relative = AvbdIndirectItem(id);
-    if (relative >= min(_NpControl[AVBD_NP_HIGH_WATER], _SlotCapacity) * AVBD_MAX_CONTACTS)
+    // Item k of the dispatch is slot k. The last group can overshoot the slots in use.
+    uint slot = AvbdIndirectItem(id);
+    if (slot >= min(_NpControl[AVBD_NP_HIGH_WATER], _SlotCapacity))
         return;
 
-    uint index = _ContactBase + relative;
-    uint pair = relative / AVBD_MAX_CONTACTS;
-    uint slot = relative % AVBD_MAX_CONTACTS;
-    if (slot >= _PairCounts[pair])
+    ContactPairRecord pair = _ContactPairs[slot];
+    uint count = min(pair.ident.z, AVBD_MAX_CONTACTS);
+    if (pair.ident.x == AVBD_INVALID || count == 0u)
         return;
 
-    ConstraintRecord c = _Constraints[index];
-    uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
-
-    BodyStateRecord stateA = _BodyState[c.ident.x];
-    BodyStateRecord stateB = _BodyState[c.ident.y];
+    BodyStateRecord stateA = _BodyState[pair.ident.x];
+    BodyStateRecord stateB = _BodyState[pair.ident.y];
     float3 dqALin = stateA.position.xyz - stateA.startPosition.xyz;
     float3 dqBLin = stateB.position.xyz - stateB.startPosition.xyz;
     float3 dqAAng = AvbdQuatDifference(stateA.rotation, stateA.startRotation);
     float3 dqBAng = AvbdQuatDifference(stateB.rotation, stateB.startRotation);
+    float3x3 basis = AvbdContactBasis(pair.normalFriction.xyz);
+    float friction = pair.normalFriction.w;
 
-    float3 penalty = c.penaltyLin.xyz;
-    AvbdContactEval e = AvbdEvaluateContact(
-        c.c0Ang.xyz, c.c0Lin.xyz, penalty, c.lambdaLin.xyz, c.anchorA.w, c.anchorA.xyz, c.anchorB.xyz, stateA.rotation, stateB.rotation,
-        dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
-    AvbdContactDualResult r = AvbdContactDual(e, penalty, (flags & AVBD_CONSTRAINT_FLAG_STICK) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
+    uint stick = pair.ident.w;
+    uint first = slot * AVBD_MAX_CONTACTS;
+    for (uint k = 0; k < count; k++)
+    {
+        ContactPointRecord p = _ContactPoints[first + k];
+        float3 penalty = ContactPointPenalty(p);
+        AvbdContactEval e = AvbdEvaluateContactInBasis(
+            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, stateA.rotation, stateB.rotation,
+            dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
+        AvbdContactDualResult r = AvbdContactDual(e, penalty, (stick & (1u << k)) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
 
-    // Only the flags, the penalty and the multiplier change: write those three words, not the whole 144-byte record.
-    uint4 ident = c.ident;
-    if (r.stick)
-        ident.z |= AVBD_CONSTRAINT_FLAG_STICK;
-    else
-        ident.z &= ~AVBD_CONSTRAINT_FLAG_STICK;
-    _Constraints[index].ident = ident;
-    _Constraints[index].penaltyLin = float4(r.penalty, c.penaltyLin.w);
-    _Constraints[index].lambdaLin = float4(r.lambda, c.lambdaLin.w);
+        if (r.stick)
+            stick |= 1u << k;
+        else
+            stick &= ~(1u << k);
+
+        // Only the penalty and the multiplier change: write those two words, not the whole 64-byte point.
+        _ContactPoints[first + k].c0Penalty = float4(p.c0Penalty.xy, r.penalty.xy);
+        _ContactPoints[first + k].penaltyLambda = float4(r.penalty.z, r.lambda);
+    }
+    _ContactPairs[slot].ident = uint4(pair.ident.xyz, stick);
 }
