@@ -361,6 +361,9 @@ namespace McKrill.Avbd.Tests
             StringAssert.Contains("AVBD_BP_CELL_MARGIN " + AvbdBroadphase.CellMargin.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture),
                 ReadInclude("AvbdBroadphaseParams.hlsl"));
 
+            StringAssert.Contains("AVBD_BP_SEPARATION_PAD " + AvbdBroadphase.SeparationPad.ToString("0.0##", System.Globalization.CultureInfo.InvariantCulture),
+                ReadInclude("AvbdBroadphaseParams.hlsl"));
+
             Assert.AreEqual(AvbdBroadphase.PairStride, UnsafeUtility.SizeOf<PairRecord>());
             AssertStructMatches(ReadInclude("AvbdBroadphaseParams.hlsl"), "PairRecord", typeof(PairRecord));
         }

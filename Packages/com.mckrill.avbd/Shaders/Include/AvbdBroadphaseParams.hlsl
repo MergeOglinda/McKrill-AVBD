@@ -24,6 +24,12 @@
 // overlap are always in the same or in adjacent cells, even after the rounding of position / cell size.
 #define AVBD_BP_CELL_MARGIN 1.01
 
+// A candidate pair is dropped when the world bounding boxes, or a face axis of either box, separate the two boxes by more than this
+// (meters). The narrow phase finds no contact for a pair as soon as any axis of its separating-axis test shows a gap above zero (a face
+// axis is one of them; a gap between the world bounding boxes means the boxes are disjoint, which the 15 axes find too), so a pair dropped
+// here is one the narrow phase would drop. The pad keeps the rounding of the two computations out of it.
+#define AVBD_BP_SEPARATION_PAD 0.001
+
 // 16 B. One candidate pair. Body A is the body with the higher slot, like the reference solver's pair loop.
 struct PairRecord
 {

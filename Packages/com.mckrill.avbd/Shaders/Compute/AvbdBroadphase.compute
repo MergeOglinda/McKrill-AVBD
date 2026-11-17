@@ -1,7 +1,14 @@
-// Stage B: broadphase. Finds the pairs of bodies whose bounding spheres overlap, with a hashed uniform grid.
+// Stage B: broadphase. Finds the pairs of bodies whose bounding spheres overlap, with a hashed uniform grid, and drops the ones whose boxes
+// are visibly apart.
 //
 // A body's bounding sphere is centered on its position and has the radius |size| / 2 (half the box diagonal), which is what the
 // reference solver's broadphase uses: two bodies are a pair when |dp|^2 <= (rA + rB)^2 and no constraint joins them.
+// The bounding spheres of boxes overlap far more often than the boxes do (a long bar and its neighbor, a ground slab under everything), and
+// every such candidate costs a manifold lookup and a full collision test in the narrow phase, again every step. So a candidate that passes
+// the sphere test must also pass two cheap tests on the boxes themselves (BoxesSeparated): the world bounding boxes overlap, and no face
+// axis of either box separates them. Each rejects only a pair that the narrow phase would find no contact for (the margin is
+// AVBD_BP_SEPARATION_PAD, see AvbdBroadphaseParams.hlsl), so the contacts, and the manifolds the narrow phase keeps for pairs that
+// already have contacts, do not change.
 //
 // Bodies are "solved" (not free, not kinematic, mass above zero) or "static" (live, but not solved: mass 0 or kinematic).
 //   dynamic-dynamic pairs   found with the grid: every solved body sits in the cell of its position, and a body looks at its own cell
@@ -40,6 +47,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBroadphaseParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdQuaternion.hlsl"
 
 StructuredBuffer<BodyStateRecord>   _BodyState;
 StructuredBuffer<BodyMassRecord>    _BodyMass;
@@ -130,6 +138,55 @@ bool SpheresOverlap(float3 positionA, float radiusA, float3 positionB, float rad
     float3 dp = positionA - positionB;
     float r = radiusA + radiusB;
     return dot(dp, dp) <= r * r;
+}
+
+// A body as the box tests see it: its center, half extents, world axes, and the half extents of its world bounding box.
+struct BpBox
+{
+    float3 center;
+    float3 halfSize;
+    float3 axis0;
+    float3 axis1;
+    float3 axis2;
+    float3 aabb;
+};
+
+BpBox MakeBpBox(uint slot)
+{
+    BodyStateRecord state = _BodyState[slot];
+    BpBox box;
+    box.center = state.position.xyz;
+    box.halfSize = _BodyShape[slot].sizeFriction.xyz * 0.5;
+    box.axis0 = AvbdQuatRotate(state.rotation, float3(1.0, 0.0, 0.0));
+    box.axis1 = AvbdQuatRotate(state.rotation, float3(0.0, 1.0, 0.0));
+    box.axis2 = AvbdQuatRotate(state.rotation, float3(0.0, 0.0, 1.0));
+    box.aabb = abs(box.axis0) * box.halfSize.x + abs(box.axis1) * box.halfSize.y + abs(box.axis2) * box.halfSize.z;
+    return box;
+}
+
+// Half width of the box along the unit vector n.
+float BpExtent(BpBox box, float3 n)
+{
+    return box.halfSize.x * abs(dot(n, box.axis0)) + box.halfSize.y * abs(dot(n, box.axis1)) + box.halfSize.z * abs(dot(n, box.axis2));
+}
+
+// True if the unit axis n (a face axis of one of the boxes) separates the boxes by more than AVBD_BP_SEPARATION_PAD; d is the center of a minus
+// the center of b.
+bool AxisSeparates(BpBox a, BpBox b, float3 d, float3 n)
+{
+    return abs(dot(d, n)) - BpExtent(a, n) - BpExtent(b, n) > AVBD_BP_SEPARATION_PAD;
+}
+
+// True if the boxes are apart by more than AVBD_BP_SEPARATION_PAD: along a world axis (their world bounding boxes do not overlap), or along
+// a face axis of either box. Written so that a NaN never separates (a comparison with NaN is false, so the pair stays a candidate).
+bool BoxesSeparated(BpBox a, BpBox b)
+{
+    float3 d = a.center - b.center;
+    if (any(abs(d) > a.aabb + b.aabb + AVBD_BP_SEPARATION_PAD))
+        return true;
+
+    return AxisSeparates(a, b, d, a.axis0) || AxisSeparates(a, b, d, a.axis1) || AxisSeparates(a, b, d, a.axis2)
+        || AxisSeparates(a, b, d, b.axis0) || AxisSeparates(a, b, d, b.axis1) || AxisSeparates(a, b, d, b.axis2);
 }
 
 void Emit(uint bodyA, uint bodyB, uint kind)
@@ -236,6 +293,7 @@ void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
         return; // not in the grid (free, not finite), or a static body: only solved bodies look for pairs
     float3 selfPosition = _BodyState[self].position.xyz;
     float selfRadius = Radius(self);
+    BpBox selfBox = MakeBpBox(self); // once per body, not once per candidate
     int3 cell = asint(selfCell.xyz);
 
     // A pair of two solved bodies is found by the one with the higher slot, which is body A. A static body never looks, so the pair of a solved
@@ -252,13 +310,16 @@ void BpPairsDynamic(uint3 id : SV_DispatchThreadID)
             uint4 otherCell = _BodyCell[other];
             bool otherStatic = (otherCell.w & AVBD_BP_STATIC_FLAG) != 0u;
             if ((otherStatic || other < self) && all(asint(otherCell.xyz) == neighborCell)
-                && SpheresOverlap(selfPosition, selfRadius, _BodyState[other].position.xyz, Radius(other))
-                && !Constrained(self, other))
+                && SpheresOverlap(selfPosition, selfRadius, _BodyState[other].position.xyz, Radius(other)))
             {
-                if (otherStatic)
-                    Emit(max(self, other), min(self, other), AVBD_PAIR_DYNAMIC_STATIC);
-                else
-                    Emit(self, other, AVBD_PAIR_DYNAMIC_DYNAMIC);
+                // Nested, so that the box tests are only evaluated for a pair whose spheres overlap, whether or not && short-circuits.
+                if (!BoxesSeparated(selfBox, MakeBpBox(other)) && !Constrained(self, other))
+                {
+                    if (otherStatic)
+                        Emit(max(self, other), min(self, other), AVBD_PAIR_DYNAMIC_STATIC);
+                    else
+                        Emit(self, other, AVBD_PAIR_DYNAMIC_DYNAMIC);
+                }
             }
             other = _GridNext[other];
         }
@@ -278,12 +339,16 @@ void BpPairsStatic(uint3 id : SV_DispatchThreadID)
     if (!IsFinite3(selfPosition))
         return;
     float selfRadius = Radius(self);
+    BpBox selfBox = MakeBpBox(self);
 
     uint staticCount = _BpControl[AVBD_BP_STATIC_COUNT];
     for (uint k = 0; k < staticCount; k++)
     {
         uint other = _StaticList[k];
-        if (SpheresOverlap(selfPosition, selfRadius, _BodyState[other].position.xyz, Radius(other)) && !Constrained(self, other))
-            Emit(max(self, other), min(self, other), AVBD_PAIR_DYNAMIC_STATIC);
+        if (SpheresOverlap(selfPosition, selfRadius, _BodyState[other].position.xyz, Radius(other)))
+        {
+            if (!BoxesSeparated(selfBox, MakeBpBox(other)) && !Constrained(self, other))
+                Emit(max(self, other), min(self, other), AVBD_PAIR_DYNAMIC_STATIC);
+        }
     }
 }

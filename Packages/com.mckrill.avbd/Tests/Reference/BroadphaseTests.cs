@@ -8,8 +8,9 @@ using McKrill.Avbd.Reference;
 namespace McKrill.Avbd.Tests
 {
     /// <summary>
-    /// Stage B (broadphase). The CPU oracle (<see cref="CpuBroadphase"/>) is checked against the reference solver's own pair loop; the
-    /// GPU must then find exactly the oracle's set of pairs (the order is unspecified), on the body state it holds.
+    /// Stage B (broadphase). The CPU oracle (<see cref="CpuBroadphase"/>) is checked against the reference solver's own pair loop: it finds
+    /// the same pairs except the ones whose boxes are visibly apart, and those must be pairs without a contact. The GPU must then find
+    /// exactly the oracle's set of pairs (the order is unspecified), on the body state it holds.
     /// </summary>
     public class BroadphaseTests
     {
@@ -49,15 +50,54 @@ namespace McKrill.Avbd.Tests
             }
         }
 
-        static void AssertOracleMatchesReference(ReferenceSolver solver, string what)
+        [Test]
+        public void Oracle_FindsTheReferenceSolversPairs_OnRotatedBoxes()
+        {
+            int dropped = 0;
+            for (int seed = 1; seed <= 10; seed++)
+            {
+                var solver = new ReferenceSolver();
+                DenseRandom(solver, 300 + seed, 70, default, true);
+                dropped += AssertOracleMatchesReference(solver, "dense rotated scene " + seed);
+            }
+            Assert.Greater(dropped, 0, "bounding spheres of rotated boxes overlap more often than the boxes: some pairs must be dropped");
+        }
+
+        // The oracle finds the reference solver's pairs except the ones the box test drops, and every dropped pair is a pair without a contact.
+        // Returns the number of dropped pairs.
+        static int AssertOracleMatchesReference(ReferenceSolver solver, string what)
         {
             SceneArrays scene = ConstraintTestScenes.FromReference(solver, Capacity);
             SortedSet<ulong> oracle = CpuBroadphase.Pairs(scene.bodies, scene.bodyCount, scene.constraints, scene.constraintCount);
             SortedSet<ulong> expected = ReferencePairs(solver);
 
-            AssertSameSets(expected, oracle, what);
+            int dropped = AssertOnlyApartPairsDropped(expected, oracle, solver, what);
             if (what.StartsWith("dense"))
                 Assert.Greater(expected.Count, 20, what + ": the scene should have many pairs");
+            return dropped;
+        }
+
+        // `got` is a subset of the reference solver's pairs (spheres only), and every pair that is missing is one whose boxes the narrow phase
+        // finds no contact for, so leaving it out changes no manifold. Returns the number of missing pairs.
+        static int AssertOnlyApartPairsDropped(SortedSet<ulong> referencePairs, SortedSet<ulong> got, ReferenceSolver solver, string what)
+        {
+            foreach (ulong key in got)
+                Assert.IsTrue(referencePairs.Contains(key), what + ": " + CpuBroadphase.Describe(key) + " is not a pair of the reference solver");
+
+            var contacts = new AvbdManifold.Contact[BoxCollision.MaxContacts];
+            float3x3 basis = float3x3.identity;
+            int dropped = 0;
+            foreach (ulong key in referencePairs)
+            {
+                if (got.Contains(key))
+                    continue;
+                dropped++;
+                int hi = (int)(key >> 34);
+                int lo = (int)((key >> 2) & 0xFFFFFFFFu);
+                int count = BoxCollision.Collide(solver.Bodies[hi], solver.Bodies[lo], contacts, ref basis);
+                Assert.AreEqual(0, count, what + ": the pair " + CpuBroadphase.Describe(key) + " was dropped but its boxes have " + count + " contacts");
+            }
+            return dropped;
         }
 
         // The pair loop of ReferenceSolver.Step, without the pairs of two static bodies (the GPU never generates those).
@@ -78,6 +118,73 @@ namespace McKrill.Avbd.Tests
                         result.Add(CpuBroadphase.Key((uint)i, (uint)j, a.IsDynamic && b.IsDynamic ? PairKind.DynamicDynamic : PairKind.DynamicStatic));
                 }
             return result;
+        }
+
+        // ---- the box test against the narrow phase ------------------------------------------------------------------------
+
+        // The reason the test may drop a pair: whenever it separates two boxes, the reference narrow phase finds no contact for them.
+        [Test]
+        public void BoxesSeparated_NeverDropsAPairThatHasContacts()
+        {
+            var rng = new System.Random(11);
+            var contacts = new AvbdManifold.Contact[BoxCollision.MaxContacts];
+            float3x3 basis = float3x3.identity;
+            int separated = 0, colliding = 0, nearMisses = 0;
+
+            for (int i = 0; i < 40000; i++)
+            {
+                float3 sizeA = new float3(Range(rng, 0.1f, 4f), Range(rng, 0.1f, 4f), Range(rng, 0.1f, 4f));
+                float3 sizeB = new float3(Range(rng, 0.1f, 4f), Range(rng, 0.1f, 4f), Range(rng, 0.1f, 4f));
+                var a = new AvbdBody(sizeA, 1f, 0.5f, float3.zero, float3.zero);
+                var b = new AvbdBody(sizeB, 1f, 0.5f, float3.zero, float3.zero);
+                a.PositionAng = quaternion.EulerXYZ(Range(rng, 0f, 6f), Range(rng, 0f, 6f), Range(rng, 0f, 6f));
+                b.PositionAng = i % 4 == 0 ? quaternion.identity : quaternion.EulerXYZ(Range(rng, 0f, 6f), Range(rng, 0f, 6f), Range(rng, 0f, 6f));
+
+                // Within the reach of the bounding spheres, so the pair is a candidate; a quarter of the pairs are pushed close to touching.
+                float reach = a.Radius + b.Radius;
+                float3 direction = math.normalize(new float3(Range(rng, -1f, 1f), Range(rng, -1f, 1f), Range(rng, -1f, 1f)) + 1e-4f);
+                float distance = Range(rng, 0f, reach);
+                if (i % 4 == 1)
+                    distance = reach * Range(rng, 0.3f, 0.7f);
+                b.PositionLin = direction * distance;
+
+                bool apart = CpuBroadphase.BoxesSeparated(a.PositionLin, a.PositionAng, sizeA, b.PositionLin, b.PositionAng, sizeB);
+                int count = BoxCollision.Collide(a, b, contacts, ref basis);
+                if (apart)
+                {
+                    separated++;
+                    Assert.AreEqual(0, count, "case " + i + ": separated boxes with " + count + " contacts (sizes " + sizeA + ", " + sizeB + ", offset " + b.PositionLin + ")");
+                }
+                if (count > 0)
+                    colliding++;
+                else if (!apart)
+                    nearMisses++;
+            }
+
+            // The test should also be worth having: most apart pairs of this kind are caught, and plenty of pairs do collide.
+            Assert.Greater(separated, 5000, "separated pairs");
+            Assert.Greater(colliding, 2000, "colliding pairs");
+            Debug.Log("BoxesSeparated: " + separated + " dropped, " + colliding + " colliding, " + nearMisses + " apart pairs the test keeps (edge axes, or within the pad)");
+        }
+
+        [Test]
+        public void BoxesSeparated_UsesThePad()
+        {
+            float3 size = new float3(1f, 1f, 1f);
+            quaternion none = quaternion.identity;
+            float pad = AvbdBroadphase.SeparationPad;
+
+            Assert.IsFalse(CpuBroadphase.BoxesSeparated(float3.zero, none, size, new float3(1f + 0.5f * pad, 0f, 0f), none, size), "inside the pad");
+            Assert.IsTrue(CpuBroadphase.BoxesSeparated(float3.zero, none, size, new float3(1f + 2f * pad, 0f, 0f), none, size), "beyond the pad");
+            Assert.IsFalse(CpuBroadphase.BoxesSeparated(float3.zero, none, size, new float3(0.9f, 0f, 0f), none, size), "overlapping");
+
+            // A turned box: its face axis separates what the other box's axes alone would not.
+            quaternion turned = quaternion.AxisAngle(math.normalize(new float3(1f, 1f, 0f)), 0.7f);
+            Assert.IsFalse(CpuBroadphase.BoxesSeparated(float3.zero, none, size, new float3(0.2f, 0.2f, 0.2f), turned, size), "overlapping, turned");
+            Assert.IsTrue(CpuBroadphase.BoxesSeparated(float3.zero, none, size, new float3(0f, 0f, 3f), turned, size), "apart, turned");
+
+            // A NaN pose does not separate: the pair stays a candidate.
+            Assert.IsFalse(CpuBroadphase.BoxesSeparated(float3.zero, none, size, new float3(float.NaN, 0f, 0f), none, size), "NaN");
         }
 
         // ---- the GPU against the oracle ----------------------------------------------------------------------------------
@@ -113,6 +220,53 @@ namespace McKrill.Avbd.Tests
                 var solver = new ReferenceSolver();
                 DenseRandom(solver, 100 + seed, 120);
                 CheckScene(solver, "dense scene " + seed);
+            }
+        }
+
+        [Test]
+        public void Gpu_MatchesTheOracle_OnRotatedBoxes()
+        {
+            RequireCompute();
+            for (int seed = 1; seed <= 8; seed++)
+            {
+                var solver = new ReferenceSolver();
+                DenseRandom(solver, 400 + seed, 120, default, true);
+                CheckScene(solver, "dense rotated scene " + seed);
+            }
+        }
+
+        // Bars whose bounding spheres all overlap while the boxes mostly do not. Slots: 0 and 1 and 2 are bars of 4 x 0.2 x 0.2 on top of each other
+        // (spacings 0.6 and 0.2005 above bar 0), 3 is a big static slab below (a "large" static body, tested against every solved body), 4 a small
+        // static cube above. A gap of 0.0005 is inside the pad, so those pairs stay candidates; every other pair is far enough apart to go.
+        [Test]
+        public void Gpu_DropsPairsOfBoxesThatAreApart_AndKeepsTheOnesWithinThePad()
+        {
+            RequireCompute();
+            var reference = new ReferenceSolver();
+            reference.AddBody(new float3(4f, 0.2f, 0.2f), 1f, 0.5f, new float3(0f, 0f, 0f));         // 0
+            reference.AddBody(new float3(4f, 0.2f, 0.2f), 1f, 0.5f, new float3(0f, 0.6f, 0f));       // 1: 0.4 above bar 0
+            reference.AddBody(new float3(4f, 0.2f, 0.2f), 1f, 0.5f, new float3(0f, 0.2005f, 0f));    // 2: 0.0005 above bar 0
+            reference.AddBody(new float3(20f, 1f, 20f), 0f, 0.5f, new float3(0f, -0.6005f, 0f));     // 3: slab, its top is 0.0005 below bar 0
+            reference.AddBody(new float3(1f, 1f, 1f), 0f, 0.5f, new float3(0f, 1.5f, 0f));           // 4: cube, 0.3 above bar 1
+
+            SceneArrays scene = ConstraintTestScenes.FromReference(reference, Capacity);
+            SortedSet<ulong> expected = new SortedSet<ulong>
+            {
+                CpuBroadphase.Key(2, 0, PairKind.DynamicDynamic),
+                CpuBroadphase.Key(3, 0, PairKind.DynamicStatic),
+            };
+
+            // The spheres of all five overlap (the sphere test alone would give many more pairs).
+            Assert.Greater(ReferencePairs(reference).Count, expected.Count + 4);
+            AssertSameSets(expected, CpuBroadphase.Pairs(scene.bodies, scene.bodyCount, scene.constraints, scene.constraintCount), "oracle");
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 256))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), Capacity, BigBin, BigBin))
+            {
+                Fill(buffers, constraints, scene);
+                broadphase.Run(buffers, constraints);
+                AssertSameSets(expected, ToSet(broadphase.ReadPairs()), "gpu");
             }
         }
 
@@ -507,8 +661,8 @@ namespace McKrill.Avbd.Tests
                 AssertSameSets(expected, got, what);
                 Assert.IsFalse(broadphase.Overflowed, what);
 
-                // The oracle's pair set is the reference solver's, so the GPU's is too.
-                AssertSameSets(ReferencePairs(reference), got, what + " (reference solver)");
+                // The oracle's pair set is the reference solver's without the pairs of boxes that are apart, so the GPU's is too.
+                AssertOnlyApartPairsDropped(ReferencePairs(reference), got, reference, what + " (reference solver)");
 
                 Assert.AreEqual(CpuBroadphase.MaxRadius(held, scene.bodyCount), broadphase.ReadMaxRadius(), 1e-5f, what + ": largest radius");
             }
@@ -560,7 +714,7 @@ namespace McKrill.Avbd.Tests
 
         // Boxes of mixed sizes in a small volume around `origin` (negative coordinates included), one in six static, with joints, springs and
         // world pins between random pairs, some of them overlapping pairs.
-        static void DenseRandom(ReferenceSolver s, int seed, int count, float3 origin = default)
+        static void DenseRandom(ReferenceSolver s, int seed, int count, float3 origin = default, bool rotate = false)
         {
             var rng = new System.Random(seed);
             s.Clear();
@@ -573,7 +727,10 @@ namespace McKrill.Avbd.Tests
                                   : new float3(Range(rng, 0.3f, 1.4f), Range(rng, 0.3f, 1.4f), Range(rng, 0.3f, 1.4f));
                 float density = i % 6 == 0 ? 0f : 1f;
                 float3 position = origin + new float3(Range(rng, -extent, extent), Range(rng, -extent, extent), Range(rng, -extent, extent)) * 0.5f;
-                bodies.Add(s.AddBody(size, density, 0.5f, position));
+                AvbdBody body = s.AddBody(size, density, 0.5f, position);
+                if (rotate)
+                    body.PositionAng = quaternion.EulerXYZ(Range(rng, 0f, 6f), Range(rng, 0f, 6f), Range(rng, 0f, 6f));
+                bodies.Add(body);
             }
 
             for (int k = 0; k < 18; k++)
