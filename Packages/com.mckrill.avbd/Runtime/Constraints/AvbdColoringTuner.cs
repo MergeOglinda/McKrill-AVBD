@@ -67,6 +67,16 @@ namespace McKrill.Avbd
             cap = Math.Max(1, Math.Min(AvbdGraphColoring.MaxColors, colors + Headroom));
         }
 
+        /// <summary>
+        /// After a coloring from scratch of a graph that is about to change (the joints and springs of a scene before its first contact): the number of colors
+        /// of that coloring says nothing about the graph with the contacts, so the cap starts at the most there can be and the first statistics bring it down.
+        /// A small cap here would put most bodies of a pile into one color, to be solved in parallel with their neighbors, until the statistics arrive.
+        /// </summary>
+        public void Restart()
+        {
+            cap = AvbdGraphColoring.MaxColors;
+        }
+
         public void Observe(in ColoringSample s)
         {
             int k = s.fresh ? 1 : 0;

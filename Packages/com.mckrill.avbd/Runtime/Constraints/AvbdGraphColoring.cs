@@ -246,10 +246,10 @@ namespace McKrill.Avbd
             FinishColoring(bodyCount);
 
             // The colors in the body records are now a coloring of this graph: the next persistent step may keep them, and starts from scratch
-            // (the graph of the contacts is not this one) and sizes the cap from the exact number of colors.
+            // (the graph of the contacts is not this one), with the cap at its largest until the first statistics arrive.
             baseline = true;
             stepsSincePerfect = FreshInterval;
-            tuner.Reset(colors);
+            tuner.Restart();
             return colors;
         }
 
