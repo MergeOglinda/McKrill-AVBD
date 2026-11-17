@@ -15,7 +15,16 @@
 #define AVBD_BP_STATIC_COUNT   1 // bodies in the large-static list (statics too big for the grid, see AvbdBroadphase.compute)
 #define AVBD_BP_DYNAMIC_PAIRS  2 // pairs found in the dynamic-dynamic bin. May exceed the bin's capacity: then the pairs beyond it are dropped
 #define AVBD_BP_STATIC_PAIRS   3 // the same for the dynamic-static bin
-#define AVBD_BP_CONTROL_WORDS  4
+#define AVBD_BP_RADIUS_SUM     4 // sum of the radii of the solved bodies, in 1/AVBD_BP_RADIUS_SCALE m (for the mean radius)
+#define AVBD_BP_SOLVED_COUNT   5 // solved bodies with a finite radius
+#define AVBD_BP_LARGE_PROBE    6 // solved bodies with a radius above twice the mean (decides whether the mean is used, see AvbdBroadphase.compute)
+#define AVBD_BP_LARGE_COUNT    7 // bodies in the large-body list
+#define AVBD_BP_CONTROL_WORDS  8
+
+// Fixed point of the radius sum, and the most solved bodies that may be "large" (above the grid radius): they are tested against every body, so
+// the number is kept small; a scene with more of them uses the largest radius for the grid, as before.
+#define AVBD_BP_RADIUS_SCALE 1024.0
+#define AVBD_BP_LARGE_CAP    16u
 
 // Bit of _BodyCell.w that marks a static (or kinematic) body in the grid. The cell index itself is below 2^30.
 #define AVBD_BP_STATIC_FLAG 0x80000000u
