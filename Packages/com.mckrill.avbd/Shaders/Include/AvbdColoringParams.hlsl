@@ -17,7 +17,16 @@
 #define AVBD_COLOR_COUNTS_OFFSET 4
 #define AVBD_COLOR_CURSORS_OFFSET 68
 #define AVBD_COLOR_STARTS_OFFSET 132
-#define AVBD_COLOR_WORK_WORDS 196
+// Statistics of the persistent coloring (the host reads them back asynchronously to tune the number of rounds and of colors):
+#define AVBD_COLOR_STAT_RELEASED   196 // bodies that lost their color because a higher-priority neighbor had the same one
+#define AVBD_COLOR_STAT_LAST_ROUND 197 // the last round (counted from 1) in which a body took a color
+#define AVBD_COLOR_STAT_FINISHED   198 // bodies colored by ColorFinish, i.e. still waiting after the rounds the host dispatched
+#define AVBD_COLOR_WORK_WORDS 200
+
+// Threads of the single group of ColorFinish.
+#define AVBD_COLOR_FINISH_GROUP 256
+// Rounds ColorFinish runs before it colors what is left without waiting.
+#define AVBD_COLOR_FINISH_ROUNDS 64
 
 // Threads that look at the neighbors of one body in a coloring round (a power of two that divides AVBD_GROUP_SIZE).
 #define AVBD_COLOR_LANES 8u

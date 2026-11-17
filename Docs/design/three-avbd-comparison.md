@@ -129,7 +129,7 @@ They add features we do not have: sphere and convex-hull shapes, collision group
 ## Suggested order of work
 
 1. ~~**Broadphase AABB and face-axis rejection** (section 4).~~ **Done in PR #32.** Small change, strongest evidence, no layout change.
-2. **Persistent colouring with asynchronous tuning** (section 1). Removes the per-step CPU stall; needs a test that starts with too small a cap.
+2. **Persistent colouring with asynchronous tuning** (section 1). Removes the per-step CPU stall; needs a test that starts with too small a cap. **Implemented on branch `persistent-coloring`, not yet measured.** The coloring is not three-avbd's: it uses a fixed number of Jones-Plassmann rounds and a one-group finish kernel, so the colors never depend on when the statistics arrive.
 3. **Per-color lane count** (section 2). Small shader and `ColorPlan` change; profile first on a large single-layer scene to see whether 8 lanes hurts.
 4. **Compact contact point plus pair record** (section 3, which also gives 8–9). **Implemented on branch `compact-contacts`, not yet measured.** Largest change and largest expected effect on bandwidth.
 5. **Initial Morton slot order at batch spawn** (section 7), replacing the runtime sort for the cases where it was meant to help.
