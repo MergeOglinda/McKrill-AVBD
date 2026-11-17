@@ -21,11 +21,17 @@ namespace McKrill.Avbd
     internal sealed class AvbdBroadphase : IDisposable
     {
         // Mirror AVBD_BP_*.
-        public const int ControlWords = 4;
+        public const int ControlWords = 8;
         public const int MaxRadiusWord = 0;
         public const int StaticCountWord = 1;
         public const int DynamicPairsWord = 2;
         public const int StaticPairsWord = 3;
+        public const int RadiusSumWord = 4;
+        public const int SolvedCountWord = 5;
+        public const int LargeProbeWord = 6;
+        public const int LargeCountWord = 7;
+        public const float RadiusScale = 1024f;
+        public const int LargeCap = 16;
         public const float CellMargin = 1.01f;
 
         /// <summary>Mirrors AVBD_BP_STATIC_FLAG: the bit of the grid cell word that marks a static body.</summary>
@@ -37,7 +43,7 @@ namespace McKrill.Avbd
         const int MinGridCells = 64;
 
         readonly ComputeShader shader;
-        readonly int resetKernel, clearGridKernel, boundsKernel, insertKernel, pairsDynamicKernel, pairsStaticKernel;
+        readonly int resetKernel, clearGridKernel, boundsKernel, probeKernel, insertKernel, pairsDynamicKernel, pairsStaticKernel, pairsLargeKernel;
 
         readonly int bodyCapacity;
         readonly int gridCells;
@@ -46,6 +52,7 @@ namespace McKrill.Avbd
         GraphicsBuffer gridNext;
         GraphicsBuffer bodyCell;
         GraphicsBuffer staticList;
+        GraphicsBuffer largeList;
         GraphicsBuffer pairs;
         bool disposed;
 
@@ -65,6 +72,7 @@ namespace McKrill.Avbd
         static readonly int GridNextId = Shader.PropertyToID("_GridNext");
         static readonly int BodyCellId = Shader.PropertyToID("_BodyCell");
         static readonly int StaticListId = Shader.PropertyToID("_StaticList");
+        static readonly int LargeListId = Shader.PropertyToID("_LargeList");
         static readonly int PairsId = Shader.PropertyToID("_Pairs");
         static readonly int GridMaskId = Shader.PropertyToID("_GridMask");
         static readonly int DynamicCapacityId = Shader.PropertyToID("_DynamicPairCapacity");
@@ -85,9 +93,11 @@ namespace McKrill.Avbd
             resetKernel = shader.FindKernel("BpReset");
             clearGridKernel = shader.FindKernel("BpClearGrid");
             boundsKernel = shader.FindKernel("BpBounds");
+            probeKernel = shader.FindKernel("BpProbe");
             insertKernel = shader.FindKernel("BpInsert");
             pairsDynamicKernel = shader.FindKernel("BpPairsDynamic");
             pairsStaticKernel = shader.FindKernel("BpPairsStatic");
+            pairsLargeKernel = shader.FindKernel("BpPairsLarge");
 
             this.bodyCapacity = bodyCapacity;
             DynamicPairCapacity = dynamicPairCapacity;
@@ -104,6 +114,7 @@ namespace McKrill.Avbd
             gridNext = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
             bodyCell = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, 4 * sizeof(uint));
             staticList = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
+            largeList = new GraphicsBuffer(GraphicsBuffer.Target.Structured, LargeCap, sizeof(uint));
             pairs = new GraphicsBuffer(GraphicsBuffer.Target.Structured, dynamicPairCapacity + staticPairCapacity, PairStride);
         }
 
@@ -148,7 +159,7 @@ namespace McKrill.Avbd
             GraphicsBuffer records = constraints != null ? constraints.Records : emptyRecords;
             GraphicsBuffer list = constraints != null ? constraints.List : emptyList;
 
-            foreach (int kernel in new[] { resetKernel, clearGridKernel, boundsKernel, insertKernel, pairsDynamicKernel, pairsStaticKernel })
+            foreach (int kernel in new[] { resetKernel, clearGridKernel, boundsKernel, probeKernel, insertKernel, pairsDynamicKernel, pairsStaticKernel, pairsLargeKernel })
             {
                 bodies.BindTo(shader, kernel);
                 shader.SetBuffer(kernel, ControlId, control);
@@ -156,6 +167,7 @@ namespace McKrill.Avbd
                 shader.SetBuffer(kernel, GridNextId, gridNext);
                 shader.SetBuffer(kernel, BodyCellId, bodyCell);
                 shader.SetBuffer(kernel, StaticListId, staticList);
+                shader.SetBuffer(kernel, LargeListId, largeList);
                 shader.SetBuffer(kernel, PairsId, pairs);
                 shader.SetBuffer(kernel, RecordsId, records);
                 shader.SetBuffer(kernel, ListId, list);
@@ -170,9 +182,21 @@ namespace McKrill.Avbd
 
             AvbdDispatch.Linear(shader, clearGridKernel, gridCells);
             AvbdDispatch.Linear(shader, boundsKernel, count);
+            AvbdDispatch.Linear(shader, probeKernel, count);
             AvbdDispatch.Linear(shader, insertKernel, count);
             AvbdDispatch.Linear(shader, pairsDynamicKernel, count);
             AvbdDispatch.Linear(shader, pairsStaticKernel, count);
+
+            // One row of threads per entry of the large list; a row without a large body returns at once.
+            AvbdDispatch.Linear(shader, pairsLargeKernel, count, LargeCap);
+        }
+
+        /// <summary>Number of solved bodies that the last <see cref="Run"/> kept out of the grid as large (read back from the GPU; waits for it).</summary>
+        internal int ReadLargeBodyCount()
+        {
+            var words = new uint[ControlWords];
+            control.GetData(words);
+            return (int)Math.Min(words[LargeCountWord], (uint)LargeCap);
         }
 
         /// <summary>Reads the pair counts of the last <see cref="Run"/> back from the GPU (this waits for the GPU).</summary>
@@ -226,6 +250,7 @@ namespace McKrill.Avbd
             Release(ref gridNext);
             Release(ref bodyCell);
             Release(ref staticList);
+            Release(ref largeList);
             Release(ref pairs);
             Release(ref emptyRecords);
             Release(ref emptyList);

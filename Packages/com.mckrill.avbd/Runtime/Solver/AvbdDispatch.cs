@@ -29,6 +29,23 @@ namespace McKrill.Avbd
         }
 
         /// <summary>
+        /// Like <see cref="Linear"/>, with <paramref name="rows"/> rows of groups (SV_DispatchThreadID.y is the row, below <paramref name="rows"/>).
+        /// </summary>
+        public static void Linear(ComputeShader shader, int kernel, int count, int rows)
+        {
+            if (count <= 0 || rows <= 0)
+                return;
+
+            shader.SetInt(CountId, count);
+            int groups = (count + AvbdConst.GroupSize - 1) / AvbdConst.GroupSize;
+            for (int firstGroup = 0; firstGroup < groups; firstGroup += MaxGroupsPerDispatch)
+            {
+                shader.SetInt(BaseId, firstGroup * AvbdConst.GroupSize);
+                shader.Dispatch(kernel, Math.Min(MaxGroupsPerDispatch, groups - firstGroup), rows, 1);
+            }
+        }
+
+        /// <summary>
         /// Like <see cref="Linear"/>, over the items [first, first + count). The kernel reads _Base and _Count and handles item
         /// _Base + SV_DispatchThreadID.x when it is below _Count (so _Count is the end of the range, not its size).
         /// </summary>

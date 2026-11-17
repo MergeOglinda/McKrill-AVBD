@@ -356,7 +356,14 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)AvbdBroadphase.StaticCountWord, d["AVBD_BP_STATIC_COUNT"]);
             Assert.AreEqual((uint)AvbdBroadphase.DynamicPairsWord, d["AVBD_BP_DYNAMIC_PAIRS"]);
             Assert.AreEqual((uint)AvbdBroadphase.StaticPairsWord, d["AVBD_BP_STATIC_PAIRS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.RadiusSumWord, d["AVBD_BP_RADIUS_SUM"]);
+            Assert.AreEqual((uint)AvbdBroadphase.SolvedCountWord, d["AVBD_BP_SOLVED_COUNT"]);
+            Assert.AreEqual((uint)AvbdBroadphase.LargeProbeWord, d["AVBD_BP_LARGE_PROBE"]);
+            Assert.AreEqual((uint)AvbdBroadphase.LargeCountWord, d["AVBD_BP_LARGE_COUNT"]);
+            Assert.AreEqual((uint)AvbdBroadphase.LargeCap, d["AVBD_BP_LARGE_CAP"]);
             Assert.AreEqual((uint)AvbdBroadphase.ControlWords, d["AVBD_BP_CONTROL_WORDS"]);
+            StringAssert.Contains("AVBD_BP_RADIUS_SCALE " + AvbdBroadphase.RadiusScale.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture),
+                ReadInclude("AvbdBroadphaseParams.hlsl"));
             Assert.AreEqual(AvbdBroadphase.StaticCellFlag, d["AVBD_BP_STATIC_FLAG"]);
             StringAssert.Contains("AVBD_BP_CELL_MARGIN " + AvbdBroadphase.CellMargin.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture),
                 ReadInclude("AvbdBroadphaseParams.hlsl"));

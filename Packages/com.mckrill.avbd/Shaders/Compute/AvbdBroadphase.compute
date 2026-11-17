@@ -15,6 +15,14 @@
 //                           of every solved body (a ground slab) is too big for a cell: it goes into a short list that every solved body
 //                           is tested against (BpPairsStatic). That test costs the number of large static bodies per solved body.
 //   static-static pairs     are not generated.
+//   large solved bodies     the cell size follows the grid radius, which is the largest radius of a solved body unless that is an outlier: if
+//                           at most AVBD_BP_LARGE_CAP solved bodies have a radius above twice the mean, the grid radius is twice the mean
+//                           (never above the largest radius), and those few "large" bodies are left out of the grid. One big shot among
+//                           thousands of blocks no longer makes every cell several times larger (and every body test hundreds of
+//                           neighbors). A large body is tested against every other body (BpPairsLarge, one thread per large body and
+//                           slot), and it finds every pair that involves it, except the ones with a large static body (BpPairsStatic).
+//                           If more than AVBD_BP_LARGE_CAP bodies are above twice the mean, the grid radius is the largest radius and
+//                           nothing is large. Any grid radius is correct: it only decides what is fast.
 //
 // Pairs go into two bins of one buffer (pair kinds). Body A of a pair is the one with the higher slot, like the reference solver's pair
 // loop. Pairs joined by a joint or spring are left out, like AvbdBody.ConstrainedTo.
@@ -23,19 +31,23 @@
 // Kernels, in the order the host runs them:
 //   BpReset          zeroes the control words
 //   BpClearGrid      empties the grid cells
-//   BpBounds         largest radius of the solved bodies
+//   BpBounds         largest radius, sum of the radii and number of the solved bodies
+//   BpProbe          number of solved bodies with a radius above twice the mean
 //   BpInsert         puts every solved body and every small static body into the grid (a linked list per cell, built with an atomic
-//                    exchange), and the large static bodies into the list
+//                    exchange); the large static bodies go into the static list and the large solved bodies into the large list
 //   BpPairsDynamic   a solved body walks the 27 cells: dynamic-dynamic pairs and the dynamic-static pairs of the small static bodies
 //   BpPairsStatic    dynamic-static pairs of the large static bodies
+//   BpPairsLarge     every pair of a large solved body with another body (not a large static one)
 // Mirrored by Reference/Stages/CpuBroadphase.cs, which the tests compare against.
 
 #pragma kernel BpReset
 #pragma kernel BpClearGrid
 #pragma kernel BpBounds
+#pragma kernel BpProbe
 #pragma kernel BpInsert
 #pragma kernel BpPairsDynamic
 #pragma kernel BpPairsStatic
+#pragma kernel BpPairsLarge
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
@@ -54,6 +66,7 @@ RWStructuredBuffer<uint>            _GridHead;   // per grid cell: the first bod
 RWStructuredBuffer<uint>            _GridNext;   // per body: the next body in its cell's list
 RWStructuredBuffer<uint4>           _BodyCell;   // per body: xyz = cell coordinates (int bits), w = grid cell index (| AVBD_BP_STATIC_FLAG for a static body), or AVBD_INVALID if not in the grid
 RWStructuredBuffer<uint>            _StaticList;   // the large static bodies
+RWStructuredBuffer<uint>            _LargeList;    // the large solved bodies (AVBD_BP_LARGE_CAP words)
 RWStructuredBuffer<PairRecord>      _Pairs;      // bin 0 (dynamic-dynamic) at [0, _DynamicPairCapacity), then bin 1 (dynamic-static)
 
 uint _Base;
@@ -81,9 +94,26 @@ float Radius(uint slot)
     return length(_BodyShape[slot].sizeFriction.xyz * 0.5);
 }
 
+float MeanRadius()
+{
+    uint count = _BpControl[AVBD_BP_SOLVED_COUNT];
+    return count == 0u ? 0.0 : (float)_BpControl[AVBD_BP_RADIUS_SUM] / (AVBD_BP_RADIUS_SCALE * (float)count);
+}
+
+// The radius the grid is made for: every body of the grid has a radius of at most this, and the cell size is twice this (with a margin), so two
+// overlapping bodies of the grid are in the same or in adjacent cells. The largest radius, unless a few bodies are much larger than the mean.
+// Needs the words written by BpBounds and BpProbe. Every kernel after BpProbe computes the same value.
+float GridRadius()
+{
+    float largest = asfloat(_BpControl[AVBD_BP_MAX_RADIUS]);
+    if (_BpControl[AVBD_BP_LARGE_PROBE] <= AVBD_BP_LARGE_CAP)
+        return min(largest, 2.0 * MeanRadius());
+    return largest;
+}
+
 float CellSize()
 {
-    return max(2.0 * asfloat(_BpControl[AVBD_BP_MAX_RADIUS]) * AVBD_BP_CELL_MARGIN, 1.0e-4);
+    return max(2.0 * GridRadius() * AVBD_BP_CELL_MARGIN, 1.0e-4);
 }
 
 int3 CellOf(float3 position, float cellSize)
@@ -178,7 +208,25 @@ void BpBounds(uint3 id : SV_DispatchThreadID)
         {
             uint previous;
             InterlockedMax(_BpControl[AVBD_BP_MAX_RADIUS], asuint(radius), previous);
+            InterlockedAdd(_BpControl[AVBD_BP_RADIUS_SUM], (uint)min(radius * AVBD_BP_RADIUS_SCALE + 0.5, 4.0e9), previous);
+            InterlockedAdd(_BpControl[AVBD_BP_SOLVED_COUNT], 1u, previous);
         }
+    }
+}
+
+// Counts the solved bodies that are far above the mean. If there are few of them they are "large" (BpInsert), else nothing is.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BpProbe(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count || Classify(slot) != CLASS_SOLVED)
+        return;
+
+    float radius = Radius(slot);
+    if (isfinite(radius) && IsFinite3(_BodyState[slot].position.xyz) && radius > 2.0 * MeanRadius())
+    {
+        uint previous;
+        InterlockedAdd(_BpControl[AVBD_BP_LARGE_PROBE], 1u, previous);
     }
 }
 
@@ -198,13 +246,15 @@ void BpInsert(uint3 id : SV_DispatchThreadID)
     if (!IsFinite3(position))
         return; // a body at a non-finite position makes no pairs
 
+    float gridRadius = GridRadius();
+    float radius = Radius(slot);
+    if (!isfinite(radius))
+        return;
+
     uint flag = 0u;
     if (kind == CLASS_STATIC)
     {
-        float radius = Radius(slot);
-        if (!isfinite(radius))
-            return;
-        if (radius > asfloat(_BpControl[AVBD_BP_MAX_RADIUS]))
+        if (radius > gridRadius)
         {
             // Too big for a cell: rSolved + rStatic could be more than the cell size. Every solved body is tested against these.
             uint listIndex;
@@ -213,6 +263,15 @@ void BpInsert(uint3 id : SV_DispatchThreadID)
             return;
         }
         flag = AVBD_BP_STATIC_FLAG;
+    }
+    else if (radius > gridRadius)
+    {
+        // A large solved body (the probe found at most AVBD_BP_LARGE_CAP of them, or none): not in the grid, see BpPairsLarge.
+        uint listIndex;
+        InterlockedAdd(_BpControl[AVBD_BP_LARGE_COUNT], 1u, listIndex);
+        if (listIndex < AVBD_BP_LARGE_CAP)
+            _LargeList[listIndex] = slot;
+        return;
     }
 
     int3 cell = CellOf(position, CellSize());
@@ -285,5 +344,50 @@ void BpPairsStatic(uint3 id : SV_DispatchThreadID)
         uint other = _StaticList[k];
         if (SpheresOverlap(selfPosition, selfRadius, _BodyState[other].position.xyz, Radius(other)) && !Constrained(self, other))
             Emit(max(self, other), min(self, other), AVBD_PAIR_DYNAMIC_STATIC);
+    }
+}
+
+// One thread per (slot, large body): the pairs of the large body `_LargeList[id.y]` with the body `slot`, every one found here and only here
+// (except with a large static body, see BpPairsStatic). A large body is not in the grid, so the grid walk never finds it.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BpPairsLarge(uint3 id : SV_DispatchThreadID)
+{
+    uint other = _Base + id.x;
+    if (other >= _Count)
+        return;
+    uint j = id.y;
+    if (j >= min(_BpControl[AVBD_BP_LARGE_COUNT], AVBD_BP_LARGE_CAP))
+        return;
+
+    uint large = _LargeList[j];
+    if (large == other)
+        return;
+
+    uint kind = Classify(other);
+    if (kind == CLASS_FREE)
+        return;
+
+    float3 otherPosition = _BodyState[other].position.xyz;
+    float otherRadius = Radius(other);
+    if (!IsFinite3(otherPosition) || !isfinite(otherRadius))
+        return;
+    if (!SpheresOverlap(_BodyState[large].position.xyz, Radius(large), otherPosition, otherRadius))
+        return;
+
+    float gridRadius = GridRadius();
+    if (kind == CLASS_SOLVED)
+    {
+        // Two large bodies: the pair is found by the thread whose large body has the higher slot.
+        if (otherRadius > gridRadius && large < other)
+            return;
+        uint a = max(large, other);
+        uint b = min(large, other);
+        if (!Constrained(a, b))
+            Emit(a, b, AVBD_PAIR_DYNAMIC_DYNAMIC);
+    }
+    else if (otherRadius <= gridRadius) // a large static body is BpPairsStatic's
+    {
+        if (!Constrained(large, other))
+            Emit(max(large, other), min(large, other), AVBD_PAIR_DYNAMIC_STATIC);
     }
 }

@@ -263,6 +263,75 @@ namespace McKrill.Avbd.Tests
             }
         }
 
+        // One or two bodies far above the mean radius are kept out of the grid (cell size follows twice the mean) and tested against every body:
+        // large solved bodies touching each other, small solved bodies, small and large static bodies and kinematic bodies.
+        [Test]
+        public void Gpu_MatchesTheOracle_WithAFewLargeSolvedBodies_AmongManySmallOnes()
+        {
+            RequireCompute();
+            const int capacity = 2048;
+            using (var buffers = new AvbdBodyBuffers(capacity))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), capacity, 1 << 16, 1 << 16))
+            {
+                for (int x = 0; x < 10; x++)
+                    for (int z = 0; z < 10; z++)
+                        buffers.Spawn(BodyDescriptor.Box(new float3(1f), 0f, new float3(x * 1.2f, -0.2f, z * 1.2f)));         // 100 small static tiles
+                buffers.Spawn(BodyDescriptor.Box(new float3(300f, 1f, 300f), 0f, new float3(6f, -3f, 6f)));                    // a large static slab
+                buffers.Spawn(BodyDescriptor.Box(new float3(9f, 9f, 9f), 0f, new float3(14f, 2f, 3f)));                        // a large static body that overlaps the large solved ones
+
+                var rng = new System.Random(5);
+                for (int i = 0; i < 400; i++)
+                {
+                    float s = Range(rng, 0.8f, 1.1f);
+                    buffers.Spawn(BodyDescriptor.Box(new float3(s), 1f, new float3(Range(rng, -2f, 14f), Range(rng, 0f, 6f), Range(rng, -2f, 14f))));
+                }
+
+                // Large solved bodies, two of them overlapping, one overlapping the large static body.
+                BodyHandle big0 = buffers.Spawn(BodyDescriptor.Box(new float3(8f), 1f, new float3(5f, 3f, 5f)));
+                buffers.Spawn(BodyDescriptor.Box(new float3(7f), 1f, new float3(9f, 3f, 6f)));
+                buffers.Spawn(BodyDescriptor.Box(new float3(8f), 1f, new float3(14f, 4f, 4f)));
+
+                BodyDescriptor kinematicDescriptor = BodyDescriptor.Box(new float3(1.5f), 1f, new float3(6f, 1f, 6f));
+                kinematicDescriptor.kinematic = true;
+                BodyHandle kinematic = buffers.Spawn(kinematicDescriptor);
+
+                broadphase.Run(buffers, null);
+                Assert.AreEqual(3, broadphase.ReadLargeBodyCount(), "the three big bodies are above twice the mean radius");
+                SortedSet<ulong> got = ToSet(broadphase.ReadPairs());
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0), got, "large solved bodies");
+                Assert.Greater(broadphase.DynamicPairCount, 50, "the big bodies touch many small ones");
+                Assert.Greater(broadphase.StaticPairCount, 50, "and the small static tiles");
+
+                buffers.SetPose(kinematic, new float3(11f, 2f, 5f), quaternion.identity);
+                buffers.SetPose(big0, new float3(-3f, 1f, 12f), quaternion.identity);
+                broadphase.Run(buffers, null);
+                got = ToSet(broadphase.ReadPairs());
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0), got, "after two bodies moved");
+            }
+        }
+
+        // More large bodies than AVBD_BP_LARGE_CAP: the grid uses the largest radius, as if none were large. Every pair is still found.
+        [Test]
+        public void Gpu_MatchesTheOracle_WhenMoreThanTheCapOfBodiesAreLarge_ByFallingBackToTheLargestRadius()
+        {
+            RequireCompute();
+            const int capacity = 1024;
+            using (var buffers = new AvbdBodyBuffers(capacity))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), capacity, 1 << 16, 1 << 16))
+            {
+                buffers.Spawn(BodyDescriptor.Box(new float3(100f, 1f, 100f), 0f, new float3(5f, -2f, 5f)));
+                var rng = new System.Random(9);
+                for (int i = 0; i < 300; i++)
+                    buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(Range(rng, -2f, 12f), Range(rng, 0f, 4f), Range(rng, -2f, 12f))));
+                for (int i = 0; i < AvbdBroadphase.LargeCap + 4; i++)
+                    buffers.Spawn(BodyDescriptor.Box(new float3(8f), 1f, new float3(Range(rng, 0f, 10f), Range(rng, 0f, 4f), Range(rng, 0f, 10f))));
+
+                broadphase.Run(buffers, null);
+                Assert.AreEqual(0, broadphase.ReadLargeBodyCount(), "above the cap nothing is large");
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0), ToSet(broadphase.ReadPairs()), "too many large bodies");
+            }
+        }
+
         [Test]
         public void Gpu_SkipsPairsJoinedByAJointOrSpring_UntilTheListsDropABrokenOne_ButNotByAContact()
         {
