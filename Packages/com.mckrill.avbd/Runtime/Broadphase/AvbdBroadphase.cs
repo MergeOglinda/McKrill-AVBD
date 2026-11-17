@@ -28,6 +28,9 @@ namespace McKrill.Avbd
         public const int StaticPairsWord = 3;
         public const float CellMargin = 1.01f;
 
+        /// <summary>Mirrors AVBD_BP_SEPARATION_PAD: meters of gap (world bounding boxes, face axes) above which a candidate pair is dropped.</summary>
+        public const float SeparationPad = 0.001f;
+
         /// <summary>Mirrors AVBD_BP_STATIC_FLAG: the bit of the grid cell word that marks a static body.</summary>
         public const uint StaticCellFlag = 0x80000000u;
 
