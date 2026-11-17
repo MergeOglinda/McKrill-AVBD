@@ -52,9 +52,14 @@ namespace McKrill.Avbd
         public const int StatFinished = 198;
         public const int WorkWords = 200;
 
-        // Mirror AVBD_COLOR_FINISH_GROUP and AVBD_COLOR_FINISH_ROUNDS: the single group of ColorFinish and the rounds it runs before it stops waiting.
-        public const int FinishGroup = 256;
-        public const int FinishRounds = 64;
+        /// <summary>
+        /// Rounds after the ones the tuner chose, each dispatched indirectly with groups only if bodies are still waiting (ColorRoundPlan), so a step that
+        /// needed more rounds than the tuner expected still ends in a proper coloring. What is left after them is colored by ColorForce.
+        /// </summary>
+        public const int ExtraRounds = 8;
+
+        /// <summary>Most bodies the persistent coloring handles: an extra round is one indirect dispatch of at most 65535 groups.</summary>
+        public const int MaxPersistentBodies = 65535 * AvbdConst.GroupSize / RoundLanes;
 
         /// <summary>Mirrors AVBD_COLOR_ARGS_STRIDE: bytes of indirect arguments per color (groups x, y and z).</summary>
         public const int ArgsStride = AvbdIndirect.ArgsStride;
@@ -81,13 +86,13 @@ namespace McKrill.Avbd
         const int MaxStatsRequests = 3;
 
         readonly ComputeShader shader;
-        readonly int resetKernel, beginKernel, initKernel, keepKernel, markKernel, releaseKernel, roundKernel, finishPlanKernel, finishKernel, countKernel, planKernel, bucketKernel;
+        readonly int resetKernel, beginKernel, initKernel, keepKernel, markKernel, releaseKernel, roundKernel, roundPlanKernel, forceKernel, countKernel, planKernel, bucketKernel;
         readonly ColoringTuner tuner = new ColoringTuner();
         readonly Queue<StatsRequest> statsRequests = new Queue<StatsRequest>();
         GraphicsBuffer work;
         GraphicsBuffer args;
         GraphicsBuffer scratch;     // one word per body slot: the conflict flags of the persistent coloring
-        GraphicsBuffer finishArgs;  // indirect arguments of ColorFinish
+        GraphicsBuffer finishArgs;  // indirect arguments of an extra round (ColorRoundPlan)
         int scratchCapacity;
         int stepsSincePerfect;      // steps since the last coloring from scratch
         bool baseline;              // the colors in the body records are a coloring of the last graph that was built
@@ -163,8 +168,8 @@ namespace McKrill.Avbd
             markKernel = shader.FindKernel("ColorMark");
             releaseKernel = shader.FindKernel("ColorRelease");
             roundKernel = shader.FindKernel("ColorRound");
-            finishPlanKernel = shader.FindKernel("ColorFinishPlan");
-            finishKernel = shader.FindKernel("ColorFinish");
+            roundPlanKernel = shader.FindKernel("ColorRoundPlan");
+            forceKernel = shader.FindKernel("ColorForce");
             countKernel = shader.FindKernel("ColorCount");
             planKernel = shader.FindKernel("ColorPlan");
             bucketKernel = shader.FindKernel("ColorBucket");
@@ -256,7 +261,7 @@ namespace McKrill.Avbd
         /// <summary>
         /// Colors the solved bodies like <see cref="Run"/>, but keeps the colors of the step before and reads nothing back, so the host never waits for
         /// the GPU. The bodies that now have the color of a neighbor that colors before them (and the new ones) are recolored by a fixed number of
-        /// rounds, and whatever is still waiting by <c>ColorFinish</c>. Every <see cref="FreshInterval"/> steps, and in the step after <see cref="Run"/>,
+        /// rounds, then up to <see cref="ExtraRounds"/> more that run only while bodies wait, and <c>ColorForce</c> for what is still left. Every <see cref="FreshInterval"/> steps, and in the step after <see cref="Run"/>,
         /// every body is recolored (colors drift upward while they are kept). Returns the number of colors the primal sweep must dispatch (the cap):
         /// at least the number of colors in use, in all but the steps that a lowered cap or a graph that suddenly needs more colors catch up with; a body
         /// without a free color below the cap shares the last color for a few steps. Only meaningful after <see cref="Run"/>.
@@ -306,11 +311,16 @@ namespace McKrill.Avbd
             }
             LastRounds = rounds;
 
-            // One group finishes the bodies that wait, if there are any (indirect: no group otherwise).
+            // The bodies that still wait get more rounds, each only if some are left (an indirect dispatch without groups otherwise); then ColorForce.
             shader.SetInt(BaseId, 0);
-            shader.SetInt(CountId, bodyCount);
-            shader.Dispatch(finishPlanKernel, 1, 1, 1);
-            shader.DispatchIndirect(finishKernel, finishArgs, 0);
+            shader.SetInt(CountId, bodyCount * RoundLanes);
+            for (int i = 0; i < ExtraRounds; i++)
+            {
+                shader.Dispatch(roundPlanKernel, 1, 1, 1);
+                shader.SetInt(RoundId, rounds + i);
+                shader.DispatchIndirect(roundKernel, finishArgs, 0);
+            }
+            AvbdDispatch.Linear(shader, forceKernel, bodyCount);
 
             FinishColoring(bodyCount);
             RequestStatistics(fresh, rounds, cap);
@@ -379,7 +389,7 @@ namespace McKrill.Avbd
                     rounds = next.rounds,
                     cap = next.cap,
                     released = words[StatReleased],
-                    leftover = words[0],
+                    leftover = words[StatFinished],
                     forced = words[1],
                     colors = words[ColorCountWord],
                     lastRound = words[StatLastRound],
@@ -424,7 +434,7 @@ namespace McKrill.Avbd
         void BindAll(AvbdBodyBuffers bodies, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other, GraphicsBuffer colorBodies)
         {
             EnsureScratch(bodies.Capacity);
-            foreach (int kernel in new[] { resetKernel, beginKernel, initKernel, keepKernel, markKernel, releaseKernel, roundKernel, finishPlanKernel, finishKernel, countKernel, planKernel, bucketKernel })
+            foreach (int kernel in new[] { resetKernel, beginKernel, initKernel, keepKernel, markKernel, releaseKernel, roundKernel, roundPlanKernel, forceKernel, countKernel, planKernel, bucketKernel })
                 Bind(kernel, bodies, records, list, other, colorBodies);
         }
 

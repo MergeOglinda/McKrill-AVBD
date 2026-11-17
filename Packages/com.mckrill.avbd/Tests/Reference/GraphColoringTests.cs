@@ -368,7 +368,7 @@ namespace McKrill.Avbd.Tests
         }
 
         [TestCase(0)]  // the rounds the tuner chose
-        [TestCase(2)]  // too few: ColorFinish colors what is left
+        [TestCase(2)]  // too few: the extra rounds color what is left
         [TestCase(1)]
         public void Gpu_PersistentStep_RepairsClashes_LikeTheOracle_WhateverTheRounds(int rounds)
         {
@@ -414,7 +414,7 @@ namespace McKrill.Avbd.Tests
                     Assert.Greater(constraints.ColoringSamplesSeen, 0, "the statistics come back");
                     Assert.AreEqual((uint)forced, constraints.LastColoringSample.forced, "bodies without a free color below the cap");
                     if (rounds == 1)
-                        Assert.Greater(constraints.LastColoringSample.leftover, 0u, "one round cannot color a lattice: ColorFinish has work");
+                        Assert.Greater(constraints.LastColoringSample.leftover, 0u, "one round cannot color a lattice: the extra rounds have work");
                 }
             }
         }
@@ -598,7 +598,7 @@ namespace McKrill.Avbd.Tests
                 Assert.IsFalse(sample.fresh);
                 Assert.Greater(sample.released, 0u);
                 Assert.AreEqual(1, sample.rounds);
-                Assert.Greater(sample.leftover, 0u, "one round cannot color a chain that was released (and ColorFinish did the rest)");
+                Assert.Greater(sample.leftover, 0u, "one round cannot color a chain that was released (and the extra rounds did the rest)");
 
                 buffers.Meta.GetData(meta);
                 for (int i = 1; i < links; i++)

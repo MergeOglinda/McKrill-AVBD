@@ -13,7 +13,7 @@ namespace McKrill.Avbd
         public int cap;
         /// <summary>Bodies that lost their color because a neighbor that colors first had it.</summary>
         public uint released;
-        /// <summary>Bodies still waiting after the rounds (colored by ColorFinish).</summary>
+        /// <summary>Bodies still waiting after the rounds the host dispatched (the extra rounds and ColorForce color them).</summary>
         public uint leftover;
         /// <summary>Bodies that found no color below the cap and took the last one.</summary>
         public uint forced;
@@ -25,8 +25,8 @@ namespace McKrill.Avbd
 
     /// <summary>
     /// Chooses, from the statistics of earlier steps, how many coloring rounds the host dispatches and how many colors the primal sweep dispatches.
-    /// The statistics arrive some frames late and the choice never affects the coloring (ColorFinish completes it, and a color that does not fit under
-    /// the cap is forced into the last one): too few rounds cost one slow group for a step, too small a cap costs a few bodies solved in parallel with
+    /// The statistics arrive some frames late and the choice never affects the coloring (the extra rounds complete it, and a color that does not fit under
+    /// the cap is forced into the last one): too few rounds cost a few extra, mostly empty, dispatches for a step, too small a cap costs a few bodies solved in parallel with
     /// their neighbors for a few steps, and the tuner raises either at once and lowers them slowly.
     /// Pure C#, no GPU: the tests drive it with samples.
     /// </summary>

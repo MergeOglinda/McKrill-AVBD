@@ -357,8 +357,6 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)AvbdGraphColoring.StatReleased, d["AVBD_COLOR_STAT_RELEASED"]);
             Assert.AreEqual((uint)AvbdGraphColoring.StatLastRound, d["AVBD_COLOR_STAT_LAST_ROUND"]);
             Assert.AreEqual((uint)AvbdGraphColoring.StatFinished, d["AVBD_COLOR_STAT_FINISHED"]);
-            Assert.AreEqual((uint)AvbdGraphColoring.FinishGroup, d["AVBD_COLOR_FINISH_GROUP"]);
-            Assert.AreEqual((uint)AvbdGraphColoring.FinishRounds, d["AVBD_COLOR_FINISH_ROUNDS"]);
             Assert.AreEqual((uint)AvbdGraphColoring.ArgsStride, d["AVBD_COLOR_ARGS_STRIDE"]);
             Assert.AreEqual((uint)AvbdGraphColoring.RowGroups, d["AVBD_COLOR_ROW_GROUPS"]);
             Assert.AreEqual((uint)AvbdGraphColoring.PrimalLanes, d["AVBD_PRIMAL_LANES"]);

@@ -524,7 +524,7 @@ namespace McKrill.Avbd
         // Stage C of a step with contacts: persistent when it may be, from scratch (and waiting) otherwise.
         void ColorStep(int bodyCount)
         {
-            if (PersistentColoring && coloringOrder == GraphColoringOrder.Hashed && coloring.HasBaseline)
+            if (PersistentColoring && coloringOrder == GraphColoringOrder.Hashed && coloring.HasBaseline && bodyCount <= AvbdGraphColoring.MaxPersistentBodies)
             {
                 colorCount = coloring.RunPersistent(bodies, bodyCount, recordBuffer, listBuffer, lists.Other, colorBuffer, coloringOrder);
                 scheduleValid = false;

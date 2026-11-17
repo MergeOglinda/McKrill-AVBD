@@ -73,7 +73,7 @@ namespace McKrill.Avbd.Reference
         /// <summary>
         /// The persistent coloring (ColorKeep, ColorMark, ColorRelease, then Jones-Plassmann on what is released): a color below <paramref name="cap"/>
         /// is kept; of two neighbors with one color the one that colors later loses it; the bodies without a color then take, in falling priority, the
-        /// lowest color none of their colored neighbors has, or the last color below the cap if there is none. The rounds the GPU runs, and ColorFinish,
+        /// lowest color none of their colored neighbors has, or the last color below the cap if there is none. The rounds the GPU runs, and its extra rounds,
         /// only change how fast it gets there, not the result. <paramref name="forced"/> counts the bodies that took the last color for lack of a free one.
         /// </summary>
         public static int[] Persistent(ConstraintRecord[] records, ConstraintTopology topology, bool[] solved, int bodyCount, GraphColoringOrder order,
