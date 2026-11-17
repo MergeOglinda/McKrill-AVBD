@@ -373,6 +373,22 @@ void ColorForce(uint3 id : SV_DispatchThreadID)
     _BodyMeta[slot].state.x = color;
 }
 
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorCount(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    uint color = _BodyMeta[slot].state.x;
+    if (color < AVBD_COLOR_MAX)
+    {
+        uint previous;
+        InterlockedAdd(_ColorWork[AVBD_COLOR_COUNTS_OFFSET + color], 1u, previous);
+    }
+}
+
+// Runs after ColorCount. Colors are numbered from 0 and AVBD_COLOR_MAX entries are always written: a color without bodies gets an empty dispatch.
 // Also writes the number of colors (the highest color with a body, plus 1): the persistent coloring keeps colors, so the rounds alone do not know it.
 [numthreads(1, 1, 1)]
 void ColorPlan(uint3 id : SV_DispatchThreadID)
