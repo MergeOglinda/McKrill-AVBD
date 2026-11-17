@@ -160,6 +160,7 @@ void ColorMark(uint3 id : SV_DispatchThreadID)
     {
         uint2 range = _BodyRange[slot].range.xy;
         uint previous = AVBD_INVALID;
+        [loop]
         for (uint e = 0u; e < range.y && flag == 0u; e++)
         {
             uint other = OtherBody(range.x + e);
@@ -320,6 +321,7 @@ uint FirstFreeColor(uint2 range)
     uint low = 0u;
     uint high = 0u;
     uint previous = AVBD_INVALID;
+    [loop]
     for (uint e = 0u; e < range.y; e++)
     {
         uint other = OtherBody(range.x + e);
@@ -352,6 +354,7 @@ uint FirstFreeColor(uint2 range)
 void ColorFinish(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 {
     bool done = false;
+    [loop]
     for (uint iteration = 0u; iteration <= AVBD_COLOR_FINISH_ROUNDS; iteration++)
     {
         if (tid == 0u)
@@ -362,6 +365,7 @@ void ColorFinish(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
         bool lastPass = iteration == AVBD_COLOR_FINISH_ROUNDS;
         if (!done)
         {
+            [loop]
             for (uint slot = _Base + tid; slot < _Count; slot += AVBD_COLOR_FINISH_GROUP)
             {
                 if (_BodyMeta[slot].state.x != AVBD_COLOR_PENDING)
@@ -370,6 +374,7 @@ void ColorFinish(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
                 uint2 range = _BodyRange[slot].range.xy;
                 bool waiting = false;
                 uint previous = AVBD_INVALID;
+                [loop]
                 for (uint e = 0u; e < range.y && !waiting && !lastPass; e++)
                 {
                     uint other = OtherBody(range.x + e);
