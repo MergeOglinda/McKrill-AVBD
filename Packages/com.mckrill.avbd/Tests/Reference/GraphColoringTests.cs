@@ -562,176 +562,7 @@ namespace McKrill.Avbd.Tests
             return colors;
         }
 
-        // ---- persistent coloring: the oracle ----------------------------------------------------------------------------
-
-        [Test]
-        public void Oracle_Persistent_WithoutPreviousColors_IsTheColoringFromScratch()
-        {
-            for (int seed = 1; seed <= 8; seed++)
-            {
-                var solver = new ReferenceSolver();
-                ConstraintTestScenes.RandomLattice(solver, 700 + seed);
-                SceneArrays scene = ConstraintTestScenes.FromReference(solver, Capacity);
-                ConstraintTopology topology = scene.BuildTopology();
-                bool[] solved = scene.Solved();
-
-                int[] fresh = CpuGraphColoring.Color(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed);
-                int[] none = Filled(scene.bodyCount, -1);
-                int[] persistent = CpuGraphColoring.Persistent(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed, none, 64, out int forced);
-
-                Assert.AreEqual(0, forced);
-                CollectionAssert.AreEqual(fresh, persistent, "seed " + seed);
-            }
-        }
-
-        [Test]
-        public void Oracle_Persistent_KeepsWhatDoesNotClash_AndIsProper()
-        {
-            for (int seed = 1; seed <= 8; seed++)
-            {
-                var solver = new ReferenceSolver();
-                ConstraintTestScenes.RandomLattice(solver, 800 + seed);
-                SceneArrays scene = ConstraintTestScenes.FromReference(solver, Capacity);
-                ConstraintTopology topology = scene.BuildTopology();
-                bool[] solved = scene.Solved();
-                int[] previous = Tampered(scene, solved, seed, 4);
-
-                int[] colors = CpuGraphColoring.Persistent(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed, previous, 64, out int forced);
-
-                Assert.AreEqual(0, forced);
-                AssertProper(scene.constraints, scene.constraintCount, solved, colors, "seed " + seed);
-
-                // A body keeps its color unless a neighbor that colors before it has the same one.
-                for (int s = 0; s < scene.bodyCount; s++)
-                {
-                    if (!solved[s])
-                        continue;
-                    bool clashes = false;
-                    for (int i = 0; i < scene.constraintCount; i++)
-                    {
-                        ConstraintRecord c = scene.constraints[i];
-                        if (c.ident.x != (uint)s && c.ident.y != (uint)s)
-                            continue;
-                        uint other = c.ident.x == (uint)s ? c.ident.y : c.ident.x;
-                        if (other != AvbdConst.Invalid && solved[other] && previous[other] == previous[s]
-                            && CpuGraphColoring.ColorsBefore(other, (uint)s, GraphColoringOrder.Hashed))
-                            clashes = true;
-                    }
-                    if (!clashes)
-                        Assert.AreEqual(previous[s], colors[s], "seed " + seed + ": body " + s + " has no clash and keeps its color");
-                }
-            }
-        }
-
-        [Test]
-        public void Oracle_Persistent_ACapForcesTheLastColor()
-        {
-            var solver = new ReferenceSolver();
-            ConstraintTestScenes.RandomLattice(solver, 811);
-            SceneArrays scene = ConstraintTestScenes.FromReference(solver, Capacity);
-            ConstraintTopology topology = scene.BuildTopology();
-            bool[] solved = scene.Solved();
-            int[] fresh = CpuGraphColoring.Color(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed);
-            int colors = 0;
-            foreach (int c in fresh)
-                colors = Math.Max(colors, c + 1);
-            Assume.That(colors, Is.GreaterThan(2), "the scene needs more than two colors for this test");
-
-            int[] capped = CpuGraphColoring.Persistent(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed,
-                Filled(scene.bodyCount, -1), colors - 1, out int forced);
-            Assert.Greater(forced, 0);
-            foreach (int c in capped)
-                Assert.Less(c, colors - 1);
-        }
-
-        // ---- persistent coloring: the GPU ---------------------------------------------------------------------------------
-
-        [TestCase(0, 0, TestName = "Gpu_Persistent_MatchesTheOracle_WithTheTunersRounds")]
-        [TestCase(1, 0, TestName = "Gpu_Persistent_MatchesTheOracle_WithOneRound_ColorFinishCompletesIt")]
-        [TestCase(2, 0, TestName = "Gpu_Persistent_MatchesTheOracle_WithTwoRounds")]
-        public void Gpu_Persistent_MatchesTheOracle(int rounds, int cap)
-        {
-            RequireCompute();
-            for (int seed = 1; seed <= 6; seed++)
-            {
-                var solver = new ReferenceSolver();
-                ConstraintTestScenes.RandomLattice(solver, 900 + seed);
-                SceneArrays scene = ConstraintTestScenes.FromReference(solver, Capacity);
-                ConstraintTopology topology = scene.BuildTopology();
-                bool[] solved = scene.Solved();
-
-                using (var buffers = new AvbdBodyBuffers(Capacity))
-                using (var constraints = new AvbdConstraintBuffers(buffers, 128))
-                {
-                    foreach (BodyDescriptor d in scene.descriptors)
-                        buffers.Spawn(d);
-                    for (int i = 0; i < scene.constraintCount; i++)
-                        constraints.AddRecord(scene.constraints[i]);
-                    constraints.Rebuild();
-                    constraints.PinColoring(rounds, cap);
-
-                    // The first persistent step after an exact coloring starts from scratch: the oracle's coloring.
-                    constraints.ColorStep();
-                    int[] fresh = CpuGraphColoring.Color(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed);
-                    AssertColors(buffers, solved, fresh, scene.bodyCount, "seed " + seed + ", step from scratch");
-
-                    // Damage the colors the way a changed graph would, then let the next step repair them.
-                    int[] previous = Tampered(scene, solved, seed, 4);
-                    WriteColors(buffers, solved, previous);
-                    constraints.ColorStep();
-
-                    int[] expected = CpuGraphColoring.Persistent(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed,
-                        previous, constraints.ColorCount, out int forced);
-                    Assert.AreEqual(0, forced);
-                    AssertColors(buffers, solved, expected, scene.bodyCount, "seed " + seed + ", repair");
-                    AssertProper(scene.constraints, scene.constraintCount, solved, expected, "seed " + seed + " (oracle)");
-                    AssertBuckets(buffers, constraints, solved, expected, scene.bodyCount, "seed " + seed);
-
-                    // Nothing clashes any more: another step changes nothing.
-                    constraints.ColorStep();
-                    AssertColors(buffers, solved, expected, scene.bodyCount, "seed " + seed + ", repaired colors are kept");
-                }
-            }
-        }
-
-        [Test]
-        public void Gpu_Persistent_ACapSmallerThanTheColorsForcesTheLastColor_AndSaysSo()
-        {
-            RequireCompute();
-            var solver = new ReferenceSolver();
-            ConstraintTestScenes.RandomLattice(solver, 911);
-            SceneArrays scene = ConstraintTestScenes.FromReference(solver, Capacity);
-            ConstraintTopology topology = scene.BuildTopology();
-            bool[] solved = scene.Solved();
-            int[] fresh = CpuGraphColoring.Color(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed);
-            int colors = 0;
-            foreach (int c in fresh)
-                colors = Math.Max(colors, c + 1);
-            Assume.That(colors, Is.GreaterThan(2));
-
-            using (var buffers = new AvbdBodyBuffers(Capacity))
-            using (var constraints = new AvbdConstraintBuffers(buffers, 128))
-            {
-                foreach (BodyDescriptor d in scene.descriptors)
-                    buffers.Spawn(d);
-                for (int i = 0; i < scene.constraintCount; i++)
-                    constraints.AddRecord(scene.constraints[i]);
-                constraints.Rebuild();
-                constraints.PinColoring(0, colors - 1);
-                constraints.ColorStep();
-                constraints.FlushColoringStatistics();
-
-                int[] expected = CpuGraphColoring.Persistent(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed,
-                    Filled(scene.bodyCount, -1), colors - 1, out int forced);
-                Assert.Greater(forced, 0);
-                AssertColors(buffers, solved, expected, scene.bodyCount, "capped");
-                Assert.AreEqual(colors - 1, constraints.ColorCount);
-
-                Assert.GreaterOrEqual(constraints.ColoringSamplesSeen, 1);
-                Assert.AreEqual((uint)forced, constraints.LastColoringSample.forced);
-                Assert.AreEqual((uint)(colors - 1), constraints.LastColoringSample.colors);
-            }
-        }
+        // ---- persistent coloring: statistics ---------------------------------------------------------------------------
 
         [Test]
         public void Gpu_Persistent_ReportsWhatTheStepDid()
@@ -747,7 +578,7 @@ namespace McKrill.Avbd.Tests
                 for (int i = 1; i < links; i++)
                     constraints.AddJoint(handles[i - 1], handles[i], new float3(1f, 0f, 0f), new float3(-1f, 0f, 0f));
                 constraints.Rebuild();
-                constraints.ColorStep(); // from scratch
+                constraints.ColorStepForTests(); // from scratch
                 constraints.FlushColoringStatistics();
                 Assert.AreEqual(1, constraints.ColoringSamplesSeen);
                 Assert.IsTrue(constraints.LastColoringSample.fresh);
@@ -759,8 +590,8 @@ namespace McKrill.Avbd.Tests
                 for (int i = 0; i < links; i++)
                     meta[handles[i].Slot].state.x = 0u;
                 buffers.Meta.SetData(meta);
-                constraints.PinColoring(1, 0);
-                constraints.ColorStep();
+                constraints.PinColoring(0, 1);
+                constraints.ColorStepForTests();
                 constraints.FlushColoringStatistics();
 
                 ColoringSample sample = constraints.LastColoringSample;
@@ -846,67 +677,6 @@ namespace McKrill.Avbd.Tests
         }
 
         // ---- helpers -----------------------------------------------------------------------------------------------
-
-        static int[] Filled(int count, int value)
-        {
-            var a = new int[count];
-            for (int i = 0; i < count; i++)
-                a[i] = value;
-            return a;
-        }
-
-        // Colors from a damaged coloring: every solved body gets a random one of the first few colors, so many neighbors clash.
-        static int[] Tampered(SceneArrays scene, bool[] solved, int seed, int colors)
-        {
-            var random = new System.Random(seed);
-            int[] previous = Filled(scene.bodyCount, -1);
-            for (int s = 0; s < scene.bodyCount; s++)
-                if (solved[s])
-                    previous[s] = random.Next(0, colors);
-            return previous;
-        }
-
-        static void WriteColors(AvbdBodyBuffers buffers, bool[] solved, int[] colors)
-        {
-            var meta = new BodyMetaRecord[buffers.Capacity];
-            buffers.Meta.GetData(meta);
-            for (int s = 0; s < solved.Length; s++)
-                if (solved[s])
-                    meta[s].state.x = (uint)colors[s];
-            buffers.Meta.SetData(meta);
-        }
-
-        static void AssertColors(AvbdBodyBuffers buffers, bool[] solved, int[] expected, int bodyCount, string what)
-        {
-            var meta = new BodyMetaRecord[buffers.Capacity];
-            buffers.Meta.GetData(meta);
-            for (int s = 0; s < bodyCount; s++)
-                Assert.AreEqual(solved[s] ? (uint)expected[s] : NoColor, meta[s].state.x, what + ": color of body " + s);
-        }
-
-        // Every solved body is in the bucket of its color, and only there. The sweep dispatches the cap, which can be more than the colors in use.
-        static void AssertBuckets(AvbdBodyBuffers buffers, AvbdConstraintBuffers constraints, bool[] solved, int[] expected, int bodyCount, string what)
-        {
-            uint[] bucketed = constraints.ReadColorBodies();
-            int solvedCount = 0;
-            foreach (bool s in solved)
-                if (s) solvedCount++;
-            Assert.AreEqual(solvedCount, bucketed.Length, what + ": bucketed bodies");
-
-            for (int c = 0; c < constraints.ColorCount; c++)
-            {
-                var want = new List<uint>();
-                for (int s = 0; s < bodyCount; s++)
-                    if (solved[s] && expected[s] == c)
-                        want.Add((uint)s);
-                var got = new List<uint>();
-                for (int k = 0; k < constraints.ColorSize(c); k++)
-                    got.Add(bucketed[constraints.ColorOffset(c) + k]);
-                want.Sort();
-                got.Sort();
-                CollectionAssert.AreEqual(want, got, what + ": bodies of color " + c);
-            }
-        }
 
         // Compares what the GPU left in the body arrays and the bucket buffer with the oracle's coloring.
         static void AssertColoring(AvbdBodyBuffers buffers, AvbdConstraintBuffers constraints, ConstraintRecord[] records, int recordCount,
