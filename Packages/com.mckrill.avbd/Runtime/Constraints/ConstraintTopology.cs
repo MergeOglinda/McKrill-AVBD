@@ -74,13 +74,13 @@ namespace McKrill.Avbd
         }
 
         /// <summary>
-        /// Like <see cref="Build"/>, with the contacts of the manifold pool: slot s holds <paramref name="slotCounts"/>[s] contacts of the pair
-        /// (<paramref name="slotBodies"/>[s].x = body A, .y = body B; AVBD_INVALID = free slot), whose records are at
-        /// <paramref name="contactBase"/> + s * MaxContactsPerPair. The contacts are listed in pair order (body A, then body B, ascending), whatever
-        /// slots the pairs occupy, so the lists do not depend on the order in which the GPU handed out the slots.
+        /// Like <see cref="Build"/>, with the contacts of the manifold pool as the GPU lists them: slot s holds <paramref name="slotCounts"/>[s] contacts of
+        /// the pair (<paramref name="slotBodies"/>[s].x = body A, .y = body B; AVBD_INVALID = free slot). Every manifold is one list entry,
+        /// <see cref="AvbdConstraintLists.ContactFlag"/> | slot, however many contacts it has. The entries are in pair order (body A, then body B,
+        /// ascending), whatever slots the pairs occupy, so the lists do not depend on the order in which the GPU handed out the slots.
         /// </summary>
         public void BuildWithManifolds(ConstraintRecord[] records, int recordCount, bool[] solved, int bodyCount, bool buildColoring,
-            uint[] slotCounts, uint4[] slotBodies, int slotCount, int contactBase)
+            uint[] slotCounts, uint4[] slotBodies, int slotCount)
         {
             if (records == null) throw new ArgumentNullException(nameof(records));
             if (solved == null) throw new ArgumentNullException(nameof(solved));
@@ -90,7 +90,7 @@ namespace McKrill.Avbd
             if (bodyCount < 0 || bodyCount > solved.Length) throw new ArgumentOutOfRangeException(nameof(bodyCount));
             if (slotCount < 0 || slotCount > slotCounts.Length || slotCount > slotBodies.Length) throw new ArgumentOutOfRangeException(nameof(slotCount));
 
-            CollectManifoldContacts(slotCounts, slotBodies, slotCount, contactBase, solved, bodyCount);
+            CollectManifoldContacts(slotCounts, slotBodies, slotCount, solved, bodyCount);
             BuildFromCollected(records, recordCount, solved, bodyCount, buildColoring);
         }
 
@@ -208,9 +208,9 @@ namespace McKrill.Avbd
                     ColorBodies[next[ColorOfBody[s]]++] = (uint)s;
         }
 
-        // Lists the contacts of the used manifold slots, in pair order, as (body A, body B, constraint id). Slots of two bodies that are not solved are
+        // Lists the used manifold slots, in pair order, as (body A, body B, entry), one entry per manifold. Slots of two bodies that are not solved are
         // skipped (the narrow phase writes none).
-        void CollectManifoldContacts(uint[] slotCounts, uint4[] slotBodies, int slotCount, int contactBase, bool[] solved, int bodyCount)
+        void CollectManifoldContacts(uint[] slotCounts, uint4[] slotBodies, int slotCount, bool[] solved, int bodyCount)
         {
             contactCount = 0;
 
@@ -246,21 +246,17 @@ namespace McKrill.Avbd
                 if (!solved[a] && !solved[b])
                     continue;
 
-                int count = (int)slotCounts[slot];
-                if (contactCount + count > contactA.Length)
+                if (contactCount + 1 > contactA.Length)
                 {
-                    int size = Math.Max(64, Math.Max(contactA.Length * 2, contactCount + count));
+                    int size = Math.Max(64, contactA.Length * 2);
                     Array.Resize(ref contactA, size);
                     Array.Resize(ref contactB, size);
                     Array.Resize(ref contactId, size);
                 }
-                for (int k = 0; k < count; k++)
-                {
-                    contactA[contactCount] = a;
-                    contactB[contactCount] = b;
-                    contactId[contactCount] = (uint)(contactBase + slot * ContactLayout.MaxContactsPerPair + k);
-                    contactCount++;
-                }
+                contactA[contactCount] = a;
+                contactB[contactCount] = b;
+                contactId[contactCount] = AvbdConstraintLists.ContactFlag | (uint)slot;
+                contactCount++;
             }
         }
         /// <summary>A fractured joint does nothing any more: the reference solver removes it, and the lists and the coloring leave it out.</summary>

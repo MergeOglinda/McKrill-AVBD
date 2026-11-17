@@ -16,7 +16,11 @@
 // Threads that sort the list of one body (a power of two that divides AVBD_GROUP_SIZE).
 #define AVBD_LIST_SORT_LANES 8u
 
-// Contact records per manifold slot (mirrors ContactLayout.MaxContactsPerPair).
+// Contact points per manifold slot (mirrors ContactLayout.MaxContactsPerPair): a manifold that reports more is invalid.
 #define AVBD_LIST_CONTACTS_PER_SLOT 8
+
+// A list entry is a constraint id (a joint or a spring), or, with this bit set, a manifold slot: one entry per manifold, whatever its number of
+// contact points. The stages that walk a list read the pair record of the slot and loop over its points.
+#define AVBD_LIST_CONTACT_FLAG 0x80000000u
 
 #endif // MCKRILL_AVBD_LIST_PARAMS_INCLUDED

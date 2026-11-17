@@ -4,13 +4,16 @@
 // walked by several threads instead of one, which is what bounds the time of a color when the colors are small.
 // Dispatched (indirectly) once per graph color and iteration: the bodies of one color share no constraint, so a body writes only its own
 // pose and reads the others' poses from other colors, with no atomics (except the failure counter).
-// Mirrored by Reference/Stages/CpuPrimal.cs, which the tests compare against. The sum of the lanes adds the terms in another order than the
+// A list entry is a joint or spring, or a whole manifold: the lane that takes a manifold stamps all its points, so a pair with several points is one
+// unit of work (about as much as several joints). Mirrored by Reference/Stages/CpuPrimal.cs, which the tests compare against. The sum of the lanes adds the terms in another order than the
 // reference does, so the two agree to rounding, not bit for bit.
 
 #pragma kernel Primal
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdListParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdColoringParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
@@ -21,8 +24,10 @@ StructuredBuffer<BodyInertialRecord>   _BodyInertial;
 StructuredBuffer<BodyMassRecord>       _BodyMass;
 StructuredBuffer<BodyMetaRecord>       _BodyMeta;
 StructuredBuffer<BodyRangeRecord>      _BodyRange;
-StructuredBuffer<ConstraintRecord>     _Constraints;
-StructuredBuffer<uint>                 _ConstraintList; // constraint ids, grouped per body (see _BodyRange)
+StructuredBuffer<ConstraintRecord>     _Constraints;    // joints and springs
+StructuredBuffer<ContactPairRecord>    _ContactPairs;   // manifolds of the pool (a list entry with AVBD_LIST_CONTACT_FLAG names one)
+StructuredBuffer<ContactPointRecord>   _ContactPoints;
+StructuredBuffer<uint>                 _ConstraintList; // entries, grouped per body (see _BodyRange): a joint or spring id, or AVBD_LIST_CONTACT_FLAG | manifold slot
 StructuredBuffer<uint>                 _ColorBodies;    // solved body slots, grouped per color
 StructuredBuffer<uint>                 _ColorWork;      // stage C's work buffer: the size and the start of every color
 RWStructuredBuffer<uint>               _Status;         // x = number of failed solves
@@ -187,35 +192,49 @@ void StampSpring(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, 
     sys.rhsAng += jAng * f;
 }
 
-// One contact point (see Include/AvbdContactSolve.hlsl). Both bodies' displacements from the start of the step enter the constraint value:
-// the body being solved is passed in, the other is read from the state array.
-void StampContact(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+// The contact points of manifold slot `manifold` (see Include/AvbdContactSolve.hlsl). The bodies, their displacements from the start of the step
+// and the contact basis are the same for every point of the pair, so they are loaded and made once; both bodies' displacements enter the
+// constraint value: the body being solved is passed in, the other is read from the state array.
+void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
 {
-    bool isA = c.ident.x == slot;
+    ContactPairRecord pair = _ContactPairs[manifold];
+    uint count = min(pair.ident.z, AVBD_MAX_CONTACTS);
+    if (pair.ident.x == AVBD_INVALID || count == 0u)
+        return; // a manifold that is gone: nothing to stamp
+
+    bool isA = pair.ident.x == slot;
 
     float3 posA, posB;
     float4 rotA, rotB;
-    LoadPose(c.ident.x, slot, selfPos, selfRot, posA, rotA);
-    LoadPose(c.ident.y, slot, selfPos, selfRot, posB, rotB);
+    LoadPose(pair.ident.x, slot, selfPos, selfRot, posA, rotA);
+    LoadPose(pair.ident.y, slot, selfPos, selfRot, posB, rotB);
 
-    BodyStateRecord stateA = _BodyState[c.ident.x];
-    BodyStateRecord stateB = _BodyState[c.ident.y];
+    BodyStateRecord stateA = _BodyState[pair.ident.x];
+    BodyStateRecord stateB = _BodyState[pair.ident.y];
     float3 dqALin = posA - stateA.startPosition.xyz;
     float3 dqBLin = posB - stateB.startPosition.xyz;
     float3 dqAAng = AvbdQuatDifference(rotA, stateA.startRotation);
     float3 dqBAng = AvbdQuatDifference(rotB, stateB.startRotation);
 
-    float3 penalty = c.penaltyLin.xyz;
-    AvbdContactEval e = AvbdEvaluateContact(
-        c.c0Ang.xyz, c.c0Lin.xyz, penalty, c.lambdaLin.xyz, c.anchorA.w, c.anchorA.xyz, c.anchorB.xyz, rotA, rotB,
-        dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
-    AvbdContactStamp s = AvbdStampContact(e, penalty, isA);
+    float3x3 basis = AvbdContactBasis(pair.normalFriction.xyz);
+    float friction = pair.normalFriction.w;
 
-    sys.lhsLin += s.lhsLin;
-    sys.lhsAng += s.lhsAng;
-    sys.lhsCross += s.lhsCross;
-    sys.rhsLin += s.rhsLin;
-    sys.rhsAng += s.rhsAng;
+    uint first = manifold * AVBD_MAX_CONTACTS;
+    for (uint k = 0; k < count; k++)
+    {
+        ContactPointRecord p = _ContactPoints[first + k];
+        float3 penalty = ContactPointPenalty(p);
+        AvbdContactEval e = AvbdEvaluateContactInBasis(
+            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, rotA, rotB,
+            dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
+        AvbdContactStamp s = AvbdStampContact(e, penalty, isA);
+
+        sys.lhsLin += s.lhsLin;
+        sys.lhsAng += s.lhsAng;
+        sys.lhsCross += s.lhsCross;
+        sys.rhsLin += s.rhsLin;
+        sys.rhsAng += s.rhsAng;
+    }
 }
 
 // The terms of a body's system that the lanes add up: the 3x3 blocks lhsLin, lhsAng and lhsCross (9 each, row-major), then rhsLin and
@@ -309,15 +328,21 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
         uint2 range = _BodyRange[slot].range.xy;
         for (uint e = lane; e < range.y; e += AVBD_PRIMAL_LANES)
         {
-            ConstraintRecord c = _Constraints[_ConstraintList[range.x + e]];
-            uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
-            uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
-            if (kind == AVBD_CONSTRAINT_KIND_JOINT)
-                StampJoint(c, flags, slot, position, rotation, sys);
-            else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
-                StampSpring(c, slot, position, rotation, sys);
-            else if (kind == AVBD_CONSTRAINT_KIND_CONTACT)
-                StampContact(c, slot, position, rotation, sys);
+            uint entry = _ConstraintList[range.x + e];
+            if (entry & AVBD_LIST_CONTACT_FLAG)
+            {
+                StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, position, rotation, sys);
+            }
+            else
+            {
+                ConstraintRecord c = _Constraints[entry];
+                uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+                uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
+                if (kind == AVBD_CONSTRAINT_KIND_JOINT)
+                    StampJoint(c, flags, slot, position, rotation, sys);
+                else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
+                    StampSpring(c, slot, position, rotation, sys);
+            }
         }
 
         StorePartial(tid, sys);

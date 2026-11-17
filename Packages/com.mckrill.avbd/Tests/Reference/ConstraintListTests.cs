@@ -159,7 +159,7 @@ namespace McKrill.Avbd.Tests
             {
                 ContactSnapshot pool = constraints.ReadContacts();
                 oracle.BuildWithManifolds(records, constraints.RecordCount, solved, bodyCount, false, pool.Counts, pool.Bodies,
-                    constraints.ContactCapacity, constraints.ContactBase);
+                    constraints.ContactCapacity);
             }
             else
             {

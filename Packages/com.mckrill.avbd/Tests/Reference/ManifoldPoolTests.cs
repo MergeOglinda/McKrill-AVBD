@@ -272,9 +272,9 @@ namespace McKrill.Avbd.Tests
                 AssertArgs(args, ContactLayout.PoolArgsAllocateDynamic, dynamicPairs);
                 AssertArgs(args, ContactLayout.PoolArgsAllocateStatic, staticPairs);
                 AssertArgs(args, ContactLayout.PoolArgsNarrowphase, snapshot.HighWater);
-                AssertArgs(args, ContactLayout.PoolArgsDual, (long)snapshot.HighWater * ContactLayout.MaxContactsPerPair);
+                AssertArgs(args, ContactLayout.PoolArgsDual, snapshot.HighWater); // one thread per manifold, which walks its points
 
-                (uint capacityGroups, _) = AvbdIndirect.GroupsFor((long)slots * ContactLayout.MaxContactsPerPair);
+                (uint capacityGroups, _) = AvbdIndirect.GroupsFor(slots);
                 Assert.Less(args[ContactLayout.PoolArgsDual * 3], capacityGroups / 10,
                     "the dual update runs over the manifolds that exist, not over the " + capacityGroups + " groups of the capacity");
             }

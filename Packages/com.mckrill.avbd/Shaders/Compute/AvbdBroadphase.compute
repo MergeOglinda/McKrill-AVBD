@@ -118,14 +118,13 @@ bool IsFinite3(float3 v)
 // exactly a pair that must stay a candidate. They are skipped by range.z; the kind test stays for lists built without that count (it is 0). A fractured joint still counts, like AvbdBody.ConstrainedTo, until the list build (stage G) drops it, one step after it broke.
 bool Constrained(uint solvedBody, uint other)
 {
-    // The contacts are the first range.z entries of the list (stage G); only the joints and springs after them matter. A pair that touches a lot
-    // has many contacts, and this runs for every candidate pair, so visiting them would cost more than the rest of the pair test.
+    // The contacts (manifold slots, AVBD_LIST_CONTACT_FLAG) are the first range.z entries of the list (stage G); only the joints and springs after
+    // them matter, and only they are constraint ids. This runs for every candidate pair, so visiting the contacts would cost more than the rest
+    // of the pair test.
     uint3 range = _BodyRange[solvedBody].range.xyz;
     for (uint e = range.z; e < range.y; e++)
     {
         uint4 ident = _Constraints[_ConstraintList[range.x + e]].ident;
-        if ((ident.z >> AVBD_CONSTRAINT_KIND_SHIFT) == AVBD_CONSTRAINT_KIND_CONTACT)
-            continue;
         uint partner = ident.x == solvedBody ? ident.y : ident.x;
         if (partner == other)
             return true;

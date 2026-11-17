@@ -13,8 +13,8 @@ namespace McKrill.Avbd
     /// calls when constraints are pending) applies the pending body edits, completes and uploads the records, builds the per-body lists
     /// (stage G) and colors the graph and buckets the bodies (stage C), both on the GPU.
     ///
-    /// Contacts: with a nonzero <c>contactCapacity</c> the object also owns the contact region of the record array and the manifold pool of
-    /// stage N (see <see cref="ContactLayout"/>): <c>contactCapacity</c> slots, each holding the manifold of one pair of bodies. The pairs come
+    /// Contacts: with a nonzero <c>contactCapacity</c> the object also owns the manifold pool of stage N (see <see cref="ContactLayout"/>):
+    /// <c>contactCapacity</c> slots, each holding the manifold of one pair of bodies as a 32 B pair record and up to 8 contact points of 64 B. The pairs come
     /// from the broadphase (stage B), which <see cref="AvbdSolver"/> runs when there are contacts. After the narrow phase,
     /// <see cref="RefreshContactTopology"/> rebuilds the lists (stage G) and the coloring (stage C), because they change every step. The lists
     /// are built from the pool and the records where they are, with no readback. The coloring reads one small thing back, which also gives the
@@ -29,8 +29,8 @@ namespace McKrill.Avbd
         public const int MaxConstraints = 10_000_000;
 
         /// <summary>
-        /// Most manifold slots. Each takes 8 contact records of 160 B, so this many take 640 MB, and a scene needs a few slots per touching
-        /// pair of bodies: a body in a stack or pyramid touches about three others.
+        /// Most manifold slots. Each takes a pair record of 32 B and 8 contact points of 64 B, so this many take 272 MB, and a scene needs a few
+        /// slots per touching pair of bodies: a body in a stack or pyramid touches about three others.
         /// </summary>
         public const int MaxContactManifolds = 500_000;
 
@@ -65,8 +65,8 @@ namespace McKrill.Avbd
         GraphicsBuffer listBuffer;
         GraphicsBuffer colorBuffer;
         GraphicsBuffer statusBuffer;
-        GraphicsBuffer pairCountBuffer;    // contacts per manifold slot, written by stage N
-        GraphicsBuffer slotBodiesBuffer;   // per manifold slot: the pair of bodies, or AVBD_INVALID for a free slot
+        GraphicsBuffer contactPairBuffer;  // per manifold slot: the pair of bodies (AVBD_INVALID for a free slot), the contact count, the stick bits, the normal and the friction
+        GraphicsBuffer contactPointBuffer; // ContactLayout.MaxContactsPerPair contact points per manifold slot
         GraphicsBuffer pairTableBuffer;    // hash table from a pair to its slot (scratch of stage N)
         GraphicsBuffer freeListBuffer;     // stack of free manifold slots
         GraphicsBuffer poolControlBuffer;  // AVBD_NP_*
@@ -104,15 +104,14 @@ namespace McKrill.Avbd
                 throw new InvalidOperationException("Compute shaders are not supported on this device.");
 
             contactSlots = contactCapacity;
-            int contactRecords = contactSlots * ContactLayout.MaxContactsPerPair;
             int tableEntries = 64;
             while (tableEntries < contactSlots * 2)
                 tableEntries <<= 1;
             tableSize = tableEntries;
-            var slotCounts = new uint[Math.Max(1, contactSlots)];
-            var slotBodies = new uint4[Math.Max(1, contactSlots)];
-            for (int s = 0; s < slotBodies.Length; s++)
-                slotBodies[s] = new uint4(AvbdConst.Invalid, AvbdConst.Invalid, 0u, 0u);
+            int slotCount = Math.Max(1, contactSlots);
+            var freePairs = new ContactPairRecord[slotCount];
+            for (int s = 0; s < freePairs.Length; s++)
+                freePairs[s].ident = new uint4(AvbdConst.Invalid, AvbdConst.Invalid, 0u, 0u);
             dirtyBits = new uint[Math.Max(1, (bodies.Capacity + 31) / 32)];
             records = new ConstraintRecord[capacity];
 
@@ -120,16 +119,16 @@ namespace McKrill.Avbd
             if (shaders == null)
                 throw new InvalidOperationException("The AvbdShaderSet asset was not found.");
             coloring = new AvbdGraphColoring(shaders.Coloring);
-            lists = new AvbdConstraintLists(shaders.Lists, bodies.Capacity, (capacity + contactRecords) * 2);
+            lists = new AvbdConstraintLists(shaders.Lists, bodies.Capacity, (capacity + contactSlots) * 2); // a joint or a manifold is listed for at most two bodies
 
             try
             {
-                recordBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity + contactRecords, ConstraintRecordStrides.Constraint);
-                listBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (capacity + contactRecords) * 2, sizeof(uint));
-                pairCountBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slotCounts.Length, sizeof(uint));
-                slotBodiesBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slotBodies.Length, 4 * sizeof(uint));
+                recordBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity, ConstraintRecordStrides.Constraint);
+                listBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (capacity + contactSlots) * 2, sizeof(uint));
+                contactPairBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slotCount, ContactRecordStrides.Pair);
+                contactPointBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slotCount * ContactLayout.MaxContactsPerPair, ContactRecordStrides.Point);
                 pairTableBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, tableSize, sizeof(uint));
-                freeListBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slotCounts.Length, sizeof(uint));
+                freeListBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slotCount, sizeof(uint));
                 poolControlBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, ContactLayout.PoolControlWords, sizeof(uint));
                 // Written by a compute shader (a raw byte-address buffer) and read by DispatchIndirect.
                 npArgsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments | GraphicsBuffer.Target.Raw,
@@ -144,14 +143,13 @@ namespace McKrill.Avbd
                 throw;
             }
 
-            // Rule P9: nothing is assumed to be zeroed. The contact region of the records is the exception: a contact record is read only
-            // if the pair's count says it exists, and the counts are initialized here.
+            // Rule P9: nothing is assumed to be zeroed. The contact points are the exception: a point is read only if its pair's count says it
+            // exists, and the pair records (all free) are initialized here.
             recordBuffer.SetData(records, 0, 0, capacity);
-            listBuffer.SetData(new uint[(capacity + contactRecords) * 2]);
-            pairCountBuffer.SetData(slotCounts);
-            slotBodiesBuffer.SetData(slotBodies);
+            listBuffer.SetData(new uint[(capacity + contactSlots) * 2]);
+            contactPairBuffer.SetData(freePairs);
             pairTableBuffer.SetData(new uint[tableSize]);
-            var freeList = new uint[slotCounts.Length];
+            var freeList = new uint[slotCount];
             for (int i = 0; i < contactSlots; i++)
                 freeList[i] = (uint)(contactSlots - 1 - i); // the stack pops slot 0 first
             freeListBuffer.SetData(freeList);
@@ -192,9 +190,6 @@ namespace McKrill.Avbd
 
         /// <summary>Number of manifold slots: the pairs of bodies that can have contacts at once.</summary>
         public int ContactCapacity => contactSlots;
-
-        /// <summary>Index of the first contact record in <see cref="Records"/>: the capacity of the joints and springs.</summary>
-        internal int ContactBase => records.Length;
 
         /// <summary>
         /// Number of joints and springs that have fractured, as of the last list build (stage G): every step with contacts, otherwise
@@ -258,6 +253,7 @@ namespace McKrill.Avbd
         /// <summary>Constraints on the GPU: those added before the last <see cref="Rebuild"/>.</summary>
         internal int RecordCount => uploadedCount;
 
+        /// <summary>The joints and springs (the contacts are in <see cref="ContactPairsBuffer"/> and <see cref="ContactPointsBuffer"/>).</summary>
         internal GraphicsBuffer Records => recordBuffer;
         internal GraphicsBuffer List => listBuffer;
         internal GraphicsBuffer ColorBodies => colorBuffer;
@@ -271,8 +267,12 @@ namespace McKrill.Avbd
         /// <summary>Indirect dispatch arguments of the primal sweep, <see cref="AvbdGraphColoring.ArgsStride"/> bytes per color.</summary>
         internal GraphicsBuffer ColorArgs => coloring.Args;
         internal GraphicsBuffer Status => statusBuffer;
-        internal GraphicsBuffer PairCountsBuffer => pairCountBuffer;
-        internal GraphicsBuffer SlotBodiesBuffer => slotBodiesBuffer;
+
+        /// <summary>The manifold pool's pair records, one per slot (<see cref="ContactPairRecord"/>). Never null: without contacts it holds one free slot.</summary>
+        internal GraphicsBuffer ContactPairsBuffer => contactPairBuffer;
+
+        /// <summary>The manifold pool's contact points, <see cref="ContactLayout.MaxContactsPerPair"/> per slot (<see cref="ContactPointRecord"/>).</summary>
+        internal GraphicsBuffer ContactPointsBuffer => contactPointBuffer;
         internal GraphicsBuffer PairTableBuffer => pairTableBuffer;
         internal GraphicsBuffer FreeListBuffer => freeListBuffer;
         internal GraphicsBuffer PoolControlBuffer => poolControlBuffer;
@@ -504,22 +504,76 @@ namespace McKrill.Avbd
         // Stage G: the lists of the per-body constraints, from the joints and springs on the GPU and the manifold pool.
         void BuildLists(int bodyCount)
         {
-            lists.Run(bodies, bodyCount, recordBuffer, uploadedCount, listBuffer, pairCountBuffer, slotBodiesBuffer, contactSlots, ContactBase,
-                poolControlBuffer, npArgsBuffer);
+            lists.Run(bodies, bodyCount, recordBuffer, uploadedCount, listBuffer, contactPairBuffer, contactSlots, poolControlBuffer, npArgsBuffer);
         }
 
         /// <summary>Reads the manifold pool back from the GPU (this waits for the GPU): the pairs, their slots and contact counts, the free slots and the overflow count.</summary>
         internal ContactSnapshot ReadContacts()
         {
             ThrowIfDisposed();
-            var counts = new uint[pairCountBuffer.count];
-            var bodiesOfSlot = new uint4[slotBodiesBuffer.count];
+            var pairs = new ContactPairRecord[contactPairBuffer.count];
             var control = new uint[ContactLayout.PoolControlWords];
-            pairCountBuffer.GetData(counts);
-            slotBodiesBuffer.GetData(bodiesOfSlot);
+            contactPairBuffer.GetData(pairs);
             poolControlBuffer.GetData(control);
+            var counts = new uint[pairs.Length];
+            var bodiesOfSlot = new uint4[pairs.Length];
+            for (int s = 0; s < pairs.Length; s++)
+            {
+                counts[s] = pairs[s].ident.z;
+                bodiesOfSlot[s] = new uint4(pairs[s].ident.x, pairs[s].ident.y, 0u, 0u);
+            }
             return new ContactSnapshot(counts, bodiesOfSlot, (int)control[ContactLayout.PoolFreeTopWord], (int)control[ContactLayout.PoolOverflowWord],
                 (int)control[ContactLayout.PoolHighWaterWord]);
+        }
+
+        /// <summary>
+        /// Every contact of the pool in the form the CPU oracle stores (one <see cref="ConstraintRecord"/> per point), at index
+        /// <c>slot * ContactLayout.MaxContactsPerPair + k</c>; the entries beyond a slot's contact count are zero. Waits for the GPU. For tests and tools.
+        /// </summary>
+        internal ConstraintRecord[] ReadContactRecords()
+        {
+            ThrowIfDisposed();
+            var pairs = new ContactPairRecord[contactPairBuffer.count];
+            var points = new ContactPointRecord[contactPointBuffer.count];
+            contactPairBuffer.GetData(pairs);
+            contactPointBuffer.GetData(points);
+
+            var records = new ConstraintRecord[points.Length];
+            for (int s = 0; s < pairs.Length; s++)
+            {
+                if (pairs[s].ident.x == AvbdConst.Invalid)
+                    continue;
+                int count = (int)Math.Min(pairs[s].ident.z, (uint)ContactLayout.MaxContactsPerPair);
+                for (int k = 0; k < count; k++)
+                    records[s * ContactLayout.MaxContactsPerPair + k] = ContactCodec.ToRecord(pairs[s], points[s * ContactLayout.MaxContactsPerPair + k], k);
+            }
+            return records;
+        }
+
+        /// <summary>One contact of <see cref="ReadContactRecords"/>. Waits for the GPU. For tests.</summary>
+        internal ConstraintRecord ReadContactRecord(int slot, int k)
+        {
+            ThrowIfDisposed();
+            var pair = new ContactPairRecord[1];
+            var point = new ContactPointRecord[1];
+            contactPairBuffer.GetData(pair, 0, slot, 1);
+            contactPointBuffer.GetData(point, 0, slot * ContactLayout.MaxContactsPerPair + k, 1);
+            return ContactCodec.ToRecord(pair[0], point[0], k);
+        }
+
+        /// <summary>
+        /// Overwrites the values of one contact point and its stick bit with those of a CPU-oracle contact record (anchors, feature key, C0, penalty, multiplier,
+        /// stick flag). The bodies, the count, the normal and the friction of the pair stay. For tests.
+        /// </summary>
+        internal void WriteContactRecord(int slot, int k, in ConstraintRecord record)
+        {
+            ThrowIfDisposed();
+            var pair = new ContactPairRecord[1];
+            contactPairBuffer.GetData(pair, 0, slot, 1);
+            uint bit = 1u << k;
+            pair[0].ident.w = (record.ident.z & (uint)ConstraintFlags.Stick) != 0u ? pair[0].ident.w | bit : pair[0].ident.w & ~bit;
+            contactPairBuffer.SetData(pair, 0, slot, 1);
+            contactPointBuffer.SetData(new[] { ContactCodec.FromRecord(record) }, 0, slot * ContactLayout.MaxContactsPerPair + k, 1);
         }
 
         /// <summary>
@@ -597,8 +651,8 @@ namespace McKrill.Avbd
             Release(ref listBuffer);
             Release(ref colorBuffer);
             Release(ref statusBuffer);
-            Release(ref pairCountBuffer);
-            Release(ref slotBodiesBuffer);
+            Release(ref contactPairBuffer);
+            Release(ref contactPointBuffer);
             Release(ref pairTableBuffer);
             Release(ref freeListBuffer);
             Release(ref poolControlBuffer);

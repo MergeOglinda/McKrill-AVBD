@@ -28,14 +28,14 @@ struct AvbdContactEval
     float frictionScale;  // norm of the tangential force before the cone clamp
 };
 
-// Evaluates a contact at the current poses. dq* are the displacements from the start-of-step poses (linear, and AvbdQuatDifference).
-AvbdContactEval AvbdEvaluateContact(
-    float3 normal, float3 c0, float3 penalty, float3 lambda, float friction,
+// Evaluates a contact at the current poses, in a contact basis that the caller made (AvbdContactBasis): the points of a manifold share it, so
+// a stage that walks the points of a pair makes it once. dq* are the displacements from the start-of-step poses (linear, and AvbdQuatDifference).
+AvbdContactEval AvbdEvaluateContactInBasis(
+    float3x3 basis, float3 c0, float3 penalty, float3 lambda, float friction,
     float3 rA, float3 rB, float4 rotA, float4 rotB,
     float3 dqALin, float3 dqAAng, float3 dqBLin, float3 dqBAng, float alpha)
 {
     AvbdContactEval e;
-    float3x3 basis = AvbdContactBasis(normal);
 
     float3 rAWorld = AvbdQuatRotate(rotA, rA);
     float3 rBWorld = AvbdQuatRotate(rotB, rB);
@@ -65,6 +65,16 @@ AvbdContactEval AvbdEvaluateContact(
     }
     e.F = F;
     return e;
+}
+
+// The same, for a contact with its own normal.
+AvbdContactEval AvbdEvaluateContact(
+    float3 normal, float3 c0, float3 penalty, float3 lambda, float friction,
+    float3 rA, float3 rB, float4 rotA, float4 rotB,
+    float3 dqALin, float3 dqAAng, float3 dqBLin, float3 dqBAng, float alpha)
+{
+    return AvbdEvaluateContactInBasis(AvbdContactBasis(normal), c0, penalty, lambda, friction, rA, rB, rotA, rotB,
+        dqALin, dqAAng, dqBLin, dqBAng, alpha);
 }
 
 // The terms a contact adds to the 6x6 system of one of its bodies.

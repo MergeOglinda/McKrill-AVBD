@@ -15,13 +15,13 @@ Compared: `Packages/com.mckrill.avbd` (HLSL compute, Unity) against `three-avbd-
 |---|---|---|---|
 | 1 | Graph coloring: carried over, async tuning (theirs) vs from scratch with a blocking readback each step (ours) | theirs | Large for CPU stalls, unmeasured for us |
 | 2 | Primal lanes per body: 1/2/4/8 chosen per color (theirs) vs a fixed 8 (ours) | theirs | −5% to −53% in their sweep |
-| 3 | Contact storage: 32 B pair + 64 B points, pair-level adjacency (theirs) vs 160 B generic records, one per point, 8 slots per manifold (ours) | theirs | Their probe: +16 B per point cost 5–8%; ours is +96 B |
-| 4 | Broadphase pair test: sphere + AABB + face axes (theirs) vs bounding sphere only (ours) | theirs | −15% on a brick ring, −2% to −5% on others |
+| 3 | Contact storage: 32 B pair + 64 B points, pair-level adjacency (theirs) vs 160 B generic records, one per point, 8 slots per manifold (ours) | theirs | Their probe: +16 B per point cost 5–8%; ours is +96 B **Implemented on branch `compact-contacts`** |
+| 4 | Broadphase pair test: sphere + AABB + face axes (theirs) vs bounding sphere only (ours) | theirs | −15% on a brick ring, −2% to −5% on others. **Done in PR #32** |
 | 5 | Broadphase grid: counting-sort CSR, two levels (theirs) vs atomic linked list, one level (ours) | theirs, modestly | Their findPairs is about 1/3 of collision time |
 | 6 | Contact reuse for still pairs | theirs | 6–12% at 4 iterations, 3–6% at 10 |
 | 7 | Spatial order: one-off physical sort at build (theirs) vs runtime iteration-order sort (ours) | theirs | 2–13% on piles; ours measured slower |
 | 8 | One dual dispatch for joints and contacts (theirs) vs `Dual` plus `DualContact` (ours) | theirs, small | Dispatch count only |
-| 9 | Dual per manifold, vs per contact record over 8 × slots threads | theirs | Fewer idle threads |
+| 9 | Dual per manifold, vs per contact record over 8 × slots threads | theirs | Fewer idle threads **Implemented on branch `compact-contacts`** |
 | 10 | Capacity: derived from a CPU start count and grown from readbacks (theirs) vs fixed pool with overflow report (ours) | depends | Ours is simpler and predictable; theirs copes with growth |
 | 11 | Numerics and verification: bit-identical C++ parity harness for the narrowphase and contact math (ours) vs an f64 oracle with envelope tests (theirs) | ours, for the contact math | Correctness evidence, not speed |
 | 12 | Feature scope: spheres, hulls, filters, plastic joints, wind, SDF (theirs) vs boxes, joints, springs, fracture (ours) | theirs for breadth | Not a performance point |
@@ -52,6 +52,8 @@ Their sweep (against one lane): wall smash −53%, chain mail −15%, jointed dr
 
 ## 3. Contact storage and adjacency
 
+**Status: implemented on branch `compact-contacts`** (pair record of 32 B, 64 B points, one list entry per pair, dual per manifold; see the changelog). Not run or measured, because the work was written without a Unity editor or a GPU. The text below describes the situation before that change.
+
 **Theirs.** A **pair record** of 32 B (both bodies, first-point index, count + generation step, normal, friction) and **64 B points** stored consecutively (up to 15 per pair; normal and bodies were moved to the pair, the stick flag lives in bit 31 of the feature key). Adjacency, colouring, the hash table and the dual iterate **pairs**. The primal loads the partner body and the contact basis **once per pair** and loops over the points. They measured this at −31% to −33% on 100k box columns (4 points per pair), and +3% to +10% (slower) on a random pile where a pair has 1.9 points on average. Contact capacity comes from the host's count of starting pairs (floors of 4 pairs and 4 points per body) and grows at 60% full. They also measured that padding the point by 16 B cost 4.8% (4 iterations) and 8.2% (10 iterations) on a 110k pile.
 
 **Ours.** A contact is a generic `ConstraintRecord` of **160 B** (ten 16 B words, kept a multiple of 32 B for gathers by id), shared with joints and springs; a manifold slot owns 8 of them, which is the design doc's **1.3 kB per slot**. Each contact occupies one list entry per body, so a body's list carries one entry per *point*, and the shader skips repeats for the same neighbor in the coloring. The primal stamps each contact through the generic record, re-reading both bodies' poses via `LoadPose`. The dual runs over `8 × highWater` threads, most of which return at once.
@@ -65,6 +67,8 @@ Our advantage: a **single record type** keeps the primal, lists and coloring gen
 **Theirs** (`testPair`): collision-group filter, bounding sphere, then **world AABBs** (with 0.1 mm pad), then a **separating face-axis test** along both boxes' three axes (1 mm tolerance; the narrowphase would reject on the same axes anyway), then the no-collide list by binary search. The `findPairs` thread loads its own shape (position, radius, axes, AABB) once. Their numbers: on a brick ring 72% of the pairs that reached the narrowphase were apart; the AABB and face-axis rejection gave −14.7% on the ring 110k, −9.7% on ring 9k, −2% to −5% on jointed drop, pile, box columns and wall smash, and +0.9% on chain mail.
 
 **Ours** (`BpPairsDynamic`, `BpPairsStatic`): bounding sphere overlap and `!Constrained(self, other)`. No AABB or axis test, no collision filters (`IgnoreCollision` is listed as a known gap in the design doc).
+
+**Status: implemented in PR #32** (`Broadphase: drop candidate pairs whose boxes are visibly apart`): the broadphase now also rejects on the world AABBs and the face axes of both boxes, with the same conservative rule and a CPU oracle comparison (`CpuBroadphase`, `BroadphaseTests`). The text below describes the situation before that change. Not measured here; the PR was written without a Unity editor or GPU.
 
 **Verdict: theirs.** A bounding sphere of a box overlaps far more often than the box does. In our design every candidate pair without a manifold costs a slot probe in `NpAllocate` and a **full SAT test, run a second time in `Narrowphase` for a pair that is accepted**; a pair that is apart costs the first test every step. Rejecting on AABB and face axes in the broadphase is a small kernel change and the cheapest item in this list, with the best evidence behind it. Keep the same conservative rule (a rejection must be one the narrowphase would also make), and the same CPU oracle comparison for the broadphase test.
 
@@ -124,10 +128,10 @@ They add features we do not have: sphere and convex-hull shapes, collision group
 
 ## Suggested order of work
 
-1. **Broadphase AABB and face-axis rejection** (section 4). Small change, strongest evidence, no layout change.
+1. ~~**Broadphase AABB and face-axis rejection** (section 4).~~ **Done in PR #32.** Small change, strongest evidence, no layout change.
 2. **Persistent colouring with asynchronous tuning** (section 1). Removes the per-step CPU stall; needs a test that starts with too small a cap.
 3. **Per-color lane count** (section 2). Small shader and `ColorPlan` change; profile first on a large single-layer scene to see whether 8 lanes hurts.
-4. **Compact contact point plus pair record** (section 3, which also gives 8–9). Largest change and largest expected effect on bandwidth.
+4. **Compact contact point plus pair record** (section 3, which also gives 8–9). **Implemented on branch `compact-contacts`, not yet measured.** Largest change and largest expected effect on bandwidth.
 5. **Initial Morton slot order at batch spawn** (section 7), replacing the runtime sort for the cases where it was meant to help.
 6. **Contact reuse as an opt-in** (section 6).
 

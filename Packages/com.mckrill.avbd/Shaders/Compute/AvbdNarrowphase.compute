@@ -1,7 +1,7 @@
-// Stage N: narrow phase over the pairs of the broadphase (stage B). Manifolds live in a pool of slots: a slot holds the pair of bodies
-// (_SlotBodies, x = body A = the higher slot, y = body B, both AVBD_INVALID for a free slot), the pair's contact count (_PairCounts)
-// and room for AVBD_MAX_CONTACTS contact records at _ContactBase + slot * AVBD_MAX_CONTACTS. A pair keeps its slot for as long as it has
-// contacts, which is how the warm start finds the previous contacts. Free slots are on a stack (_FreeList, top = _NpControl[FREE_TOP]).
+// Stage N: narrow phase over the pairs of the broadphase (stage B). Manifolds live in a pool of slots: a slot holds a pair record
+// (_ContactPairs: x = body A = the higher slot, y = body B, both AVBD_INVALID for a free slot; the contact count; the stick bits; the normal and
+// the friction) and room for AVBD_MAX_CONTACTS contact points at slot * AVBD_MAX_CONTACTS in _ContactPoints (AvbdContactRecords.hlsl). A pair keeps
+// its slot for as long as it has contacts, which is how the warm start finds the previous contacts. Free slots are on a stack (_FreeList, top = _NpControl[FREE_TOP]).
 //
 // Run after stage P (which keeps the start-of-step pose of every body) and after the broadphase, in this order:
 //   NpClearTable   empties the hash table that maps a pair to its slot (_PairTable, open addressing, size a power of two)
@@ -32,7 +32,7 @@
 #pragma kernel Narrowphase
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
-#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBroadphaseParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdIndirect.hlsl"
@@ -42,9 +42,8 @@ StructuredBuffer<BodyStateRecord>    _BodyState;
 StructuredBuffer<BodyMassRecord>     _BodyMass;
 StructuredBuffer<BodyShapeRecord>    _BodyShape;
 StructuredBuffer<BodyMetaRecord>     _BodyMeta;
-RWStructuredBuffer<ConstraintRecord> _Constraints;
-RWStructuredBuffer<uint>             _PairCounts;   // contacts per manifold slot after this stage
-RWStructuredBuffer<uint4>            _SlotBodies;   // per slot: x = body A, y = body B (AVBD_INVALID: free slot)
+RWStructuredBuffer<ContactPairRecord>  _ContactPairs;  // per manifold slot: the bodies (AVBD_INVALID: free slot), the contact count, the stick bits, the normal and the friction
+RWStructuredBuffer<ContactPointRecord> _ContactPoints; // AVBD_MAX_CONTACTS points per slot
 RWStructuredBuffer<uint>             _PairTable;    // pair hash table: a slot index, or AVBD_INVALID
 RWStructuredBuffer<uint>             _FreeList;     // stack of free slots
 RWStructuredBuffer<uint>             _NpControl;    // AVBD_NP_*
@@ -56,7 +55,6 @@ RWByteAddressBuffer                  _NpArgs;       // AVBD_NP_ARGS_COUNT x (gro
 uint _Base;                // NpClearTable: first item to process
 uint _Count;               // NpClearTable: end of the range, items [_Base, _Count)
 uint _Bin;                 // NpAllocate: 0 = the dynamic-dynamic bin of the broadphase, 1 = the dynamic-static bin
-uint _ContactBase;         // index of the first contact record in _Constraints
 uint _SlotCapacity;        // manifold slots
 uint _TableMask;           // size of _PairTable (a power of two) minus one
 uint _DynamicPairCapacity; // capacity of the broadphase's bins, to find the pairs in _Pairs
@@ -104,8 +102,7 @@ void WriteArgs(uint entry, uint count)
 // Gives a slot back: no pair, no contacts, and it goes on the free stack. Only the kernels of this file push, and never while NpAllocate pops.
 void FreeSlot(uint slot)
 {
-    _SlotBodies[slot] = uint4(AVBD_INVALID, AVBD_INVALID, 0u, 0u);
-    _PairCounts[slot] = 0u;
+    _ContactPairs[slot] = FreeContactPair();
     uint top;
     InterlockedAdd(_NpControl[AVBD_NP_FREE_TOP], 1u, top);
     _FreeList[top] = slot;
@@ -129,7 +126,7 @@ void NpPlan(uint3 id : SV_DispatchThreadID)
     WriteArgs(AVBD_NP_ARGS_ALLOCATE_DYNAMIC, StoredPairs(0u));
     WriteArgs(AVBD_NP_ARGS_ALLOCATE_STATIC, StoredPairs(1u));
     WriteArgs(AVBD_NP_ARGS_NARROWPHASE, slots);
-    WriteArgs(AVBD_NP_ARGS_DUAL, slots * AVBD_MAX_CONTACTS);
+    WriteArgs(AVBD_NP_ARGS_DUAL, slots);
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
@@ -139,7 +136,7 @@ void NpRetire(uint3 id : SV_DispatchThreadID)
     if (slot >= SlotsInUse())
         return;
 
-    uint4 pair = _SlotBodies[slot];
+    uint4 pair = _ContactPairs[slot].ident;
     if (pair.x == AVBD_INVALID)
         return;
 
@@ -179,7 +176,7 @@ void NpAllocate(uint3 id : SV_DispatchThreadID)
         uint slot = _PairTable[entry];
         if (slot == AVBD_INVALID)
             break;
-        uint4 held = _SlotBodies[slot];
+        uint4 held = _ContactPairs[slot].ident;
         if (held.x == bodies.x && held.y == bodies.y)
             return;
         entry = (entry + 1u) & _TableMask;
@@ -209,8 +206,9 @@ void NpAllocate(uint3 id : SV_DispatchThreadID)
     }
 
     uint newSlot = _FreeList[top - 1u];
-    _SlotBodies[newSlot] = uint4(bodies.x, bodies.y, 0u, 0u);
-    _PairCounts[newSlot] = 0u;
+    ContactPairRecord fresh = FreeContactPair();
+    fresh.ident = uint4(bodies.x, bodies.y, 0u, 0u);
+    _ContactPairs[newSlot] = fresh;
     InterlockedMax(_NpControl[AVBD_NP_HIGH_WATER], newSlot + 1u);
 }
 
@@ -221,13 +219,14 @@ void Narrowphase(uint3 id : SV_DispatchThreadID)
     if (slot >= SlotsInUse())
         return;
 
-    uint4 pair = _SlotBodies[slot];
+    uint4 pair = _ContactPairs[slot].ident;
     if (pair.x == AVBD_INVALID)
         return;
     uint a = pair.x; // the higher slot is body A, like the reference solver
     uint b = pair.y;
 
-    uint oldCount = _PairCounts[slot];
+    uint oldCount = pair.z;
+    uint oldStick = pair.w;
     if (oldCount > AVBD_MAX_CONTACTS)
         oldCount = 0u;
 
@@ -260,37 +259,31 @@ void Narrowphase(uint3 id : SV_DispatchThreadID)
     }
 
     // The manifold of the last step.
-    uint firstRecord = _ContactBase + slot * AVBD_MAX_CONTACTS;
+    uint firstPoint = slot * AVBD_MAX_CONTACTS;
     g_oldCount = (int)oldCount;
     for (uint k = 0; k < oldCount; k++)
     {
-        ConstraintRecord old = _Constraints[firstRecord + k];
-        g_oldKey[k] = (int)old.ident.w;
+        ContactPointRecord old = _ContactPoints[firstPoint + k];
+        g_oldKey[k] = ContactPointKey(old);
         g_oldRA[k] = old.anchorA.xyz;
         g_oldRB[k] = old.anchorB.xyz;
-        g_oldPenalty[k] = old.penaltyLin.xyz;
-        g_oldLambda[k] = old.lambdaLin.xyz;
-        g_oldStick[k] = (old.ident.z & AVBD_CONSTRAINT_FLAG_STICK) != 0u;
+        g_oldPenalty[k] = ContactPointPenalty(old);
+        g_oldLambda[k] = ContactPointLambda(old);
+        g_oldStick[k] = (oldStick & (1u << k)) != 0u;
     }
 
     AvbdInitContacts(AVBD_ALPHA, AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
 
-    float friction = sqrt(shapeA.w * shapeB.w);
-    uint kindBits = AVBD_CONSTRAINT_KIND_CONTACT << AVBD_CONSTRAINT_KIND_SHIFT;
+    uint stickBits = 0u;
     for (uint i = 0; i < count; i++)
     {
-        ConstraintRecord c;
-        c.ident = uint4(a, b, kindBits | (g_contactStick[i] ? AVBD_CONSTRAINT_FLAG_STICK : 0u), (uint)g_contactKey[i]);
-        c.anchorA = float4(g_contactRA[i], friction);
-        c.anchorB = float4(g_contactRB[i], 0.0);
-        c.c0Lin = float4(g_contactC0[i], 0.0);
-        c.c0Ang = float4(g_normalBA, 0.0);
-        c.penaltyLin = float4(g_contactPenalty[i], 0.0);
-        c.penaltyAng = float4(0.0, 0.0, 0.0, 0.0);
-        c.lambdaLin = float4(g_contactLambda[i], 0.0);
-        c.lambdaAng = float4(0.0, 0.0, 0.0, 0.0);
-        c.reserved = float4(0.0, 0.0, 0.0, 0.0);
-        _Constraints[firstRecord + i] = c;
+        _ContactPoints[firstPoint + i] = MakeContactPoint(g_contactRA[i], g_contactRB[i], g_contactKey[i], g_contactC0[i], g_contactPenalty[i], g_contactLambda[i]);
+        if (g_contactStick[i])
+            stickBits |= 1u << i;
     }
-    _PairCounts[slot] = count;
+
+    ContactPairRecord written;
+    written.ident = uint4(a, b, count, stickBits);
+    written.normalFriction = float4(g_normalBA, sqrt(shapeA.w * shapeB.w));
+    _ContactPairs[slot] = written;
 }

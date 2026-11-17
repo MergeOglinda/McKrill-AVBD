@@ -456,15 +456,7 @@ namespace McKrill.Avbd.Tests
                 broadphase.Run(buffers, constraints);
                 AssertSameSets(expected, ToSet(broadphase.ReadPairs()), "after the joint broke");
 
-                // A contact between a and b (the narrowphase writes them) is in the lists but does not exclude: the pair has to stay a
-                // candidate for as long as the boxes touch. Here the joint is also gone from the exclusion by making it a contact.
-                records[0].ident.z = ConstraintFlagLayout.Pack(ConstraintFlags.Stick, ConstraintKind.Contact);
-                constraints.Records.SetData(records);
-                broadphase.Run(buffers, constraints);
-                got = ToSet(broadphase.ReadPairs());
-                expected.Add(CpuBroadphase.Key(1, 0, PairKind.DynamicDynamic));
-                AssertSameSets(expected, got, "a contact does not exclude");
-                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), 4, records, 4), got, "oracle");
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), 4, records, 4), ToSet(broadphase.ReadPairs()), "oracle");
             }
         }
 

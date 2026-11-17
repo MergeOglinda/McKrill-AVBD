@@ -214,14 +214,60 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)ConstraintFlags.HardAngular, d["AVBD_CONSTRAINT_FLAG_HARD_ANG"]);
             Assert.AreEqual((uint)ConstraintFlags.Fracturable, d["AVBD_CONSTRAINT_FLAG_FRACTURABLE"]);
             Assert.AreEqual((uint)ConstraintFlags.Broken, d["AVBD_CONSTRAINT_FLAG_BROKEN"]);
-            Assert.AreEqual((uint)ConstraintFlags.Stick, d["AVBD_CONSTRAINT_FLAG_STICK"]);
             Assert.AreEqual(ConstraintFlagLayout.FlagsMask, d["AVBD_CONSTRAINT_FLAGS_MASK"]);
             Assert.AreEqual((uint)ConstraintFlagLayout.KindShift, d["AVBD_CONSTRAINT_KIND_SHIFT"]);
             Assert.AreEqual((uint)ConstraintKind.Joint, d["AVBD_CONSTRAINT_KIND_JOINT"]);
             Assert.AreEqual((uint)ConstraintKind.Spring, d["AVBD_CONSTRAINT_KIND_SPRING"]);
-            Assert.AreEqual((uint)ConstraintKind.Contact, d["AVBD_CONSTRAINT_KIND_CONTACT"]);
 
             AssertStructMatches(ReadInclude("AvbdConstraintRecords.hlsl"), "ConstraintRecord", typeof(ConstraintRecord));
+        }
+
+        [Test]
+        public void ContactRecords_HaveTheStridesOfRuleP3_AndMatchTheHlslStructs()
+        {
+            Assert.AreEqual(ContactRecordStrides.Pair, UnsafeUtility.SizeOf<ContactPairRecord>());
+            Assert.AreEqual(ContactRecordStrides.Point, UnsafeUtility.SizeOf<ContactPointRecord>());
+            Assert.AreEqual(0, ContactRecordStrides.Pair % 32, "a pair record is a multiple of 32 B");
+            Assert.AreEqual(0, ContactRecordStrides.Point % 32, "a point record is a multiple of 32 B");
+            Assert.LessOrEqual(ContactLayout.MaxContactsPerPair, 32, "the stick bits fit in the w word of the pair");
+
+            string text = ReadInclude("AvbdContactRecords.hlsl");
+            AssertStructMatches(text, "ContactPairRecord", typeof(ContactPairRecord));
+            AssertStructMatches(text, "ContactPointRecord", typeof(ContactPointRecord));
+            Assert.AreEqual(0xFFu, ReadDefines("AvbdContactRecords.hlsl")["AVBD_CONTACT_STICK_MASK"]);
+        }
+
+        [Test]
+        public void ContactPoint_RoundTripsThroughTheOracleRecord()
+        {
+            var pair = new ContactPairRecord
+            {
+                ident = new uint4(7u, 3u, 2u, 0b10u),
+                normalFriction = new float4(0f, 0f, 1f, 0.5f),
+            };
+            ContactPointRecord point = ContactCodec.Make(new float3(1f, 2f, 3f), new float3(4f, 5f, 6f), 123456, new float3(7f, 8f, 9f),
+                new float3(10f, 11f, 12f), new float3(13f, 14f, 15f));
+
+            Assert.AreEqual(123456, ContactCodec.Key(point));
+            Assert.AreEqual(-1, ContactCodec.Key(ContactCodec.Make(float3.zero, float3.zero, -1, float3.zero, float3.zero, float3.zero)), "a key with the sign bit set (a NaN as a float) keeps its bits");
+            Assert.AreEqual(new float3(7f, 8f, 9f), ContactCodec.C0(point));
+            Assert.AreEqual(new float3(10f, 11f, 12f), ContactCodec.Penalty(point));
+            Assert.AreEqual(new float3(13f, 14f, 15f), ContactCodec.Lambda(point));
+
+            ConstraintRecord r1 = ContactCodec.ToRecord(pair, point, 1);
+            Assert.AreEqual(ConstraintFlags.Stick, ConstraintFlagLayout.FlagsOf(r1.ident.z), "bit 1 of the pair's stick bits");
+            Assert.AreEqual(ConstraintKind.Contact, ConstraintFlagLayout.KindOf(r1.ident.z));
+            Assert.AreEqual(new uint4(7u, 3u, r1.ident.z, 123456u), r1.ident);
+            Assert.AreEqual(new float4(1f, 2f, 3f, 0.5f), r1.anchorA);
+            Assert.AreEqual(new float4(0f, 0f, 1f, 0f), r1.c0Ang);
+            Assert.AreEqual(ConstraintFlags.None, ConstraintFlagLayout.FlagsOf(ContactCodec.ToRecord(pair, point, 0).ident.z), "bit 0 is clear");
+
+            ContactPointRecord back = ContactCodec.FromRecord(r1);
+            Assert.AreEqual(ContactCodec.RA(point), ContactCodec.RA(back));
+            Assert.AreEqual(ContactCodec.Key(point), ContactCodec.Key(back));
+            Assert.AreEqual(point.anchorB, back.anchorB);
+            Assert.AreEqual(point.c0Penalty, back.c0Penalty);
+            Assert.AreEqual(point.penaltyLambda, back.penaltyLambda);
         }
 
         [Test]
@@ -343,6 +389,9 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)AvbdConstraintLists.SortLanes, d["AVBD_LIST_SORT_LANES"]);
             Assert.AreEqual(0, AvbdConst.GroupSize % AvbdConstraintLists.SortLanes, "the lanes of a body are in one thread group");
             Assert.AreEqual((uint)ContactLayout.MaxContactsPerPair, d["AVBD_LIST_CONTACTS_PER_SLOT"]);
+            Assert.AreEqual(AvbdConstraintLists.ContactFlag, d["AVBD_LIST_CONTACT_FLAG"]);
+            Assert.Less((uint)AvbdConstraintBuffers.MaxConstraints, AvbdConstraintLists.ContactFlag, "constraint ids stay below the contact flag");
+            Assert.Less((uint)AvbdConstraintBuffers.MaxContactManifolds, AvbdConstraintLists.ContactFlag, "manifold slots stay below the contact flag");
         }
 
         [Test]

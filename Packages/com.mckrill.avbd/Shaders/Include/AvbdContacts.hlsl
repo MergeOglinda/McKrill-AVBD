@@ -5,8 +5,8 @@
 
 // Contact constants and the layout of the contact region. Mirrors ContactLayout in Runtime/Layout/ConstraintRecords.cs.
 //
-// Manifolds live in a pool of slots (stage N): slot s has a contact count (_PairCounts[s]), the pair of bodies it belongs to
-// (_SlotBodies[s]) and room for AVBD_MAX_CONTACTS contact records at _ContactBase + s * AVBD_MAX_CONTACTS in the constraint array.
+// Manifolds live in a pool of slots (stage N): slot s has a pair record (_ContactPairs[s]: the bodies, the contact count, the normal and the
+// friction) and room for AVBD_MAX_CONTACTS contact points at s * AVBD_MAX_CONTACTS in _ContactPoints (see AvbdContactRecords.hlsl).
 
 #define AVBD_MAX_CONTACTS 8u
 
@@ -24,7 +24,7 @@
 #define AVBD_NP_ARGS_ALLOCATE_DYNAMIC  1 // NpAllocate over the pairs stored in the broadphase's dynamic-dynamic bin
 #define AVBD_NP_ARGS_ALLOCATE_STATIC   2 // NpAllocate over the pairs stored in the dynamic-static bin
 #define AVBD_NP_ARGS_NARROWPHASE       3 // Narrowphase: one thread per slot below the high-water mark
-#define AVBD_NP_ARGS_DUAL              4 // DualContact: one thread per contact record of those slots
+#define AVBD_NP_ARGS_DUAL              4 // DualContact: one thread per slot below the high-water mark
 #define AVBD_NP_ARGS_COUNT             5
 
 // Dense index of the pair of slots (a, b) with a > b. No stage uses it any more (it was the manifold slot of the narrow phase over all

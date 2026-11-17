@@ -226,8 +226,7 @@ namespace McKrill.Avbd.Tests
                     contacts.Narrowphase(arrays.bodies, oracleRecords, settings, arrays.bodyCount);
 
                     ContactSnapshot snapshot = constraints.ReadContacts();
-                    var records = new ConstraintRecord[constraints.Records.count];
-                    constraints.Records.GetData(records);
+                    ConstraintRecord[] records = constraints.ReadContactRecords();
 
                     // Same manifolds, in whatever slots the pool gave them.
                     Assert.AreEqual(0, snapshot.DuplicatePairs, scene + " round " + round + ": a pair holds two slots");
@@ -250,7 +249,7 @@ namespace McKrill.Avbd.Tests
                             for (int k = 0; k < (int)contacts.PairCounts[pair]; k++)
                                 AssertRecordNear(
                                     oracleRecords[contacts.ContactBase + pair * ContactLayout.MaxContactsPerPair + k],
-                                    records[constraints.ContactBase + slot * ContactLayout.MaxContactsPerPair + k], NarrowphaseTolerance, what + " contact " + k);
+                                    records[slot * ContactLayout.MaxContactsPerPair + k], NarrowphaseTolerance, what + " contact " + k);
                         }
                     Assert.AreEqual(oraclePairs, snapshot.SlotsWithContacts, scene + " round " + round + ": the GPU has manifolds the oracle does not");
                 }
@@ -345,16 +344,16 @@ namespace McKrill.Avbd.Tests
 
                 // Round 1: a new contact starts at the minimum penalty.
                 NarrowphaseRound(buffers, constraints, solver);
-                int first = FirstContactRecord(constraints, box, ground);
-                Assert.AreEqual(settings.penaltyMin, ReadRecord(constraints, first).penaltyLin.x, 1e-6f, "a new contact starts at the minimum penalty");
+                int first = ManifoldSlot(constraints, box, ground);
+                Assert.AreEqual(settings.penaltyMin, constraints.ReadContactRecord(first, 0).penaltyLin.x, 1e-6f, "a new contact starts at the minimum penalty");
 
                 // Pretend the solver grew the penalty. Round 2 keeps the contact and decays the penalty by gamma.
-                ConstraintRecord grown = ReadRecord(constraints, first);
+                ConstraintRecord grown = constraints.ReadContactRecord(first, 0);
                 grown.penaltyLin = new float4(500f, 500f, 500f, 0f);
-                constraints.Records.SetData(new[] { grown }, 0, first, 1);
+                constraints.WriteContactRecord(first, 0, grown);
                 NarrowphaseRound(buffers, constraints, solver);
-                Assert.AreEqual(first, FirstContactRecord(constraints, box, ground), "a pair that keeps touching keeps its slot");
-                float kept = ReadRecord(constraints, first).penaltyLin.x;
+                Assert.AreEqual(first, ManifoldSlot(constraints, box, ground), "a pair that keeps touching keeps its slot");
+                float kept = constraints.ReadContactRecord(first, 0).penaltyLin.x;
                 Assert.Greater(kept, 100f, "the contact of a live pair keeps its penalty");
 
                 // The box goes and a new one takes its slot, at the same place: it starts without history.
@@ -365,8 +364,8 @@ namespace McKrill.Avbd.Tests
                 if (constraints.NeedsRebuild)
                     constraints.Rebuild();
                 NarrowphaseRound(buffers, constraints, solver);
-                first = FirstContactRecord(constraints, replacement, ground);
-                Assert.AreEqual(settings.penaltyMin, ReadRecord(constraints, first).penaltyLin.x, 1e-6f, "the new body does not inherit the penalty of the old one");
+                first = ManifoldSlot(constraints, replacement, ground);
+                Assert.AreEqual(settings.penaltyMin, constraints.ReadContactRecord(first, 0).penaltyLin.x, 1e-6f, "the new body does not inherit the penalty of the old one");
             }
         }
 
@@ -379,19 +378,12 @@ namespace McKrill.Avbd.Tests
             solver.DispatchNarrowphase();
         }
 
-        // Index of the first contact record of the pair of two bodies: where the pool put its manifold.
-        static int FirstContactRecord(AvbdConstraintBuffers constraints, BodyHandle a, BodyHandle b)
+        // The manifold slot of the pair of two bodies: where the pool put its manifold.
+        static int ManifoldSlot(AvbdConstraintBuffers constraints, BodyHandle a, BodyHandle b)
         {
             int slot = constraints.ReadContacts().SlotOf(a.Slot, b.Slot);
             Assert.GreaterOrEqual(slot, 0, "the pair has no manifold");
-            return constraints.ContactBase + slot * ContactLayout.MaxContactsPerPair;
-        }
-
-        static ConstraintRecord ReadRecord(AvbdConstraintBuffers constraints, int index)
-        {
-            var one = new ConstraintRecord[1];
-            constraints.Records.GetData(one, 0, index, 1);
-            return one[0];
+            return slot;
         }
 
         [Test]
