@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace McKrill.Avbd
 {
@@ -25,8 +27,9 @@ namespace McKrill.Avbd
     /// words hold the number of colors, which is how many times the primal sweep is dispatched. How big each of those dispatches is
     /// stays on the GPU: <c>ColorPlan</c> turns the body count of every color into its start in the bucket array and into the arguments
     /// of an indirect dispatch (<see cref="Args"/>), which the primal sweep reads through <see cref="Work"/>.
-    /// Every color is recomputed from scratch each time <see cref="Run"/> is called; keeping colors between steps (temporal coherence)
-    /// is not implemented.
+    /// <see cref="Run"/> colors from scratch and waits for the GPU. <see cref="RunPersistent"/> keeps the colors of the step before, recolors only
+    /// the bodies that now clash with a neighbor, and reads nothing back: it is what the solver runs every step with contacts, where the graph
+    /// changes every step. A coloring from scratch is exact (the oracle's); a persistent one is a proper coloring that depends on the history.
     /// </summary>
     internal sealed class AvbdGraphColoring : IDisposable
     {
@@ -42,7 +45,21 @@ namespace McKrill.Avbd
         public const int CountsOffset = 4;
         public const int CursorsOffset = 68;
         public const int StartsOffset = 132;
-        public const int WorkWords = 196;
+
+        // Mirror AVBD_COLOR_STAT_RELEASED, _LAST_ROUND and _FINISHED: statistics of the persistent coloring.
+        public const int StatReleased = 196;
+        public const int StatLastRound = 197;
+        public const int StatFinished = 198;
+        public const int WorkWords = 200;
+
+        /// <summary>
+        /// Rounds after the ones the tuner chose, each dispatched indirectly with groups only if bodies are still waiting (ColorRoundPlan), so a step that
+        /// needed more rounds than the tuner expected still ends in a proper coloring. What is left after them is colored by ColorForce.
+        /// </summary>
+        public const int ExtraRounds = 8;
+
+        /// <summary>Most bodies the persistent coloring handles: an extra round is one indirect dispatch of at most 65535 groups.</summary>
+        public const int MaxPersistentBodies = 65535 * AvbdConst.GroupSize / RoundLanes;
 
         /// <summary>Mirrors AVBD_COLOR_ARGS_STRIDE: bytes of indirect arguments per color (groups x, y and z).</summary>
         public const int ArgsStride = AvbdIndirect.ArgsStride;
@@ -62,11 +79,32 @@ namespace McKrill.Avbd
         const int FirstBatchRounds = 16;
         const int RoundsPerBatch = 8;
 
+        /// <summary>Steps with persistent colors between two colorings from scratch (colors drift upward while they are kept).</summary>
+        public const int DefaultFreshInterval = 64;
+
+        // Statistics requests in flight at most; a step issues no new one while this many wait (the readback takes a few frames).
+        const int MaxStatsRequests = 3;
+
         readonly ComputeShader shader;
-        readonly int resetKernel, beginKernel, initKernel, roundKernel, countKernel, planKernel, bucketKernel;
+        readonly int resetKernel, beginKernel, initKernel, keepKernel, markKernel, releaseKernel, roundKernel, roundPlanKernel, forceKernel, countKernel, planKernel, bucketKernel;
+        readonly ColoringTuner tuner = new ColoringTuner();
+        readonly Queue<StatsRequest> statsRequests = new Queue<StatsRequest>();
         GraphicsBuffer work;
         GraphicsBuffer args;
+        GraphicsBuffer scratch;     // one word per body slot: the conflict flags of the persistent coloring
+        GraphicsBuffer finishArgs;  // indirect arguments of an extra round (ColorRoundPlan)
+        int scratchCapacity;
+        int stepsSincePerfect;      // steps since the last coloring from scratch
+        bool baseline;              // the colors in the body records are a coloring of the last graph that was built
         bool disposed;
+
+        struct StatsRequest
+        {
+            public AsyncGPUReadbackRequest request;
+            public bool fresh;
+            public int rounds;
+            public int cap;
+        }
 
         static readonly int BodyMetaId = Shader.PropertyToID("_BodyMeta");
         static readonly int BodyMassId = Shader.PropertyToID("_BodyMass");
@@ -78,9 +116,34 @@ namespace McKrill.Avbd
         static readonly int WorkId = Shader.PropertyToID("_ColorWork");
         static readonly int ArgsId = Shader.PropertyToID("_ColorArgs");
         static readonly int OrderId = Shader.PropertyToID("_Order");
+        static readonly int CapId = Shader.PropertyToID("_ColorCap");
+        static readonly int RoundId = Shader.PropertyToID("_Round");
+        static readonly int ScratchId = Shader.PropertyToID("_ColorScratch");
+        static readonly int FinishArgsId = Shader.PropertyToID("_ColorFinishArgs");
+        static readonly int BaseId = Shader.PropertyToID("_Base");
+        static readonly int CountId = Shader.PropertyToID("_Count");
 
-        /// <summary>Rounds the last <see cref="Run"/> dispatched (the first batch, then a multiple of the batch size).</summary>
+        /// <summary>Rounds the last <see cref="Run"/> or <see cref="RunPersistent"/> dispatched (from scratch: the first batch, then a multiple of the batch size).</summary>
         public int LastRounds { get; private set; }
+
+        /// <summary>
+        /// Steps (<see cref="RunPersistent"/> calls) that keep colors between two that color from scratch. The step that follows <see cref="Run"/>
+        /// always colors from scratch. Zero colors from scratch every time.
+        /// </summary>
+        public int FreshInterval { get; set; } = DefaultFreshInterval;
+
+        /// <summary>Colors the primal sweep dispatches after the last <see cref="RunPersistent"/>.</summary>
+        public int Cap => tuner.Cap;
+
+        /// <summary>True if the colors in the body records are a coloring of the last graph, so a persistent step can keep them. False until <see cref="Run"/> has run.</summary>
+        public bool HasBaseline => baseline;
+
+        /// <summary>The statistics of the newest persistent step that has arrived from the GPU (they are a few frames old), and how many have arrived.</summary>
+        internal ColoringSample LastSample { get; private set; }
+        public int SamplesSeen { get; private set; }
+
+        /// <summary>The tuner, for tests.</summary>
+        internal ColoringTuner Tuner => tuner;
 
         /// <summary>The work buffer: the body count and the start of every color, as of the last <see cref="Run"/>. The primal sweep reads it.</summary>
         public GraphicsBuffer Work => work;
@@ -101,7 +164,12 @@ namespace McKrill.Avbd
             resetKernel = shader.FindKernel("ColorReset");
             beginKernel = shader.FindKernel("ColorBegin");
             initKernel = shader.FindKernel("ColorInit");
+            keepKernel = shader.FindKernel("ColorKeep");
+            markKernel = shader.FindKernel("ColorMark");
+            releaseKernel = shader.FindKernel("ColorRelease");
             roundKernel = shader.FindKernel("ColorRound");
+            roundPlanKernel = shader.FindKernel("ColorRoundPlan");
+            forceKernel = shader.FindKernel("ColorForce");
             countKernel = shader.FindKernel("ColorCount");
             planKernel = shader.FindKernel("ColorPlan");
             bucketKernel = shader.FindKernel("ColorBucket");
@@ -117,6 +185,9 @@ namespace McKrill.Avbd
             }
             args = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments | GraphicsBuffer.Target.Raw, initialArgs.Length, sizeof(uint));
             args.SetData(initialArgs);
+
+            finishArgs = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments | GraphicsBuffer.Target.Raw, 3, sizeof(uint));
+            finishArgs.SetData(new uint[] { 0u, 1u, 1u });
         }
 
         /// <summary>
@@ -133,12 +204,16 @@ namespace McKrill.Avbd
             if (disposed) throw new ObjectDisposedException(nameof(AvbdGraphColoring));
 
             LastRounds = 0;
+            PollStatistics(true); // the statistics of persistent steps before this one are about another graph: take them in before the tuner starts again
             if (bodyCount <= 0)
+            {
+                baseline = false;
                 return 0;
+            }
 
-            foreach (int kernel in new[] { resetKernel, beginKernel, initKernel, roundKernel, countKernel, planKernel, bucketKernel })
-                Bind(kernel, bodies, records, list, other, colorBodies);
+            BindAll(bodies, records, list, other, colorBodies);
             shader.SetInt(OrderId, (int)order);
+            shader.SetInt(CapId, MaxColors);
 
             AvbdDispatch.Linear(shader, resetKernel, WorkWords);
             AvbdDispatch.Linear(shader, initKernel, bodyCount);
@@ -154,6 +229,7 @@ namespace McKrill.Avbd
                 {
                     if (i == batch - 1)
                         shader.Dispatch(beginKernel, 1, 1, 1);
+                    shader.SetInt(RoundId, LastRounds + i);
                     AvbdDispatch.Linear(shader, roundKernel, bodyCount * RoundLanes);
                 }
                 LastRounds += batch;
@@ -172,11 +248,156 @@ namespace McKrill.Avbd
 
             int colors = (int)control[ColorCountWord];
 
-            // The size of every color, then (on the GPU) the start of every color and the dispatch arguments, then the bucket fill.
+            FinishColoring(bodyCount);
+
+            // The colors in the body records are now a coloring of this graph: the next persistent step may keep them, and starts from scratch
+            // (the graph of the contacts is not this one), with the cap at its largest until the first statistics arrive.
+            baseline = true;
+            stepsSincePerfect = FreshInterval;
+            tuner.Restart();
+            return colors;
+        }
+
+        /// <summary>
+        /// Colors the solved bodies like <see cref="Run"/>, but keeps the colors of the step before and reads nothing back, so the host never waits for
+        /// the GPU. The bodies that now have the color of a neighbor that colors before them (and the new ones) are recolored by a fixed number of
+        /// rounds, then up to <see cref="ExtraRounds"/> more that run only while bodies wait, and <c>ColorForce</c> for what is still left. Every <see cref="FreshInterval"/> steps, and in the step after <see cref="Run"/>,
+        /// every body is recolored (colors drift upward while they are kept). Returns the number of colors the primal sweep must dispatch (the cap):
+        /// at least the number of colors in use, in all but the steps that a lowered cap or a graph that suddenly needs more colors catch up with; a body
+        /// without a free color below the cap shares the last color for a few steps. Only meaningful after <see cref="Run"/>.
+        /// </summary>
+        public int RunPersistent(AvbdBodyBuffers bodies, int bodyCount, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other,
+            GraphicsBuffer colorBodies, GraphColoringOrder order)
+        {
+            if (disposed) throw new ObjectDisposedException(nameof(AvbdGraphColoring));
+            if (!baseline)
+                throw new InvalidOperationException("RunPersistent needs a coloring from scratch (Run) first.");
+
+            LastRounds = 0;
+            PollStatistics(false);
+            if (bodyCount <= 0)
+                return 0;
+
+            EnsureScratch(bodies.Capacity);
+            BindAll(bodies, records, list, other, colorBodies);
+
+            bool fresh = FreshInterval <= 0 || stepsSincePerfect >= FreshInterval;
+            int cap = tuner.Cap;
+            int rounds = tuner.RoundsFor(fresh);
+            shader.SetInt(OrderId, (int)order);
+            shader.SetInt(CapId, cap);
+
+            AvbdDispatch.Linear(shader, resetKernel, WorkWords);
+            if (fresh)
+            {
+                AvbdDispatch.Linear(shader, initKernel, bodyCount);
+                stepsSincePerfect = 0;
+            }
+            else
+            {
+                AvbdDispatch.Linear(shader, keepKernel, bodyCount);
+                AvbdDispatch.Linear(shader, markKernel, bodyCount);
+                AvbdDispatch.Linear(shader, releaseKernel, bodyCount);
+                stepsSincePerfect++;
+            }
+
+            // The counter of waiting bodies is cleared before the last round, so after it the counter holds the bodies that are still waiting.
+            for (int i = 0; i < rounds; i++)
+            {
+                if (i == rounds - 1)
+                    shader.Dispatch(beginKernel, 1, 1, 1);
+                shader.SetInt(RoundId, i);
+                AvbdDispatch.Linear(shader, roundKernel, bodyCount * RoundLanes);
+            }
+            LastRounds = rounds;
+
+            // The bodies that still wait get more rounds, each only if some are left (an indirect dispatch without groups otherwise); then ColorForce.
+            shader.SetInt(BaseId, 0);
+            shader.SetInt(CountId, bodyCount * RoundLanes);
+            for (int i = 0; i < ExtraRounds; i++)
+            {
+                shader.Dispatch(roundPlanKernel, 1, 1, 1);
+                shader.SetInt(RoundId, rounds + i);
+                shader.DispatchIndirect(roundKernel, finishArgs, 0);
+            }
+            AvbdDispatch.Linear(shader, forceKernel, bodyCount);
+
+            FinishColoring(bodyCount);
+            RequestStatistics(fresh, rounds, cap);
+            return cap;
+        }
+
+        // The size of every color, then (on the GPU) the start of every color, the number of colors and the dispatch arguments, then the bucket fill.
+        void FinishColoring(int bodyCount)
+        {
             AvbdDispatch.Linear(shader, countKernel, bodyCount);
             shader.Dispatch(planKernel, 1, 1, 1);
             AvbdDispatch.Linear(shader, bucketKernel, bodyCount);
-            return colors;
+        }
+
+        void EnsureScratch(int capacity)
+        {
+            if (scratch != null && scratchCapacity >= capacity)
+                return;
+            scratch?.Release();
+            scratchCapacity = Math.Max(1, capacity);
+            scratch = new GraphicsBuffer(GraphicsBuffer.Target.Structured, scratchCapacity, sizeof(uint));
+        }
+
+        // ---- statistics ------------------------------------------------------------------------------------
+
+        // Asks for the work buffer (the statistics words are in it) at the end of this step. The copy happens on the GPU timeline, so it holds this
+        // step's numbers; the request completes a few frames later, and nothing waits for it.
+        void RequestStatistics(bool fresh, int rounds, int cap)
+        {
+            if (statsRequests.Count >= MaxStatsRequests)
+                return;
+            statsRequests.Enqueue(new StatsRequest
+            {
+                request = AsyncGPUReadback.Request(work, WorkWords * sizeof(uint), 0),
+                fresh = fresh,
+                rounds = rounds,
+                cap = cap,
+            });
+        }
+
+        /// <summary>
+        /// Takes in the statistics requests that have arrived (the oldest first) and lets the tuner learn from them. With <paramref name="wait"/> it waits
+        /// for every request in flight: for tests and tools, not for the step.
+        /// </summary>
+        public void PollStatistics(bool wait)
+        {
+            while (statsRequests.Count > 0)
+            {
+                StatsRequest next = statsRequests.Peek();
+                if (wait)
+                    next.request.WaitForCompletion();
+                else
+                {
+                    next.request.Update();
+                    if (!next.request.done)
+                        return;
+                }
+                statsRequests.Dequeue();
+                if (next.request.hasError)
+                    continue;
+
+                var words = next.request.GetData<uint>();
+                var sample = new ColoringSample
+                {
+                    fresh = next.fresh,
+                    rounds = next.rounds,
+                    cap = next.cap,
+                    released = words[StatReleased],
+                    leftover = words[StatFinished],
+                    forced = words[1],
+                    colors = words[ColorCountWord],
+                    lastRound = words[StatLastRound],
+                };
+                LastSample = sample;
+                SamplesSeen++;
+                tuner.Observe(sample);
+            }
         }
 
         /// <summary>What <see cref="Run"/> left on the GPU for each of the first <paramref name="colors"/> colors. Waits for the GPU.</summary>
@@ -210,6 +431,13 @@ namespace McKrill.Avbd
             return schedule;
         }
 
+        void BindAll(AvbdBodyBuffers bodies, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other, GraphicsBuffer colorBodies)
+        {
+            EnsureScratch(bodies.Capacity);
+            foreach (int kernel in new[] { resetKernel, beginKernel, initKernel, keepKernel, markKernel, releaseKernel, roundKernel, roundPlanKernel, forceKernel, countKernel, planKernel, bucketKernel })
+                Bind(kernel, bodies, records, list, other, colorBodies);
+        }
+
         void Bind(int kernel, AvbdBodyBuffers bodies, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other, GraphicsBuffer colorBodies)
         {
             shader.SetBuffer(kernel, BodyMetaId, bodies.Meta);
@@ -221,6 +449,8 @@ namespace McKrill.Avbd
             shader.SetBuffer(kernel, ColorBodiesId, colorBodies);
             shader.SetBuffer(kernel, WorkId, work);
             shader.SetBuffer(kernel, ArgsId, args);
+            shader.SetBuffer(kernel, ScratchId, scratch);
+            shader.SetBuffer(kernel, FinishArgsId, finishArgs);
         }
 
         public void Dispose()
@@ -228,10 +458,17 @@ namespace McKrill.Avbd
             if (disposed)
                 return;
             disposed = true;
+            // A readback in flight reads the work buffer: let it finish before the buffer goes.
+            while (statsRequests.Count > 0)
+                statsRequests.Dequeue().request.WaitForCompletion();
             work?.Release();
             work = null;
             args?.Release();
             args = null;
+            scratch?.Release();
+            scratch = null;
+            finishArgs?.Release();
+            finishArgs = null;
         }
     }
 

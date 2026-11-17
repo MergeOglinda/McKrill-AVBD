@@ -115,7 +115,8 @@ namespace McKrill.Avbd
         /// contacts the narrow phase (N), the constraint warm start (D), per iteration a primal sweep (V) and the dual update (D), and finally the
         /// velocity update (U).
         /// The constraint lists (stage G) are built and the graph is colored (stage C) on the GPU. With contacts, both are rebuilt every step after the
-        /// narrow phase; the lists need no readback, and the coloring reads back one small thing (whether bodies are still waiting, which is also the number of colors), a stall.
+        /// narrow phase; neither waits for the GPU: the lists need no readback, and the coloring keeps the colors of the step before and is tuned from statistics that
+        /// arrive a few frames late (<see cref="AvbdConstraintBuffers.PersistentColoring"/>). A rebuild (constraints or bodies added) still colors from scratch and waits.
         /// Stages S, Z and R do not exist yet; the constraints come from <see cref="AvbdConstraintBuffers"/>.
         /// Must be called from the main thread. The previous step's results are the next step's input, so call it once per time step.
         /// </summary>

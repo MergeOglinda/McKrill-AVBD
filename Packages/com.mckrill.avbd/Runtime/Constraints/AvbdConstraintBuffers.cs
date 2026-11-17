@@ -17,8 +17,10 @@ namespace McKrill.Avbd
     /// <c>contactCapacity</c> slots, each holding the manifold of one pair of bodies as a 32 B pair record and up to 8 contact points of 64 B. The pairs come
     /// from the broadphase (stage B), which <see cref="AvbdSolver"/> runs when there are contacts. After the narrow phase,
     /// <see cref="RefreshContactTopology"/> rebuilds the lists (stage G) and the coloring (stage C), because they change every step. The lists
-    /// are built from the pool and the records where they are, with no readback. The coloring reads one small thing back, which also gives the
-    /// number of colors; the size of every color stays on the GPU and the primal sweep is dispatched indirectly (see <see cref="AvbdGraphColoring"/>).
+    /// are built from the pool and the records where they are, with no readback. The coloring keeps the colors of the step before and recolors
+    /// only the bodies that now clash (<see cref="PersistentColoring"/>), so the host never waits for it: the number of colors the sweep dispatches
+    /// is a cap that follows statistics read back a few frames late, and the size of every color stays on the GPU (see <see cref="AvbdGraphColoring"/>).
+    /// <see cref="Rebuild"/> colors from scratch and waits, which gives the exact number of colors.
     ///
     /// Limits of this version: constraints cannot be removed, and removing a body that has constraints is not supported.
     /// The arrays have a fixed capacity. Methods must be called from the main thread.
@@ -225,8 +227,33 @@ namespace McKrill.Avbd
         /// <summary>Capacity of the broadphase's dynamic-static bin that goes with this contact capacity.</summary>
         internal int StaticCandidateCapacity => contactSlots + 1024;
 
-        /// <summary>Number of graph colors of the last rebuild: the primal stage dispatches this many times per iteration (each dispatch is indirect).</summary>
+        /// <summary>
+        /// Number of graph colors the primal stage dispatches per iteration (each dispatch is indirect). After <see cref="Rebuild"/> it is the exact
+        /// number of colors; after a step with contacts and <see cref="PersistentColoring"/> it is the cap, which is a few above the colors in use.
+        /// </summary>
         public int ColorCount => colorCount;
+
+        /// <summary>
+        /// With contacts, keep the colors of the step before and recolor only the bodies that clash with a neighbor, without waiting for the GPU
+        /// (the default). Off: color from scratch every step and wait for it, which is the coloring of <see cref="CpuGraphColoring"/>. Applies to
+        /// <see cref="GraphColoringOrder.Hashed"/> only: <see cref="GraphColoringOrder.SlotOrder"/> promises the reference solver's coloring.
+        /// </summary>
+        public bool PersistentColoring { get; set; } = true;
+
+        /// <summary>Steps with persistent colors between two colorings from scratch (see <see cref="AvbdGraphColoring.FreshInterval"/>).</summary>
+        public int ColoringFreshInterval
+        {
+            get => coloring.FreshInterval;
+            set => coloring.FreshInterval = Math.Max(0, value);
+        }
+
+        /// <summary>The statistics of the newest persistent coloring step that has come back from the GPU.</summary>
+        internal ColoringSample LastColoringSample => coloring.LastSample;
+        internal int ColoringSamplesSeen => coloring.SamplesSeen;
+        internal int ColoringRounds => coloring.Tuner.RoundsFor(false);
+
+        /// <summary>Takes in the coloring statistics that are in flight, waiting for them (for tests and tools).</summary>
+        internal void FlushColoringStatistics() => coloring.PollStatistics(true);
 
         /// <summary>
         /// Which body colors first (see <see cref="GraphColoringOrder"/>). The default is <see cref="GraphColoringOrder.Hashed"/> (few rounds);
@@ -491,10 +518,36 @@ namespace McKrill.Avbd
 
             int bodyCount = bodies.HighWaterMark;
             BuildLists(bodyCount);
-            Recolor(bodyCount);
+            ColorStep(bodyCount);
         }
 
-        // Stage C: colors the graph and buckets the bodies. The number of colors comes back; the size of each color stays on the GPU.
+        // Stage C of a step with contacts: persistent when it may be, from scratch (and waiting) otherwise.
+        void ColorStep(int bodyCount)
+        {
+            if (PersistentColoring && coloringOrder == GraphColoringOrder.Hashed && coloring.HasBaseline && bodyCount <= AvbdGraphColoring.MaxPersistentBodies)
+            {
+                colorCount = coloring.RunPersistent(bodies, bodyCount, recordBuffer, listBuffer, lists.Other, colorBuffer, coloringOrder);
+                scheduleValid = false;
+            }
+            else
+                Recolor(bodyCount);
+        }
+
+        /// <summary>For tests: the coloring of a step with contacts, on the lists the last <see cref="Rebuild"/> built.</summary>
+        internal void ColorStepForTests()
+        {
+            ThrowIfDisposed();
+            ColorStep(bodies.HighWaterMark);
+        }
+
+        /// <summary>For tests: fixes the cap and the number of rounds of the persistent coloring (zero: tuned).</summary>
+        internal void PinColoring(int cap, int rounds)
+        {
+            coloring.Tuner.CapOverride = cap;
+            coloring.Tuner.RoundsOverride = rounds;
+        }
+
+        // Stage C: colors the graph from scratch and buckets the bodies. The number of colors comes back (this waits for the GPU); the size of each color stays on the GPU.
         void Recolor(int bodyCount)
         {
             colorCount = coloring.Run(bodies, bodyCount, recordBuffer, listBuffer, lists.Other, colorBuffer, coloringOrder);
