@@ -363,7 +363,7 @@ namespace McKrill.Avbd.Samples
                 }
             }
             var spawned = new BodyHandle[descriptors.Count];
-            bodies.SpawnBatch(descriptors, spawned, true);
+            bodies.SpawnBatch(descriptors, spawned, zCurveOrder);
             for (int i = 0; i < spawned.Length; i++)
                 AddStaticInstance(spawned[i], instanceSizes[i], instanceColors[i]);
 
