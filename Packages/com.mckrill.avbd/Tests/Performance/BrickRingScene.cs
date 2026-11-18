@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using Unity.Mathematics;
 using UnityEngine;
 
@@ -39,12 +38,7 @@ namespace McKrill.Avbd.Tests.Performance
         public int ManifoldSlots { get; private set; }
 
         /// <param name="iterations">The solver iterations per step: 4 in the original's benchmark.</param>
-        /// <param name="builderOrder">
-        /// Spawn the bodies in the order the scene is built (the ground, then the bricks course by course and ring by ring, then the ball), which puts a
-        /// brick's neighbors in the course above thousands of slots away. False (the default) places them in Z-curve order of their positions
-        /// (<see cref="AvbdBodyBuffers.SpawnBatch"/>); the test compares the two.
-        /// </param>
-        public BrickRingScene(int iterations, bool builderOrder = false)
+        public BrickRingScene(int iterations)
         {
             int bricks = CountBricks();
             int capacity = 1 + bricks + 1 + 8; // the ground, the bricks, the ball
@@ -58,8 +52,7 @@ namespace McKrill.Avbd.Tests.Performance
 
             float extent = Radius + Rows;
             float ground = Mathf.Max(200f, 4f * extent); // as in the original: room for the debris to scatter
-            var descriptors = new List<BodyDescriptor>(capacity);
-            descriptors.Add(BodyDescriptor.Box(new float3(ground, 1f, ground), 0f, new float3(0f, -0.5f, 0f)));
+            Bodies.Spawn(BodyDescriptor.Box(new float3(ground, 1f, ground), 0f, new float3(0f, -0.5f, 0f)));
 
             for (int c = 0; c < Courses; c++)
             {
@@ -75,7 +68,8 @@ namespace McKrill.Avbd.Tests.Performance
                         BodyDescriptor brick = BodyDescriptor.Box(new float3(BrickLength, BrickHeight, BrickHeight), BrickDensity,
                             new float3(r * Mathf.Cos(a), BrickHeight * 0.5f + BrickHeight * c, -r * Mathf.Sin(a)));
                         brick.rotation = quaternion.AxisAngle(new float3(0f, 1f, 0f), a + Mathf.PI * 0.5f);
-                        descriptors.Add(brick);
+                        if (Bodies.Spawn(brick).IsValid)
+                            BrickCount++;
                     }
                 }
             }
@@ -86,13 +80,7 @@ namespace McKrill.Avbd.Tests.Performance
             float outside = Radius + 0.52f * Rows + ballRadius + 2f;
             BodyDescriptor ball = BodyDescriptor.Box(new float3(side), BallDensity, new float3(0f, side * 0.5f, outside));
             ball.linearVelocity = new float3(0f, 0f, -BallSpeed);
-            descriptors.Add(ball);
-
-            var handles = new BodyHandle[descriptors.Count];
-            Bodies.SpawnBatch(descriptors, handles, !builderOrder);
-            for (int i = 1; i < handles.Length - 1; i++)
-                if (handles[i].IsValid)
-                    BrickCount++;
+            Bodies.Spawn(ball);
 
             Bodies.ApplyEdits();
         }

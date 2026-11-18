@@ -22,21 +22,14 @@ namespace McKrill.Avbd.Tests.Performance
         const int LeadSteps = 60;   // including the first
         const int WindowSteps = 100;
 
-        // The bodies in Z-curve order of their positions (the default of AvbdBodyBuffers.SpawnBatch).
         [Test, Performance, Timeout(3_600_000)]
-        public void Scenario5_BrickRing110k() => RunBrickRing(builderOrder: false);
-
-        // The same scene with the bodies in the order it is built (course by course): the baseline for the comparison with the test above.
-        [Test, Performance, Timeout(3_600_000)]
-        public void Scenario5_BrickRing110k_BuilderOrder() => RunBrickRing(builderOrder: true);
-
-        static void RunBrickRing(bool builderOrder)
+        public void Scenario5_BrickRing110k()
         {
             PerformanceHarness.RequireCompute();
-            TestContext.Out.WriteLine("Brick ring: " + BrickRingScene.CountBricks() + " bricks, " + Iterations + " iterations, " + (builderOrder ? "builder order" : "Z-curve order"));
+            TestContext.Out.WriteLine("Brick ring: " + BrickRingScene.CountBricks() + " bricks, " + Iterations + " iterations");
 
             var build = Stopwatch.StartNew();
-            using (var scene = new BrickRingScene(Iterations, builderOrder))
+            using (var scene = new BrickRingScene(Iterations))
             {
                 AvbdSolver solver = scene.Solver;
                 AvbdBodyBuffers bodies = scene.Bodies;

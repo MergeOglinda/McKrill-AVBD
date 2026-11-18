@@ -24,7 +24,7 @@ namespace McKrill.Avbd.Tests.Performance
     public sealed class FractureWallPerformanceTests
     {
         const int RestSteps = 29;      // after the first step
-        const int ImpactSteps = 180;   // after the volley
+        const int ImpactSteps = 380;   // after the volley
 
         [Test, Performance, Timeout(1_800_000)]
         public void Scenario1_Shots2m_PlasticYieldOff()
@@ -48,13 +48,6 @@ namespace McKrill.Avbd.Tests.Performance
         public void Scenario4_Shots1m_PlasticYieldOn()
         {
             Run(new FractureWallConfig().WithShotSize(1f).WithPlasticJoints(true));
-        }
-
-        // Scenario 1 with the bodies in the order the wall is built (the other scenarios place them in Z-curve order): the baseline for scenario 1.
-        [Test, Performance, Timeout(1_800_000)]
-        public void Scenario1_Shots2m_PlasticYieldOff_BuilderOrder()
-        {
-            Run(new FractureWallConfig().WithShotSize(2f).WithPlasticJoints(false).WithBuilderOrder(true));
         }
 
         static void Run(FractureWallConfig config)
