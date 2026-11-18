@@ -69,9 +69,9 @@ namespace McKrill.Avbd.Samples
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
         [SerializeField] bool rigidJoints = false;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
-        [SerializeField, Min(1f)] float jointStiffness = 2e3f;
+        [SerializeField, Min(1f)] float jointStiffness = 5e3f;
         [Tooltip("A joint breaks when the norm of its angular multiplier is above this.")]
-        [SerializeField, Min(0.01f)] float fractureThreshold = 19f;
+        [SerializeField, Min(0.01f)] float fractureThreshold = 40f;
 
         [Header("Plastic joints (applied on Reset)")]
         [Tooltip("Joints yield instead of holding: above the yield threshold the angle lock gives way and the joint keeps the bend. Off: the joints are rigid up to the fracture threshold, and the package runs without any plastic code or buffer.")]
@@ -630,7 +630,7 @@ namespace McKrill.Avbd.Samples
             iterations = Mathf.RoundToInt(GUILayout.HorizontalSlider(iterations, 1, 30));
 
             GUILayout.Space(4f);
-            GUILayout.Label("Wall: C columns, R rows, W walls (applied on Reset)", boldLabel);
+            GUILayout.Label("Wall size (Reset to apply)", boldLabel);
             GUILayout.BeginHorizontal();
             GUILayout.Label("C " + columns, GUILayout.Width(38f));
             columns = Mathf.RoundToInt(GUILayout.HorizontalSlider(columns, MinColumns, MaxColumns));
@@ -639,7 +639,12 @@ namespace McKrill.Avbd.Samples
             GUILayout.Label("W " + walls, GUILayout.Width(38f));
             walls = Mathf.RoundToInt(GUILayout.HorizontalSlider(walls, MinWalls, MaxWalls));
             GUILayout.EndHorizontal();
-            GUILayout.Label(BlockCount(columns, rows, walls) + " blocks in total   (walls " + WallSpacing.ToString("0") + " m apart)");
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(paused ? "Play" : "Pause")) paused = !paused;
+            if (GUILayout.Button("Step")) { paused = true; requestStep = true; }
+            if (GUILayout.Button("Clear shots")) requestClearShots = true;
+            if (GUILayout.Button("Reset")) requestReset = true;
+            GUILayout.EndHorizontal();
 
             // Density, stiffness and the threshold on log scales.
             GUILayout.Label("Block density: " + blockDensity.ToString("0.00") + "   (" + (blockDensity * blockSize.x * blockSize.y * blockSize.z).ToString("0.00") + " kg per block)");
@@ -667,14 +672,6 @@ namespace McKrill.Avbd.Samples
             bendBreakDegrees = Mathf.Round(GUILayout.HorizontalSlider(bendBreakDegrees, 1f, 180f));
             GUI.enabled = wasEnabled;
             GUILayout.Space(4f);
-
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(paused ? "Play" : "Pause")) paused = !paused;
-            if (GUILayout.Button("Step")) { paused = true; requestStep = true; }
-            if (GUILayout.Button("Clear shots")) requestClearShots = true;
-            if (GUILayout.Button("Reset")) requestReset = true;
-            GUILayout.EndHorizontal();
-
             GUILayout.Space(4f);
             GUILayout.Label("bodies " + (staticCount + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
             GUILayout.Label("joints broken " + (constraints != null ? constraints.BrokenCount : 0) + " / " + jointCount);
