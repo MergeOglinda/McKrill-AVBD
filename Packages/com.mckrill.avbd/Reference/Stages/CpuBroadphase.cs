@@ -78,18 +78,109 @@ namespace McKrill.Avbd.Reference
 
         public static string Describe(ulong key) => "(" + (key >> 34) + ", " + ((key >> 2) & 0xFFFFFFFFu) + ", " + (PairKind)(key & 3u) + ")";
 
-        /// <summary>Largest radius among the solved bodies; zero if there are none.</summary>
-        public static float MaxRadius(CpuBodyArrays bodies, int bodyCount)
+        /// <summary>What BpClassify decides: see <see cref="Classification"/>.</summary>
+        public struct GridModel
         {
-            float max = 0f;
+            public int LiveCount;
+            public int SolvedCount;
+            public int SmallBin;
+            public int FineBin;
+            public bool TwoLevels;
+            public float MaxSmallRadius;
+            public float CoarseCell;
+            public float FineCell;
+            public int LargeCount;
+        }
+
+        const int Bins = AvbdBroadphase.RadiusBins;
+
+        /// <summary>Mirrors RadiusBin in the shader.</summary>
+        public static int RadiusBin(float radius)
+        {
+            float scaled = math.log2(math.max(radius, 1.0e-30f)) * AvbdBroadphase.BinsPerOctave + AvbdBroadphase.BinOctaves * AvbdBroadphase.BinsPerOctave;
+            return (int)math.clamp(math.floor(scaled), 0f, Bins - 1);
+        }
+
+        /// <summary>Mirrors BinUpper in the shader.</summary>
+        public static float BinUpper(int bin) => math.exp2((bin + 1f) / AvbdBroadphase.BinsPerOctave - AvbdBroadphase.BinOctaves) * 1.001f;
+
+        static int RankBin(int[] histogram, int rank)
+        {
+            int cumulative = 0;
+            for (int bin = 0; bin < Bins; bin++)
+            {
+                cumulative += histogram[bin];
+                if (cumulative > rank)
+                    return bin;
+            }
+            return Bins - 1;
+        }
+
+        static int HighestBinBelow(int[] histogram, int limit)
+        {
+            for (int bin = System.Math.Min(limit, Bins - 1); bin >= 0; bin--)
+                if (histogram[bin] != 0)
+                    return bin;
+            return 0;
+        }
+
+        // The largest bin that still holds a small body (three-avbd's largestSmall, on bins).
+        static int SmallBin(int[] histogram, int count)
+        {
+            int cut = System.Math.Min(RankBin(histogram, count >> 1) + AvbdBroadphase.LargeFactorBins, Bins - 1);
+            if (count > AvbdBroadphase.MaxLarge)
+                cut = System.Math.Max(cut, RankBin(histogram, count - AvbdBroadphase.MaxLarge - 1));
+            return HighestBinBelow(histogram, cut);
+        }
+
+        /// <summary>
+        /// Mirrors BpHistogram and BpClassify: which radius bin is the largest of the small bodies, where the fine level ends, whether there are two
+        /// levels, the cell sizes, and how many bodies are large. (three-avbd's uploadStatics, with the median and the cut-offs taken on bins of a
+        /// sixteenth of an octave, so that the GPU needs no sort and no readback.)
+        /// </summary>
+        public static GridModel Classification(CpuBodyArrays bodies, int bodyCount)
+        {
+            var all = new int[Bins];
+            var solved = new int[Bins];
+            var model = new GridModel();
             for (int s = 0; s < bodyCount; s++)
-                if (Classify(bodies, s) == BodyClass.Solved)
+            {
+                BodyClass kind = Classify(bodies, s);
+                float radius = Radius(bodies, s);
+                if (kind == BodyClass.Free || !float.IsFinite(radius))
+                    continue;
+                int bin = RadiusBin(radius);
+                all[bin]++;
+                model.LiveCount++;
+                if (kind == BodyClass.Solved)
                 {
-                    float r = Radius(bodies, s);
-                    if (float.IsFinite(r) && r > max)
-                        max = r;
+                    solved[bin]++;
+                    model.SolvedCount++;
                 }
-            return max;
+            }
+            if (model.LiveCount == 0)
+            {
+                model.CoarseCell = 1f;
+                model.FineCell = 1f;
+                return model;
+            }
+
+            int smallBin = SmallBin(all, model.LiveCount);
+            int targetBin = smallBin;
+            if (model.SolvedCount > 0)
+                targetBin = System.Math.Min(smallBin, SmallBin(solved, model.SolvedCount) + AvbdBroadphase.LargeFactorBins);
+            int fineBin = HighestBinBelow(all, targetBin);
+            bool two = fineBin + AvbdBroadphase.LargeFactorBins < smallBin;
+
+            model.SmallBin = smallBin;
+            model.FineBin = two ? fineBin : smallBin;
+            model.TwoLevels = two;
+            model.MaxSmallRadius = BinUpper(smallBin);
+            model.CoarseCell = math.max(2f * BinUpper(smallBin) * AvbdBroadphase.CellMargin, 1.0e-4f);
+            model.FineCell = two ? math.max(2f * BinUpper(fineBin) * AvbdBroadphase.CellMargin, 1.0e-4f) : model.CoarseCell;
+            for (int bin = smallBin + 1; bin < Bins; bin++)
+                model.LargeCount += all[bin];
+            return model;
         }
 
         /// <param name="constraints">Constraint records; contacts and the ones with a world end exclude nothing.</param>
