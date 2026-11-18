@@ -66,8 +66,6 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Range(MinWalls, MaxWalls)] int walls = 10;
         [SerializeField] Vector3 blockSize = new Vector3(1f, 0.5f, 0.5f);
         [SerializeField, Min(0.01f)] float blockDensity = 1f;
-        [Tooltip("Place the bodies in the GPU arrays in Z-curve order of their positions (AvbdBodyBuffers.SpawnBatch), so that blocks that touch are near each other in memory. Off: in the order the wall is built, row by row.")]
-        [SerializeField] bool zCurveOrder = false;
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
         [SerializeField] bool rigidJoints = false;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
@@ -365,7 +363,7 @@ namespace McKrill.Avbd.Samples
                 }
             }
             var spawned = new BodyHandle[descriptors.Count];
-            bodies.SpawnBatch(descriptors, spawned, zCurveOrder);
+            bodies.SpawnBatch(descriptors, spawned, true);
             for (int i = 0; i < spawned.Length; i++)
                 AddStaticInstance(spawned[i], instanceSizes[i], instanceColors[i]);
 
@@ -701,8 +699,6 @@ namespace McKrill.Avbd.Samples
             if (GUILayout.Button("Clear shots")) requestClearShots = true;
             if (GUILayout.Button("Reset")) requestReset = true;
             GUILayout.EndHorizontal();
-            if (GUILayout.Button("Fire volley (15 shots at the first wall)")) requestVolley = true;
-            zCurveOrder = GUILayout.Toggle(zCurveOrder, "Z-curve body order (Reset to apply; off: row by row)");
 
             // Density, stiffness and the threshold on log scales.
             GUILayout.Label("Block density: " + blockDensity.ToString("0.00") + "   (" + (blockDensity * blockSize.x * blockSize.y * blockSize.z).ToString("0.00") + " kg per block)");
