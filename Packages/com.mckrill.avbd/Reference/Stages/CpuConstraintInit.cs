@@ -11,7 +11,8 @@ namespace McKrill.Avbd.Reference
     /// </summary>
     internal static class CpuConstraintInit
     {
-        public static void Run(CpuBodyArrays bodies, ConstraintRecord[] constraints, int count, in AvbdSolverSettings settings)
+        /// <param name="plastic">The plastic array, for joints with the Plastic flag; null if there are none.</param>
+        public static void Run(CpuBodyArrays bodies, ConstraintRecord[] constraints, int count, in AvbdSolverSettings settings, PlasticRecord[] plastic = null)
         {
             for (int i = 0; i < count; i++)
             {
@@ -40,7 +41,8 @@ namespace McKrill.Avbd.Reference
 
                 float torqueArm = c.c0Lin.w;
                 c.c0Lin = new float4(anchorA - anchorB, torqueArm);
-                c.c0Ang = new float4(AvbdQuat.DifferenceRaw(rotA, rotB) * torqueArm, c.c0Ang.w);
+                quaternion rest = CpuPlastic.RestOf(plastic, c, flags);
+                c.c0Ang = new float4(AvbdQuat.JointAngularError(rotA, rotB, rest) * torqueArm, c.c0Ang.w);
 
                 // Warm start (Eq. 19), penalties clamped to a safe range.
                 float3 lambdaLin = c.lambdaLin.xyz * settings.alpha * settings.gamma;

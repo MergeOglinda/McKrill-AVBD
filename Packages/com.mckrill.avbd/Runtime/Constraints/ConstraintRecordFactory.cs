@@ -47,6 +47,32 @@ namespace McKrill.Avbd
             };
         }
 
+        /// <summary>
+        /// Makes a joint record plastic: sets the <see cref="ConstraintFlags.Plastic"/> flag (and <see cref="ConstraintFlags.BendBreak"/> if
+        /// <paramref name="bendLimit"/> is finite), points ident.w at <paramref name="plasticSlot"/> and returns the <see cref="PlasticRecord"/> that goes
+        /// there: the rest rotation starts as the identity, which is the rigid joint.
+        /// </summary>
+        /// <param name="yield">Norm of the angular multiplier above which the joint yields. Above zero.</param>
+        /// <param name="bendLimit">Radians the rest rotation may move from where it started before the joint breaks; +infinity for no limit.</param>
+        public static PlasticRecord MakePlastic(ref ConstraintRecord joint, uint plasticSlot, float yield, float bendLimit)
+        {
+            uint flags = (uint)ConstraintFlags.Plastic;
+            float storedBend = 0f;
+            if (!float.IsPositiveInfinity(bendLimit))
+            {
+                flags |= (uint)ConstraintFlags.BendBreak;
+                storedBend = bendLimit;
+            }
+            joint.ident.z |= flags;
+            joint.ident.w = plasticSlot;
+            return new PlasticRecord
+            {
+                rest = new float4(0f, 0f, 0f, 1f),
+                restStart = new float4(0f, 0f, 0f, 1f),
+                limits = new float4(yield, storedBend, 0f, 0f),
+            };
+        }
+
         public static ConstraintRecord Spring(uint slotA, uint slotB, float3 rA, float3 rB, float stiffness, float rest)
         {
             return new ConstraintRecord

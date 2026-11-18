@@ -51,6 +51,8 @@ namespace McKrill.Avbd
             public float stiffnessLin; // joint: linear stiffness. spring: stiffness
             public float stiffnessAng;
             public float fractureOrRest; // joint: fracture threshold. spring: rest length, negative = current distance
+            public float yield;          // joint: multiplier norm above which it yields, +infinity = not plastic
+            public float bendLimit;      // joint: radians of bend above which a plastic joint breaks, +infinity = none
         }
 
         readonly AvbdBodyBuffers bodies;
@@ -74,6 +76,13 @@ namespace McKrill.Avbd
         GraphicsBuffer poolControlBuffer;  // AVBD_NP_*
         GraphicsBuffer npArgsBuffer;       // indirect dispatch arguments of stage N and of the contacts' dual update, AVBD_NP_ARGS_*
         GraphicsBuffer dirtyBuffer;        // bit per body slot: spawned or removed since the last narrow phase
+        GraphicsBuffer plasticBuffer;      // PlasticRecord per plastic joint; null without a plastic capacity
+        readonly PlasticRecord[] plasticRecords;
+        readonly int plasticSlots;
+        int plasticCount;                  // plastic records in the CPU array
+        int plasticUploaded;               // plastic records already on the GPU
+        int plasticReserved;               // plastic joints added, counting those that are not built yet
+        bool warnedFractureBelowYield;
 
         readonly int contactSlots;
         readonly int tableSize;
@@ -95,16 +104,22 @@ namespace McKrill.Avbd
         /// <param name="contactCapacity">Number of manifold slots (pairs of touching bodies that can have contacts at once), or 0 for no
         /// contacts. At most <see cref="MaxContactManifolds"/>. Pairs that find no free slot get no contacts until one is free
         /// (<see cref="ReadContacts"/> reports it).</param>
-        public AvbdConstraintBuffers(AvbdBodyBuffers bodies, int capacity, AvbdShaderSet shaderSet = null, int contactCapacity = 0)
+        /// <param name="plasticCapacity">Number of joints that can be plastic (see <see cref="AddJoint"/>'s yield), or 0 for none: then no plastic
+        /// array is allocated and the solver runs the joint kernels without the plastic code. At most <paramref name="capacity"/>.</param>
+        public AvbdConstraintBuffers(AvbdBodyBuffers bodies, int capacity, AvbdShaderSet shaderSet = null, int contactCapacity = 0, int plasticCapacity = 0)
         {
             this.bodies = bodies ?? throw new ArgumentNullException(nameof(bodies));
             if (capacity < 1 || capacity > MaxConstraints)
                 throw new ArgumentOutOfRangeException(nameof(capacity), "Constraint capacity must be between 1 and " + MaxConstraints + ".");
             if (contactCapacity < 0 || contactCapacity > MaxContactManifolds)
                 throw new ArgumentOutOfRangeException(nameof(contactCapacity), "contactCapacity must be between 0 and " + MaxContactManifolds + ".");
+            if (plasticCapacity < 0 || plasticCapacity > capacity)
+                throw new ArgumentOutOfRangeException(nameof(plasticCapacity), "plasticCapacity must be between 0 and the constraint capacity.");
             if (!SystemInfo.supportsComputeShaders)
                 throw new InvalidOperationException("Compute shaders are not supported on this device.");
 
+            plasticSlots = plasticCapacity;
+            plasticRecords = new PlasticRecord[plasticCapacity];
             contactSlots = contactCapacity;
             int tableEntries = 64;
             while (tableEntries < contactSlots * 2)
@@ -138,6 +153,8 @@ namespace McKrill.Avbd
                 dirtyBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, dirtyBits.Length, sizeof(uint));
                 colorBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodies.Capacity, sizeof(uint));
                 statusBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, StatusWords, sizeof(uint));
+                if (plasticSlots > 0)
+                    plasticBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, plasticSlots, PlasticRecordStrides.Plastic);
             }
             catch
             {
@@ -148,6 +165,12 @@ namespace McKrill.Avbd
             // Rule P9: nothing is assumed to be zeroed. The contact points are the exception: a point is read only if its pair's count says it
             // exists, and the pair records (all free) are initialized here.
             recordBuffer.SetData(records, 0, 0, capacity);
+            if (plasticBuffer != null)
+            {
+                for (int i = 0; i < plasticRecords.Length; i++)
+                    plasticRecords[i].rest = plasticRecords[i].restStart = new float4(0f, 0f, 0f, 1f);
+                plasticBuffer.SetData(plasticRecords);
+            }
             listBuffer.SetData(new uint[(capacity + contactSlots) * 2]);
             contactPairBuffer.SetData(freePairs);
             pairTableBuffer.SetData(new uint[tableSize]);
@@ -192,6 +215,33 @@ namespace McKrill.Avbd
 
         /// <summary>Number of manifold slots: the pairs of bodies that can have contacts at once.</summary>
         public int ContactCapacity => contactSlots;
+
+        /// <summary>
+        /// True if the object has a plastic array (it was created with a plastic capacity above 0). <see cref="AvbdSolver"/> then runs the variants of the
+        /// joint kernels that read it; without it they are the kernels of a solver that has no plastic joints.
+        /// </summary>
+        public bool HasPlasticJoints => plasticSlots > 0;
+
+        /// <summary>Number of joints that can be plastic.</summary>
+        public int PlasticCapacity => plasticSlots;
+
+        /// <summary>Plastic joints added, counting those that are not built yet.</summary>
+        public int PlasticCount => plasticReserved;
+
+        /// <summary>The plastic array: a <see cref="PlasticRecord"/> per plastic joint. Null if <see cref="HasPlasticJoints"/> is false.</summary>
+        internal GraphicsBuffer PlasticBuffer => plasticBuffer;
+
+        /// <summary>The plastic records as the GPU holds them, in the order the plastic joints were added. Waits for the GPU.</summary>
+        internal PlasticRecord[] ReadPlastic()
+        {
+            ThrowIfDisposed();
+            var all = new PlasticRecord[plasticSlots];
+            if (plasticBuffer != null)
+                plasticBuffer.GetData(all);
+            var used = new PlasticRecord[plasticCount];
+            Array.Copy(all, used, plasticCount);
+            return used;
+        }
 
         /// <summary>
         /// Number of joints and springs that have fractured, as of the last list build (stage G): every step with contacts, otherwise
@@ -346,11 +396,17 @@ namespace McKrill.Avbd
         /// Adds a ball-socket joint with an optional angle lock, like upstream's Joint. Pass an invalid <paramref name="bodyA"/> to pin
         /// bodyB to the world-space point rA. Stiffness is a number above or equal to zero, or +infinity for a hard constraint.
         /// A stiffnessAng of 0 disables the angle lock. fracture is the multiplier norm above which the joint breaks (+infinity: never).
-        /// Returns the constraint index, or -1 if the buffers are full.
+        ///
+        /// A finite <paramref name="yield"/> makes the joint plastic: when the angular multiplier is above it, the multiplier is held at it and the joint
+        /// gives way, keeping the bend it ends up with (it does not spring back). That needs a hard angular row (stiffnessAng = +infinity) and
+        /// buffers made with a plastic capacity. A finite <paramref name="bendLimit"/> (radians, up to pi) breaks a plastic joint once it has bent
+        /// further than that from its original rest rotation. A fracture value above the yield value only catches loads that jump past it within one step.
+        /// Returns the constraint index, or -1 if the buffers are full (or the plastic capacity is used up).
         /// </summary>
         public int AddJoint(
             BodyHandle bodyA, BodyHandle bodyB, float3 rA, float3 rB,
-            float stiffnessLin = float.PositiveInfinity, float stiffnessAng = 0f, float fracture = float.PositiveInfinity)
+            float stiffnessLin = float.PositiveInfinity, float stiffnessAng = 0f, float fracture = float.PositiveInfinity,
+            float yield = float.PositiveInfinity, float bendLimit = float.PositiveInfinity)
         {
             ThrowIfDisposed();
             if (bodyA.IsValid && !bodies.IsAlive(bodyA)) throw new ArgumentException("bodyA is stale.", nameof(bodyA));
@@ -362,7 +418,30 @@ namespace McKrill.Avbd
             RequireStiffness(stiffnessAng, nameof(stiffnessAng));
             if (!(fracture >= 0f)) throw new ArgumentException("fracture must be zero or more, or +infinity.", nameof(fracture));
 
-            return Enqueue(new Spec
+            bool plastic = !float.IsPositiveInfinity(yield);
+            if (plastic)
+            {
+                if (!(yield > 0f)) throw new ArgumentException("yield must be above zero, or +infinity for a rigid joint.", nameof(yield));
+                if (plasticSlots == 0) throw new InvalidOperationException("The buffers were made without a plastic capacity (plasticCapacity), so no joint can yield.");
+                if (!float.IsPositiveInfinity(stiffnessAng)) throw new ArgumentException("A plastic joint needs a hard angular row: stiffnessAng must be +infinity.", nameof(stiffnessAng));
+                if (fracture <= yield && !warnedFractureBelowYield)
+                {
+                    warnedFractureBelowYield = true; // once per set of buffers: a wall adds thousands of joints with the same values
+                    Debug.LogWarning("AddJoint: fracture (" + fracture + ") is not above yield (" + yield + "): such a joint breaks before it can yield. Raise fracture or pass +infinity. (Shown once.)");
+                }
+            }
+            if (!float.IsPositiveInfinity(bendLimit))
+            {
+                if (!plastic) throw new ArgumentException("bendLimit needs a finite yield: only a plastic joint bends.", nameof(bendLimit));
+                if (!(bendLimit > 0f && bendLimit <= math.PI)) throw new ArgumentException("bendLimit must be above 0 and at most pi radians, or +infinity.", nameof(bendLimit));
+            }
+            if (plastic && plasticReserved >= plasticSlots)
+            {
+                OverflowCount++;
+                return -1;
+            }
+
+            int index = Enqueue(new Spec
             {
                 kind = ConstraintKind.Joint,
                 slotA = bodyA.IsValid ? (uint)bodyA.Slot : AvbdConst.Invalid,
@@ -372,7 +451,12 @@ namespace McKrill.Avbd
                 stiffnessLin = stiffnessLin,
                 stiffnessAng = stiffnessAng,
                 fractureOrRest = fracture,
+                yield = yield,
+                bendLimit = bendLimit,
             });
+            if (index >= 0 && plastic)
+                plasticReserved++;
+            return index;
         }
 
         /// <summary>
@@ -400,6 +484,8 @@ namespace McKrill.Avbd
                 rB = rB,
                 stiffnessLin = stiffness,
                 fractureOrRest = rest,
+                yield = float.PositiveInfinity,
+                bendLimit = float.PositiveInfinity,
             });
         }
 
@@ -417,6 +503,26 @@ namespace McKrill.Avbd
             records[recordCount] = record;
             topologyDirty = true;
             return recordCount++;
+        }
+
+        // Adds a finished plastic joint record (the warm-start state included) and its plastic record. For tests, which build records with the CPU oracle:
+        // the record must name the next plastic slot in ident.w.
+        internal int AddRecord(in ConstraintRecord record, in PlasticRecord plastic)
+        {
+            ThrowIfDisposed();
+            if ((ConstraintFlagLayout.FlagsOf(record.ident.z) & ConstraintFlags.Plastic) == 0)
+                throw new ArgumentException("The record is not plastic.", nameof(record));
+            if (plasticCount >= plasticSlots)
+                throw new InvalidOperationException("The plastic capacity is used up.");
+            if (record.ident.w != (uint)plasticCount)
+                throw new ArgumentException("The record must name the next plastic slot (" + plasticCount + ") in ident.w.", nameof(record));
+            int index = AddRecord(record);
+            if (index >= 0)
+            {
+                plasticRecords[plasticCount++] = plastic;
+                plasticReserved = plasticCount;
+            }
+            return index;
         }
 
         int Enqueue(in Spec spec)
@@ -462,6 +568,11 @@ namespace McKrill.Avbd
                         : ConstraintRecordFactory.Spring(
                             s.slotA, s.slotB, s.rA, s.rB, s.stiffnessLin,
                             s.fractureOrRest >= 0f ? s.fractureOrRest : CurrentDistance(state, s));
+                    if (s.kind == ConstraintKind.Joint && !float.IsPositiveInfinity(s.yield))
+                    {
+                        plasticRecords[plasticCount] = ConstraintRecordFactory.MakePlastic(ref records[recordCount], (uint)plasticCount, s.yield, s.bendLimit);
+                        plasticCount++;
+                    }
                     recordCount++;
                 }
                 pending.Clear();
@@ -471,6 +582,11 @@ namespace McKrill.Avbd
             {
                 recordBuffer.SetData(records, uploadedCount, uploadedCount, recordCount - uploadedCount);
                 uploadedCount = recordCount;
+            }
+            if (plasticBuffer != null && plasticCount > plasticUploaded)
+            {
+                plasticBuffer.SetData(plasticRecords, plasticUploaded, plasticUploaded, plasticCount - plasticUploaded);
+                plasticUploaded = plasticCount;
             }
 
             // Stage G: the per-body lists, then stage C: color the graph and bucket the bodies. Both on the GPU.
@@ -711,6 +827,7 @@ namespace McKrill.Avbd
             Release(ref poolControlBuffer);
             Release(ref npArgsBuffer);
             Release(ref dirtyBuffer);
+            Release(ref plasticBuffer);
             coloring?.Dispose();
             lists?.Dispose();
         }

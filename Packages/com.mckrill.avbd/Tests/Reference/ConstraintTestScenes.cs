@@ -11,6 +11,7 @@ namespace McKrill.Avbd.Tests
         public CpuBodyArrays bodies;
         public List<BodyDescriptor> descriptors = new List<BodyDescriptor>();
         public ConstraintRecord[] constraints;
+        public PlasticRecord[] plastic = new PlasticRecord[0]; // the plastic joints, in constraint order
         public int constraintCount;
         public int bodyCount;
 
@@ -70,6 +71,7 @@ namespace McKrill.Avbd.Tests
             queue.Drain(commands);
             scene.bodies.Apply(commands);
 
+            var plastic = new List<PlasticRecord>();
             foreach (AvbdForce force in solver.Forces)
             {
                 uint slotA = force.BodyA != null ? (uint)force.BodyA.Index : AvbdConst.Invalid;
@@ -81,6 +83,8 @@ namespace McKrill.Avbd.Tests
                     r.penaltyAng = new float4(j.penaltyAng, 0f);
                     r.lambdaLin = new float4(j.lambdaLin, 0f);
                     r.lambdaAng = new float4(j.lambdaAng, 0f);
+                    if (!float.IsPositiveInfinity(j.yield))
+                        plastic.Add(ConstraintRecordFactory.MakePlastic(ref r, (uint)plastic.Count, j.yield, j.breakBend));
                     scene.constraints[scene.constraintCount++] = r;
                 }
                 else if (force is AvbdSpring s)
@@ -88,6 +92,7 @@ namespace McKrill.Avbd.Tests
                     scene.constraints[scene.constraintCount++] = ConstraintRecordFactory.Spring(slotA, slotB, s.rA, s.rB, s.stiffness, s.rest);
                 }
             }
+            scene.plastic = plastic.ToArray();
             return scene;
         }
 

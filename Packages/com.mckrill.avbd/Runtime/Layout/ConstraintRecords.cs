@@ -51,6 +51,15 @@ namespace McKrill.Avbd
         /// anchors to keep). The GPU keeps these bits in the pair record (<see cref="ContactPairRecord.ident"/>.w, bit k for point k).
         /// </summary>
         Stick = 1u << 4,
+
+        /// <summary>
+        /// The joint is plastic: its <see cref="PlasticRecord"/> is slot ident.w of the plastic array. Needs <see cref="HardAngular"/>. Without this flag
+        /// ident.w means nothing (a contact record of the CPU oracle keeps its feature key there). Owner: constraint creation.
+        /// </summary>
+        Plastic = 1u << 5,
+
+        /// <summary>A plastic joint breaks when it has bent further than <see cref="PlasticRecord.limits"/>.y radians off its original rest rotation. Owner: constraint creation.</summary>
+        BendBreak = 1u << 6,
     }
 
     /// <summary>Packing of the constraint flags word: low 24 bits are flags, high 8 bits are the <see cref="ConstraintKind"/>.</summary>
@@ -89,7 +98,7 @@ namespace McKrill.Avbd
     [StructLayout(LayoutKind.Sequential)]
     internal struct ConstraintRecord
     {
-        /// <summary>x = body A slot (AVBD_INVALID for a joint pinned to the world point rA), y = body B slot, z = flags | kind &lt;&lt; 24, w = feature key (contact), else unused.</summary>
+        /// <summary>x = body A slot (AVBD_INVALID for a joint pinned to the world point rA), y = body B slot, z = flags | kind &lt;&lt; 24, w = feature key (contact), slot in the plastic array (joint with <see cref="ConstraintFlags.Plastic"/>), else unused.</summary>
         public uint4 ident;
 
         /// <summary>xyz = anchor on body A in body space (a world-space point if A is the world). w = linear stiffness of a joint, stiffness of a spring.</summary>

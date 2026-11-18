@@ -4,6 +4,9 @@
 //                 and penalties (Eq. 19). The reference solver's Joint.Initialize.
 // Dual            After every primal sweep. Updates the multiplier of hard constraints, ramps the penalty (Eqs. 11 and 16) and breaks
 //                 joints whose angular multiplier exceeds the fracture threshold. The reference solver's Joint.UpdateDual.
+//                 With AVBD_PLASTIC_JOINTS, a plastic joint (PLASTIC flag) whose angular multiplier exceeds its yield value yields instead: the
+//                 multiplier is clamped to the yield value and the rest rotation of the joint moves to the current relative rotation, so the bend
+//                 stays; a joint that has yielded past its bend limit breaks.
 //
 // One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
 // ordering, coloring or atomics are needed. Springs have no state and are skipped.
@@ -16,8 +19,13 @@
 #pragma kernel Dual
 #pragma kernel DualContact
 
+// Compiled in only when the constraint buffers have a plastic array (AvbdSolver switches the keyword). Without it the joint kernels are exactly the ones
+// of a solver with no plastic joints: no extra buffer, no extra code.
+#pragma multi_compile_local _ AVBD_PLASTIC_JOINTS
+
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdPlasticRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
@@ -26,6 +34,9 @@
 
 StructuredBuffer<BodyStateRecord>      _BodyState;
 RWStructuredBuffer<ConstraintRecord>   _Constraints;
+#if defined(AVBD_PLASTIC_JOINTS)
+RWStructuredBuffer<PlasticRecord>      _Plastic;       // rest rotation and limits of the joints with the PLASTIC flag, by ident.w
+#endif
 
 RWStructuredBuffer<ContactPairRecord>  _ContactPairs;  // manifold slots (DualContact): the pair of bodies, the contact count, the stick bits, the normal and the friction
 RWStructuredBuffer<ContactPointRecord> _ContactPoints; // their contact points, AVBD_MAX_CONTACTS per slot
@@ -75,9 +86,14 @@ void ConstraintInit(uint3 id : SV_DispatchThreadID)
     float3 anchorB = AvbdQuatRotate(rotB, c.anchorB.xyz) + posB;
 
     // Constraint function at the start of the step, C(x-). The w lanes (torque arm, fracture threshold) stay.
+    float4 rest = float4(0.0, 0.0, 0.0, 1.0);
+#if defined(AVBD_PLASTIC_JOINTS)
+    if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC)
+        rest = _Plastic[c.ident.w].rest;
+#endif
     float torqueArm = c.c0Lin.w;
     c.c0Lin.xyz = anchorA - anchorB;
-    c.c0Ang.xyz = AvbdQuatDifference(rotA, rotB) * torqueArm;
+    c.c0Ang.xyz = AvbdJointAngularError(rotA, rotB, rest) * torqueArm;
 
     // Warm start the multipliers and penalties (Eq. 19); penalties are clamped to a safe range.
     float3 lambdaLin = c.lambdaLin.xyz * AVBD_ALPHA * AVBD_GAMMA;
@@ -127,6 +143,18 @@ void Dual(uint3 id : SV_DispatchThreadID)
     float3 lambdaLin = c.lambdaLin.xyz;
     float3 lambdaAng = c.lambdaAng.xyz;
 
+    float4 rest = float4(0.0, 0.0, 0.0, 1.0);
+#if defined(AVBD_PLASTIC_JOINTS)
+    PlasticRecord plastic = (PlasticRecord)0;
+    bool isPlastic = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) != 0u;
+    if (isPlastic)
+    {
+        plastic = _Plastic[c.ident.w];
+        rest = plastic.rest;
+    }
+    bool yielded = false;
+#endif
+
     // Linear constraint
     if (dot(penaltyLin, penaltyLin) > 0.0)
     {
@@ -153,7 +181,7 @@ void Dual(uint3 id : SV_DispatchThreadID)
     // Angular constraint
     if (dot(penaltyAng, penaltyAng) > 0.0)
     {
-        float3 C = AvbdQuatDifference(rotA, rotB) * c.c0Lin.w; // times the torque arm; rotA is the identity for a world joint
+        float3 C = AvbdJointAngularError(rotA, rotB, rest) * c.c0Lin.w; // times the torque arm; rotA is the identity for a world joint
         float cap = AVBD_PENALTY_MAX;
 
         if (flags & AVBD_CONSTRAINT_FLAG_HARD_ANG)
@@ -166,11 +194,37 @@ void Dual(uint3 id : SV_DispatchThreadID)
             cap = min(c.anchorB.w, AVBD_PENALTY_MAX);
         }
 
+#if defined(AVBD_PLASTIC_JOINTS)
+        // Yield: a multiplier above the yield value is clamped to it, and the joint keeps the bend it has now (the rest rotation moves below).
+        // A multiplier above the fracture threshold does not yield: the joint breaks.
+        if (isPlastic)
+        {
+            float force = length(lambdaAng);
+            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && force > c.c0Ang.w;
+            if (force > plastic.limits.x && !fractures)
+            {
+                lambdaAng *= plastic.limits.x / force;
+                yielded = true;
+            }
+        }
+        // A yielding row does not ramp its penalty: the joint is not getting stiffer while it gives way.
+        if (!yielded)
+#endif
         penaltyAng = min(penaltyAng + abs(C) * AVBD_BETA_ANG, float3(cap, cap, cap));
     }
 
-    // Fracture test
-    if ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && dot(lambdaAng, lambdaAng) > c.c0Ang.w * c.c0Ang.w)
+    bool bentOff = false;
+#if defined(AVBD_PLASTIC_JOINTS)
+    if (yielded)
+    {
+        rest = AvbdJointRestFromPose(rotA, rotB);
+        if (flags & AVBD_CONSTRAINT_FLAG_BEND_BREAK)
+            bentOff = AvbdJointBend(plastic.restStart, rest) > plastic.limits.y;
+    }
+#endif
+
+    // Fracture test, and the bend limit of a plastic joint
+    if (bentOff || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && dot(lambdaAng, lambdaAng) > c.c0Ang.w * c.c0Ang.w))
     {
         penaltyLin = float3(0.0, 0.0, 0.0);
         penaltyAng = float3(0.0, 0.0, 0.0);
@@ -178,6 +232,15 @@ void Dual(uint3 id : SV_DispatchThreadID)
         lambdaAng = float3(0.0, 0.0, 0.0);
         c.ident.z |= AVBD_CONSTRAINT_FLAG_BROKEN;
     }
+
+#if defined(AVBD_PLASTIC_JOINTS)
+    if (yielded)
+    {
+        // The joint now holds the bend it has: the stored C0 (the stabilization reference of this step) must not pull it back.
+        c.c0Ang.xyz = float3(0.0, 0.0, 0.0);
+        _Plastic[c.ident.w].rest = rest;
+    }
+#endif
 
     c.penaltyLin.xyz = penaltyLin;
     c.penaltyAng.xyz = penaltyAng;
