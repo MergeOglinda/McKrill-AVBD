@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Unity.Mathematics;
 using UnityEngine;
 
@@ -38,6 +39,18 @@ namespace McKrill.Avbd.Tests.Performance
         /// <summary>Shots fired at once by <see cref="FractureWallScene.ShootVolley"/>.</summary>
         public int volleySize = 15;
 
+        /// <summary>
+        /// Spawn the ground and the blocks in the order the wall is built (row by row), the baseline for the comparison. False (the default) places them in
+        /// Z-curve order of their positions (<see cref="AvbdBodyBuffers.SpawnBatch"/>).
+        /// </summary>
+        public bool builderOrder = false;
+
+        public FractureWallConfig WithBuilderOrder(bool on)
+        {
+            builderOrder = on;
+            return this;
+        }
+
         public FractureWallConfig WithPlasticJoints(bool on)
         {
             plasticJoints = on;
@@ -53,7 +66,7 @@ namespace McKrill.Avbd.Tests.Performance
         public override string ToString()
         {
             return columns + " x " + rows + " x " + walls + " blocks, " + (plasticJoints ? "plastic yield " + yieldThreshold + (bendBreak ? ", bend break " + bendBreakDegrees + " deg" : "") : "no plastic yield")
-                + ", shots " + shotSize + " m";
+                + ", shots " + shotSize + " m, " + (builderOrder ? "builder order" : "Z-curve order");
         }
     }
 
@@ -109,8 +122,34 @@ namespace McKrill.Avbd.Tests.Performance
             Constraints = new AvbdConstraintBuffers(Bodies, jointCapacity, null, manifoldSlots, c.plasticJoints ? jointCapacity : 0);
             Solver = new AvbdSolver(Bodies, settings, null, Constraints);
 
-            // Ground: a static slab whose top face is the plane y = 0.
-            Bodies.Spawn(BodyDescriptor.Box(new float3(GroundHalfExtent * 2f, 1f, GroundHalfExtent * 2f), 0f, new float3(0f, -0.5f, 0f)));
+            // The ground and every block, in one batch: the ground is element 0, then the blocks wall by wall, row by row, column by column.
+            // Z-curve order (unless the config asks for the builder's) gives the slots; the handles come back in this list's order.
+            int perWall = c.rows * c.columns;
+            var descriptors = new List<BodyDescriptor>(1 + BlockCount);
+            var positions = new float3[c.walls * perWall];
+            descriptors.Add(BodyDescriptor.Box(new float3(GroundHalfExtent * 2f, 1f, GroundHalfExtent * 2f), 0f, new float3(0f, -0.5f, 0f))); // a static slab whose top face is the plane y = 0
+
+            float3 size = c.blockSize;
+            float stepX = size.x + BlockGap;
+            float stepY = size.y + BlockGap;
+            float centerColumn = (c.columns - 1) * 0.5f + 0.25f;
+            for (int w = 0; w < c.walls; w++)
+            {
+                float z = w * WallSpacing;
+                for (int r = 0; r < c.rows; r++)
+                {
+                    float y = size.y * 0.5f + BlockGap + r * stepY;
+                    for (int col = 0; col < c.columns; col++)
+                    {
+                        var position = new float3((col + 0.5f * (r & 1) - centerColumn) * stepX, y, z);
+                        positions[w * perWall + r * c.columns + col] = position;
+                        // The bottom row is immobile: a body without mass is static.
+                        descriptors.Add(BodyDescriptor.Box(size, r == 0 ? 0f : c.blockDensity, position));
+                    }
+                }
+            }
+            var spawned = new BodyHandle[descriptors.Count];
+            Bodies.SpawnBatch(descriptors, spawned, !c.builderOrder);
 
             float yield = c.plasticJoints ? c.yieldThreshold : float.PositiveInfinity;
             float bendLimit = c.plasticJoints && c.bendBreak ? Mathf.Min(c.bendBreakDegrees * Mathf.Deg2Rad, Mathf.PI) : float.PositiveInfinity;
@@ -118,24 +157,9 @@ namespace McKrill.Avbd.Tests.Performance
 
             for (int w = 0; w < c.walls; w++)
             {
-                float z = w * WallSpacing;
-                float3 size = c.blockSize;
-                float stepX = size.x + BlockGap;
-                float stepY = size.y + BlockGap;
-                float centerColumn = (c.columns - 1) * 0.5f + 0.25f;
-                var handles = new BodyHandle[c.rows, c.columns];
-                var positions = new float3[c.rows, c.columns];
-                for (int r = 0; r < c.rows; r++)
-                {
-                    float y = size.y * 0.5f + BlockGap + r * stepY;
-                    for (int col = 0; col < c.columns; col++)
-                    {
-                        var position = new float3((col + 0.5f * (r & 1) - centerColumn) * stepX, y, z);
-                        // The bottom row is immobile: a body without mass is static.
-                        handles[r, col] = Bodies.Spawn(BodyDescriptor.Box(size, r == 0 ? 0f : c.blockDensity, position));
-                        positions[r, col] = position;
-                    }
-                }
+                int first = w * perWall;
+                BodyHandle HandleOf(int r, int col) => spawned[1 + first + r * c.columns + col];
+                float3 PositionOf(int r, int col) => positions[first + r * c.columns + col];
 
                 // A block is joined to the block on its left and to the two blocks under it: with a shift of half a block, those are (c, c + 1) in an
                 // odd row and (c - 1, c) in an even one. The bottom row is not joined to itself.
@@ -143,13 +167,13 @@ namespace McKrill.Avbd.Tests.Performance
                     for (int col = 0; col < c.columns; col++)
                     {
                         if (col > 0)
-                            Join(handles[r, col], positions[r, col], handles[r, col - 1], positions[r, col - 1], linear, yield, bendLimit);
+                            Join(HandleOf(r, col), PositionOf(r, col), HandleOf(r, col - 1), PositionOf(r, col - 1), linear, yield, bendLimit);
                         int firstBelow = (r & 1) == 1 ? col : col - 1;
                         for (int k = 0; k < 2; k++)
                         {
                             int below = firstBelow + k;
                             if (below >= 0 && below < c.columns)
-                                Join(handles[r, col], positions[r, col], handles[r - 1, below], positions[r - 1, below], linear, yield, bendLimit);
+                                Join(HandleOf(r, col), PositionOf(r, col), HandleOf(r - 1, below), PositionOf(r - 1, below), linear, yield, bendLimit);
                         }
                     }
             }
