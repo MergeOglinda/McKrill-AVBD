@@ -30,6 +30,9 @@ namespace McKrill.Avbd
         readonly int dualContactKernel = -1;
         AvbdSolverSettings settings;
 
+        // Keyword of the variants of the primal and dual shaders that read the plastic array (AvbdPlasticRecords.hlsl).
+        const string PlasticKeyword = "AVBD_PLASTIC_JOINTS";
+        static readonly int PlasticId = Shader.PropertyToID("_Plastic");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
         static readonly int ColorBodiesId = Shader.PropertyToID("_ColorBodies");
@@ -223,6 +226,7 @@ namespace McKrill.Avbd
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, primalKernel);
             shader.SetBuffer(primalKernel, RecordsId, constraints.Records);
+            BindPlastic(shader, primalKernel);
             shader.SetBuffer(primalKernel, ContactPairsId, constraints.ContactPairsBuffer);
             shader.SetBuffer(primalKernel, ContactPointsId, constraints.ContactPointsBuffer);
             shader.SetBuffer(primalKernel, ListId, constraints.List);
@@ -334,7 +338,23 @@ namespace McKrill.Avbd
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, kernel);
             shader.SetBuffer(kernel, RecordsId, constraints.Records);
+            BindPlastic(shader, kernel);
             AvbdDispatch.Linear(shader, kernel, constraints.RecordCount);
+        }
+
+        // Picks the variant of the shader the constraint buffers need: with a plastic array the kernels that read it, otherwise the kernels without any
+        // plastic code (and no extra buffer). The keyword belongs to the shader asset, so it is set before every dispatch, not once.
+        void BindPlastic(ComputeShader shader, int kernel)
+        {
+            if (constraints.HasPlasticJoints)
+            {
+                shader.EnableKeyword(PlasticKeyword);
+                shader.SetBuffer(kernel, PlasticId, constraints.PlasticBuffer);
+            }
+            else
+            {
+                shader.DisableKeyword(PlasticKeyword);
+            }
         }
     }
 }

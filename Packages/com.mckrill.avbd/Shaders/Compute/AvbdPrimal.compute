@@ -10,8 +10,13 @@
 
 #pragma kernel Primal
 
+// Compiled in only when the constraint buffers have a plastic array (AvbdSolver switches the keyword): the angular row of a plastic joint then holds
+// body B at the joint's rest rotation relative to body A. See AvbdDual.compute.
+#pragma multi_compile_local _ AVBD_PLASTIC_JOINTS
+
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdPlasticRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdListParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
@@ -25,6 +30,9 @@ StructuredBuffer<BodyMassRecord>       _BodyMass;
 StructuredBuffer<BodyMetaRecord>       _BodyMeta;
 StructuredBuffer<BodyRangeRecord>      _BodyRange;
 StructuredBuffer<ConstraintRecord>     _Constraints;    // joints and springs
+#if defined(AVBD_PLASTIC_JOINTS)
+StructuredBuffer<PlasticRecord>        _Plastic;        // rest rotation of the joints with the PLASTIC flag, by ident.w
+#endif
 StructuredBuffer<ContactPairRecord>    _ContactPairs;   // manifolds of the pool (a list entry with AVBD_LIST_CONTACT_FLAG names one)
 StructuredBuffer<ContactPointRecord>   _ContactPoints;
 StructuredBuffer<uint>                 _ConstraintList; // entries, grouped per body (see _BodyRange): a joint or spring id, or AVBD_LIST_CONTACT_FLAG | manifold slot
@@ -132,7 +140,12 @@ void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float
     if (dot(penaltyAng, penaltyAng) > 0.0)
     {
         float3x3 K = AvbdDiagonal(penaltyAng);
-        float3 C = AvbdQuatDifference(rotA, rotB) * torqueArm; // rotA is the identity for a world joint
+        float4 rest = float4(0.0, 0.0, 0.0, 1.0);
+#if defined(AVBD_PLASTIC_JOINTS)
+        if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC)
+            rest = _Plastic[c.ident.w].rest;
+#endif
+        float3 C = AvbdJointAngularError(rotA, rotB, rest) * torqueArm; // rotA is the identity for a world joint
 
         // Stabilization
         if (flags & AVBD_CONSTRAINT_FLAG_HARD_ANG)

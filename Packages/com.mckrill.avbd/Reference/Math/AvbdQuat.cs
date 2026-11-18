@@ -117,5 +117,30 @@ namespace McKrill.Avbd.Reference
         {
             return Mul(a, Inverse(b)).value.xyz * 2f;
         }
+
+        /// <summary>
+        /// Angular constraint value of a joint, before the torque arm: zero when rotB = rotA * rest. <paramref name="rest"/> is the joint's rest
+        /// rotation, the identity for a joint that holds its bodies at the same rotation. Mirrors AvbdJointAngularError in AvbdPlasticRecords.hlsl.
+        /// </summary>
+        public static float3 JointAngularError(quaternion rotA, quaternion rotB, quaternion rest)
+        {
+            return DifferenceRaw(Mul(rotA, rest), rotB);
+        }
+
+        /// <summary>
+        /// The rest rotation that makes the angular error of a joint zero at the current poses: normalize(conj(rotA) * rotB), so that rotB = rotA * rest.
+        /// Mirrors AvbdJointRestFromPose in AvbdPlasticRecords.hlsl.
+        /// </summary>
+        public static quaternion RestOf(quaternion rotA, quaternion rotB)
+        {
+            return math.normalize(Mul(Conjugate(rotA), rotB));
+        }
+
+        /// <summary>The angle in radians of the rotation that takes <paramref name="from"/> to <paramref name="to"/>, 0 to pi: 2 atan2(|d.xyz|, |d.w|) of conj(from) * to. Mirrors AvbdJointBend in AvbdPlasticRecords.hlsl.</summary>
+        public static float BendAngle(quaternion from, quaternion to)
+        {
+            float4 d = Mul(Conjugate(from), to).value;
+            return 2f * math.atan2(math.length(d.xyz), math.abs(d.w));
+        }
     }
 }

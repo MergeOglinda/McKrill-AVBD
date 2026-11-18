@@ -189,7 +189,11 @@ namespace McKrill.Avbd.Tests
         [Test]
         public void ConstraintFlags_AreDistinctSingleBitsInTheLow24_AndPackWithTheKind()
         {
-            ConstraintFlags[] flags = { ConstraintFlags.HardLinear, ConstraintFlags.HardAngular, ConstraintFlags.Fracturable, ConstraintFlags.Broken };
+            ConstraintFlags[] flags =
+            {
+                ConstraintFlags.HardLinear, ConstraintFlags.HardAngular, ConstraintFlags.Fracturable, ConstraintFlags.Broken, ConstraintFlags.Stick,
+                ConstraintFlags.Plastic, ConstraintFlags.BendBreak,
+            };
             uint seen = 0;
             foreach (ConstraintFlags flag in flags)
             {
@@ -214,12 +218,45 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)ConstraintFlags.HardAngular, d["AVBD_CONSTRAINT_FLAG_HARD_ANG"]);
             Assert.AreEqual((uint)ConstraintFlags.Fracturable, d["AVBD_CONSTRAINT_FLAG_FRACTURABLE"]);
             Assert.AreEqual((uint)ConstraintFlags.Broken, d["AVBD_CONSTRAINT_FLAG_BROKEN"]);
+            Assert.AreEqual((uint)ConstraintFlags.Plastic, d["AVBD_CONSTRAINT_FLAG_PLASTIC"]);
+            Assert.AreEqual((uint)ConstraintFlags.BendBreak, d["AVBD_CONSTRAINT_FLAG_BEND_BREAK"]);
             Assert.AreEqual(ConstraintFlagLayout.FlagsMask, d["AVBD_CONSTRAINT_FLAGS_MASK"]);
             Assert.AreEqual((uint)ConstraintFlagLayout.KindShift, d["AVBD_CONSTRAINT_KIND_SHIFT"]);
             Assert.AreEqual((uint)ConstraintKind.Joint, d["AVBD_CONSTRAINT_KIND_JOINT"]);
             Assert.AreEqual((uint)ConstraintKind.Spring, d["AVBD_CONSTRAINT_KIND_SPRING"]);
 
             AssertStructMatches(ReadInclude("AvbdConstraintRecords.hlsl"), "ConstraintRecord", typeof(ConstraintRecord));
+        }
+
+        [Test]
+        public void PlasticRecord_HasTheDocumentedSize_AndMatchesTheHlslStruct()
+        {
+            Assert.AreEqual(PlasticRecordStrides.Plastic, UnsafeUtility.SizeOf<PlasticRecord>());
+            Assert.AreEqual(64, PlasticRecordStrides.Plastic);
+            Assert.AreEqual(0, PlasticRecordStrides.Plastic % 32, "plastic records are gathered by slot, so the stride must be a multiple of 32 (rule P3)");
+
+            AssertStructMatches(ReadInclude("AvbdPlasticRecords.hlsl"), "PlasticRecord", typeof(PlasticRecord));
+        }
+
+        [Test]
+        public void MakePlastic_FlagsTheJointAndStartsAtTheIdentityRest()
+        {
+            ConstraintRecord joint = ConstraintRecordFactory.Joint(1u, 2u, float3.zero, float3.zero, float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity, 1f);
+
+            PlasticRecord p = ConstraintRecordFactory.MakePlastic(ref joint, 7u, 50f, float.PositiveInfinity);
+            ConstraintFlags flags = ConstraintFlagLayout.FlagsOf(joint.ident.z);
+            Assert.IsTrue((flags & ConstraintFlags.Plastic) != 0);
+            Assert.IsTrue((flags & ConstraintFlags.BendBreak) == 0, "no bend limit, no bend-break flag");
+            Assert.AreEqual(ConstraintKind.Joint, ConstraintFlagLayout.KindOf(joint.ident.z));
+            Assert.AreEqual(7u, joint.ident.w);
+            Assert.AreEqual(new float4(0f, 0f, 0f, 1f), p.rest);
+            Assert.AreEqual(new float4(0f, 0f, 0f, 1f), p.restStart);
+            Assert.AreEqual(50f, p.limits.x);
+
+            ConstraintRecord limited = ConstraintRecordFactory.Joint(1u, 2u, float3.zero, float3.zero, float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity, 1f);
+            PlasticRecord q = ConstraintRecordFactory.MakePlastic(ref limited, 0u, 50f, 0.5f);
+            Assert.IsTrue((ConstraintFlagLayout.FlagsOf(limited.ident.z) & ConstraintFlags.BendBreak) != 0);
+            Assert.AreEqual(0.5f, q.limits.y);
         }
 
         [Test]

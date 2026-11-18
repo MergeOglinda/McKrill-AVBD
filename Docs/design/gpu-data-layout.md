@@ -563,7 +563,7 @@ Contacts without a broadphase are section 13. Joints and springs share one recor
 
 | Word | Type | Content |
 | --- | --- | --- |
-| 0 | `uint4` | body A (`AVBD_INVALID` = the world), body B, flags and kind, unused |
+| 0 | `uint4` | body A (`AVBD_INVALID` = the world), body B, flags and kind, plastic slot (only with the `Plastic` flag) |
 | 1 | `float4` | anchor on A (a world point if A is the world); joint: linear stiffness, spring: stiffness |
 | 2 | `float4` | anchor on B; joint: angular stiffness, spring: rest length |
 | 3 | `float4` | linear constraint at the step start (C0); torque arm |
@@ -574,7 +574,28 @@ Contacts without a broadphase are section 13. Joints and springs share one recor
 
 The spare lanes follow rule P4: stiffness shares a word with the anchor and torque arm with C0 (read by the same stages). A spring uses words 0 to 2 only, so a spring wastes 112 B; a separate smaller spring record is an option for later.
 
-Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is created) and `Broken` (owner: stage D). **Infinite stiffness is a flag.** The reference solver uses `+infinity` for a hard constraint and tests it with `isinf`; GPU fast-math is not guaranteed to keep infinity, so the record holds a flag and stores 0 as the stiffness. The behaviors stay the same: a hard constraint has no stiffness cap in the warm start (its penalty is limited by the maximum penalty), a hard constraint uses stabilization and stores its multiplier, and the dual step caps the penalty at the maximum penalty. Fracture works the same way (a flag and a finite threshold, instead of an infinite one).
+Flags: `HardLinear`, `HardAngular`, `Fracturable`, `Plastic` and `BendBreak` (set when the constraint is created) and `Broken` (owner: stage D). **Infinite stiffness is a flag.** The reference solver uses `+infinity` for a hard constraint and tests it with `isinf`; GPU fast-math is not guaranteed to keep infinity, so the record holds a flag and stores 0 as the stiffness. The behaviors stay the same: a hard constraint has no stiffness cap in the warm start (its penalty is limited by the maximum penalty), a hard constraint uses stabilization and stores its multiplier, and the dual step caps the penalty at the maximum penalty. Fracture works the same way (a flag and a finite threshold, instead of an infinite one).
+
+### Plastic joints
+
+A joint can be **plastic**: when its angular multiplier is above a yield value, the angle lock gives way and the joint keeps the bend it ends up with, instead of springing back; a bend limit breaks a joint that has bent too far. This is three-avbd's joint plasticity, applied to the angular row of a joint with a hard angle lock (a ball joint has nothing to yield; there is no linear plasticity). It is **off unless the constraint buffers are made with a plastic capacity**, and then costs nothing for the joints that are not plastic.
+
+*Rest rotation.* The angular row holds body B at `rotA * rest` instead of at `rotA`: its value is `AvbdQuatDifference(rotA * rest, rotB) * torqueArm`, and `rest` is the identity for a rigid joint (the product with the identity is exact, so a joint that never yields computes what it did before). `ConstraintInit`, `Dual` and the primal stage's `StampJoint` all take the angular value from one helper (`AvbdJointAngularError`, `AvbdPlasticRecords.hlsl`; `AvbdQuat.JointAngularError` in C#). The Jacobian does not change.
+
+*Yield and bend break*, in the angular block of `Dual` (the reference solver's `AvbdJoint.UpdateDual`, `CpuDual` and the kernel agree):
+
+1. After the multiplier update, if `|lambdaAng| > yield` and the joint is not above its fracture threshold (that one breaks instead), the multiplier is scaled back to `yield` and the joint has *yielded* in this iteration.
+2. A yielding row does not ramp its penalty.
+3. A joint that yielded sets `rest = normalize(conj(rotA) * rotB)`, so the current pose is the new rest pose, and zeroes `C0` of the angular row (the stabilization reference of this step would pull the bend back otherwise). The next step's `ConstraintInit` measures `C0` from the new `rest`.
+4. With a bend limit, the joint then breaks (penalties and multipliers zeroed, `Broken` set, as for fracture) if the angle from `restStart` to `rest`, `2 atan2(|d.xyz|, |d.w|)` with `d = conj(restStart) * rest`, is above the limit.
+
+A fracture value above the yield value only catches a load that jumps past it within one iteration. A load that arrives suddenly overshoots: the joint yields at about twice the static load it is meant to carry (three-avbd documents the same).
+
+*Storage.* The state lives in a separate array, `PlasticRecord` (64 B, `Runtime/Layout/PlasticRecords.cs`, `Shaders/Include/AvbdPlasticRecords.hlsl`), not in the 160 B constraint record, so a joint that is not plastic keeps its memory traffic. The joint finds its record at `ident.w` (the word was unused for a joint) and the `Plastic` flag says it has one; `BendBreak` says the limit is set (rather than an infinite value, rule on infinity). Fields: `rest` and `restStart` (quaternions, identity at creation), `limits` = (yield, bend limit in radians, 0, 0), and a reserved word, which pads the record to a multiple of 32 B (rule P3). Owners (rule P7): creation writes the flags, `restStart` and `limits`; stage D writes `rest`; `ConstraintInit` and stage V only read it.
+
+*Switch.* `new AvbdConstraintBuffers(bodies, capacity, shaderSet, contactCapacity, plasticCapacity)`: with `plasticCapacity` 0 (the default) no plastic array exists and `AvbdSolver` runs the joint kernels as they were; above 0 it allocates the array and runs the variants of `ConstraintInit`, `Dual` and `Primal` compiled with `AVBD_PLASTIC_JOINTS` (`multi_compile_local`; the solver sets the keyword on the shader before every dispatch). `AddJoint(..., fracture, yield, bendLimit)` makes a joint plastic with a finite `yield`; it needs a hard angle lock and a free plastic slot (`AddJoint` throws without a plastic capacity, and returns -1 and counts an overflow when the slots are used up). The switch is a constructor argument, like `contactCapacity`, because the array is allocated with the buffers; a setting that could change while the solver runs would still pay for the array and could not remove the variant's extra registers.
+
+*Limits.* The rest rotation always starts as the identity (there is no authored rest rotation); a plastic joint is added through `AddJoint`, not edited later; `Broken` does not return. Nothing reads back how many joints have yielded.
 
 ### Lists and colors
 
@@ -596,8 +617,8 @@ Flags: `HardLinear`, `HardAngular`, `Fracturable` (set when the constraint is cr
 | `ConstraintTopologyTests` | No | Lists and coloring against `ReferenceSolver` on the rope, the spring scene and 12 random scenes; fixed bodies; stiffness encoding |
 | `PrimalTests` (oracle) | No | `CpuPrimal` against `ReferenceSolver` after one colored iteration, including C0 of every joint |
 | `PrimalTests` (GPU) | Yes | The kernel against the oracle on the same scenes; `AddJoint` and `AddSpring` completing the records; a joint with a known closed-form result; static bodies never moving |
-| `DualTests` (oracle) | No | `CpuConstraintInit` and `CpuDual` against `ReferenceSolver` after one step (1 and 3 iterations), a hand-computed dual update, fracture |
-| `DualTests` (GPU) | Yes | `Step()` against the oracles on the rope, the fracture scene and random lattices, including all constraint records; springs untouched by stage D |
+| `DualTests` (oracle) | No | `CpuConstraintInit` and `CpuDual` against `ReferenceSolver` after one step (1 and 3 iterations), a hand-computed dual update, fracture; plastic joints (yield, bend break, fracture first) against the reference solver and by hand, and a plastic joint that never yields against a rigid one |
+| `DualTests` (GPU) | Yes | `Step()` against the oracles on the rope, the fracture scene and random lattices, including all constraint records; springs untouched by stage D; the plastic scene (records and `PlasticRecord`s), the plastic kernel variants on scenes without plastic joints, `AddJoint` validation and plastic slots, and a hanging box that bends and breaks |
 | `GraphColoringTests` (oracle) | No | `CpuGraphColoring` in slot order against `ConstraintTopology`; the hashed order is a valid coloring and a strict order |
 | `IndirectSweepTests` | Yes (all but the first) | The argument arithmetic covers every entry of a color once, including colors of more than 65,535 groups (no GPU); the GPU's start, size and arguments of every color against the oracle's sizes and the mirror; a color of five groups where every body is solved by a step |
 | `GraphColoringTests` (GPU) | Yes | The kernels against the oracle in both orders (colors, color count, buckets); rounds on a long chain; recoloring after edits; no constraints; more than 64 colors; the persistent steps against `CpuGraphColoring.Persistent` (clashes, 1/2/tuned rounds, small cap, fresh interval, off) |

@@ -1,6 +1,6 @@
 # GPU Fracture Wall Demo
 
-A brick wall of 225 or more blocks on the GPU solver. The blocks are held together by joints that break under load. Click to shoot a box from the camera into the wall.
+A brick wall (75 x 75 blocks by default, in ten walls) on the GPU solver. The blocks are held together by joints that break under load, or that can bend and then break (plastic joints). Click to shoot a box from the camera into the wall.
 
 The controls are the same as in the *GPU Pyramid Demo*, and the panel has the wall's properties on top of the shot's.
 
@@ -30,17 +30,20 @@ The shot's speed, size and mass, the solver's iterations and the buttons are as 
 
 | Control | What it does |
 | --- | --- |
-| Columns, Rows | 15 to 22 columns and 15 to 18 rows: 225 (the default, 15 x 15) to 396 blocks |
+| C, R, W | Columns (15 to 75), rows (15 to 75) and walls (1 to 10), three sliders on one row; the defaults are 75, 75 and 10. The total block count is shown under them |
 | Block density | 0.1 to 10 (log scale). A block is 1 x 0.5 x 0.5 m, so density 1 is 0.25 kg. Does not apply to the bottom row, which is immobile |
 | Rigid joints | Joints with infinite stiffness. Off: the joints' linear part is a spring with the stiffness below |
 | Joint stiffness | 1e2 to 1e8 (log scale), used when the joints are not rigid |
 | Fracture threshold | A joint breaks when the norm of its angular multiplier is above this (1 to 1e4, log scale) |
+| Plastic yield | Off by default. On: the joints are plastic. The package then allocates the plastic array and runs the joint kernels that read it; off, it runs without any plastic code |
+| Yield threshold | 0.1 to 1e4 (log scale). A plastic joint yields when the norm of its angular multiplier is above this: it gives way and keeps the bend instead of springing back. Keep it **below the fracture threshold**: above it a joint breaks before it can yield (the panel says so, and the package warns once) |
+| Bend break, Bend limit | A plastic joint that has yielded breaks once it is bent more than the limit (1 to 180 degrees) from where it started |
 
-The panel also shows how many joints have broken, out of all.
+The panel also shows how many joints have broken, out of all. Plastic yield, the yield threshold and the bend limit are greyed out until *Plastic yield* is on. Like the other joint settings they take effect on **Reset**.
 
 ## The wall
 
-- **Walls.** The *Walls* slider (1 to 10, default 1) builds several identical walls one behind the other along z, 4 m apart (the first stands in front, nearest the starting camera). Like the other wall settings it takes effect on **Reset**. The block, joint and body counts grow with the number of walls, so a scene of many walls is a bigger scene for the solver.
+- **Walls.** The *W* slider (1 to 10, default 10) builds several identical walls one behind the other along z, 4 m apart (the first stands in front, nearest the starting camera). Like the other wall settings it takes effect on **Reset**. The block, joint and body counts grow with the number of walls, so a scene of many walls is a bigger scene for the solver.
 - Blocks are 1 x 0.5 x 0.5 m in a running bond: odd rows are shifted by half a block, so every block rests on two blocks of the row under it. The wall stands on a static ground slab whose top is the plane y = 0. **The bottom row is immobile** (static bodies, no mass); the blocks of the row above are joined to it, and its blocks have no joints to each other.
 - Every block has a ball-socket joint to the block on its left and to the two blocks under it, at the middle of the face they share. Each joint has a **rigid angle lock**. The fracture test looks at the angular multiplier, and only a rigid angle lock stores a multiplier, so the angle lock is not an option in the panel.
 - A joint breaks in the step its angular multiplier exceeds the threshold. The next step removes it from the solver's lists, and from the step after that its two blocks collide with each other again, like any other pair (the reference solver's timing). Blocks that were joined do not collide while the joint holds.
@@ -48,6 +51,6 @@ The panel also shows how many joints have broken, out of all.
 
 ## Limits
 
-- The wall is limited to 396 blocks because that is the largest size that was tried. The constraint lists are built on the GPU (stage G) and nothing is read back for them; the graph coloring still reads two small things back every step (the number of colors), which is the remaining stall.
+- The wall is limited to 75 x 75 blocks in 10 walls (56 250 blocks) because that is the largest size that was tried. The default is that size, which needs a lot of GPU memory for the contact pool: lower W or the number of columns and rows on a smaller GPU. The constraint lists are built on the GPU (stage G) and nothing is read back for them; the graph coloring still reads two small things back every step (the number of colors), which is the remaining stall.
 - The "joints broken" counter is a counter on the GPU that the panel reads once per step.
 - **Drawing is instanced and stays on the GPU.** One `Graphics.RenderMeshPrimitives` call draws every box with the package's `AvbdInstancedBoxes` shader, which reads each box's pose from the solver's body state buffer: no pose readback and no GameObject per body (the pyramid demo still does both). The shader is unlit-style, with one directional light (the scene's sun if there is one) and ambient, so it works in the built-in pipeline and in URP, but **it has no shadows**. A player build needs the shader included, which it is: the package's shader set references it.

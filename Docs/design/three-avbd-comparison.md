@@ -24,7 +24,7 @@ Compared: `Packages/com.mckrill.avbd` (HLSL compute, Unity) against `three-avbd-
 | 9 | Dual per manifold, vs per contact record over 8 × slots threads | theirs | Fewer idle threads **Implemented on branch `compact-contacts`** |
 | 10 | Capacity: derived from a CPU start count and grown from readbacks (theirs) vs fixed pool with overflow report (ours) | depends | Ours is simpler and predictable; theirs copes with growth |
 | 11 | Numerics and verification: bit-identical C++ parity harness for the narrowphase and contact math (ours) vs an f64 oracle with envelope tests (theirs) | ours, for the contact math | Correctness evidence, not speed |
-| 12 | Feature scope: spheres, hulls, filters, plastic joints, wind, SDF (theirs) vs boxes, joints, springs, fracture (ours) | theirs for breadth | Not a performance point |
+| 12 | Feature scope: spheres, hulls, filters, wind, SDF (theirs) vs boxes, joints, springs, fracture (ours). Joint plastic yield and bend-break were theirs only; **implemented on branch `plastic-joints`** (opt-in, in a side buffer) | theirs for breadth | Not a performance point |
 | 13 | Host integration: stable handles, edit queue, slot allocator, capacity calculator (ours) | ours | Theirs is a standalone web engine |
 | 14 | Same in both | n/a | Listed at the end |
 
@@ -116,7 +116,7 @@ Ours has `Tools/HlslParity`: the contact HLSL compiled as C++ and compared again
 
 ## 12–13. Scope and integration
 
-They add features we do not have: sphere and convex-hull shapes, collision groups and filters, joint plastic yield and bend-break, wind, per-body gravity scale and damping, lifecycle flags, and an experimental SDF backend. Ours has stable handles, an edit queue, slot allocation with dirty-slot handling, a capacity calculator, springs, fracture, and a Unity-native API. Neither list is performance related, and the feature gaps in ours (filters, spheres) are cheap to add on top of the contact path once sections 3 and 4 are done.
+They add features we do not have: sphere and convex-hull shapes, collision groups and filters, wind, per-body gravity scale and damping, lifecycle flags, and an experimental SDF backend. Ours has stable handles, an edit queue, slot allocation with dirty-slot handling, a capacity calculator, springs, fracture, and a Unity-native API. Joint plastic yield and bend-break, which only they had, are now in ours as well, behind a plastic capacity of the constraint buffers so that a scene without plastic joints pays nothing for them (`gpu-data-layout.md`, section 12, "Plastic joints"). Neither list is performance related, and the feature gaps in ours (filters, spheres) are cheap to add on top of the contact path once sections 3 and 4 are done.
 
 ## Where the two are the same
 
