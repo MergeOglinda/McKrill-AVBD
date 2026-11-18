@@ -3,12 +3,30 @@ using UnityEngine;
 
 namespace McKrill.Avbd
 {
+    /// <summary>What the last <see cref="AvbdBroadphase.Run"/> decided about the grid (see <see cref="AvbdBroadphase.ReadClassification"/>).</summary>
+    internal struct BroadphaseClassification
+    {
+        /// <summary>Upper bound of the largest radius among the small bodies (the bodies of the grid); a bin edge, at most 4.4% above the radius.</summary>
+        public float MaxSmallRadius;
+        /// <summary>Bodies above every small body, tested against all (the large list).</summary>
+        public int LargeCount;
+        public bool TwoLevels;
+        public float CoarseCell;
+        public float FineCell;
+        public int SmallBin;
+        public int FineBin;
+        /// <summary>Live bodies with a finite radius, and the solved ones among them.</summary>
+        public int LiveCount;
+        public int SolvedCount;
+    }
+
     /// <summary>
     /// Stage B: finds the pairs of bodies whose bounding spheres overlap (<c>AvbdBroadphase.compute</c>), the candidates of the
     /// narrowphase. See the shader header for what a pair is and which pairs are left out.
     ///
-    /// Solved bodies and the static bodies that fit a grid cell share one grid, so the cost of a solved body does not grow with the total
-    /// number of static bodies; static bodies larger than every solved body (a ground slab) are tested against every solved body.
+    /// The grid is three-avbd's: a counting-sort grid (count per cell, scan, scatter) with a fine and a coarse level when a few bodies are much
+    /// larger than the ones that move, and a list of large bodies (ground slabs) that are tested against everybody. Which bodies are large and
+    /// how big the cells are is decided on the GPU from histograms of the radii, so nothing is read back.
     ///
     /// The pair list has two bins in one buffer: dynamic-dynamic pairs first, then dynamic-static pairs. Each bin has a capacity; pairs
     /// beyond it are counted but not stored, see <see cref="DynamicPairCount"/> and <see cref="Overflowed"/>.
@@ -21,34 +39,56 @@ namespace McKrill.Avbd
     internal sealed class AvbdBroadphase : IDisposable
     {
         // Mirror AVBD_BP_*.
-        public const int ControlWords = 4;
         public const int MaxRadiusWord = 0;
-        public const int StaticCountWord = 1;
+        public const int LargeCountWord = 1;
         public const int DynamicPairsWord = 2;
         public const int StaticPairsWord = 3;
+        public const int SmallBinWord = 4;
+        public const int FineBinWord = 5;
+        public const int TwoLevelsWord = 6;
+        public const int CoarseCellWord = 7;
+        public const int FineCellWord = 8;
+        public const int LiveCountWord = 9;
+        public const int SolvedCountWord = 10;
+        public const int StatWords = 16;
+        public const int BinsPerOctave = 16;
+        public const int BinOctaves = 20;
+        public const int RadiusBins = 2 * BinOctaves * BinsPerOctave;
+        public const int HistAllWord = StatWords;
+        public const int HistSolvedWord = StatWords + RadiusBins;
+        public const int ControlWords = StatWords + 2 * RadiusBins;
+        public const int LargeFactorBins = BinsPerOctave;
+        public const int MaxLarge = 64;
+        public const int ScanGroup = 1024;
         public const float CellMargin = 1.01f;
 
         /// <summary>Mirrors AVBD_BP_SEPARATION_PAD: meters of gap (world bounding boxes, face axes) above which a candidate pair is dropped.</summary>
         public const float SeparationPad = 0.001f;
 
-        /// <summary>Mirrors AVBD_BP_STATIC_FLAG: the bit of the grid cell word that marks a static body.</summary>
+        /// <summary>Mirrors AVBD_BP_STATIC_FLAG, AVBD_BP_LARGE_FLAG and AVBD_BP_COARSE_FLAG: the bits of the grid word of a body (<c>_BodyCell.w</c>).</summary>
         public const uint StaticCellFlag = 0x80000000u;
+        public const uint LargeCellFlag = 2u;
+        public const uint CoarseCellFlag = 1u;
 
         /// <summary>Bytes of one <see cref="PairRecord"/>.</summary>
         public const int PairStride = 16;
 
-        const int MinGridCells = 64;
+        // The table is scanned in blocks of ScanGroup cells, and the sums of the blocks by one group: at most ScanGroup blocks.
+        const int MinGridCells = ScanGroup;
+        const int MaxGridCells = ScanGroup * ScanGroup;
 
         readonly ComputeShader shader;
-        readonly int resetKernel, clearGridKernel, boundsKernel, insertKernel, pairsDynamicKernel, pairsStaticKernel;
+        readonly int resetKernel, clearGridKernel, histogramKernel, classifyKernel, countKernel, scanBlockKernel, scanTopKernel, scanApplyKernel, scatterKernel, pairsKernel, pairsFixedKernel;
 
         readonly int bodyCapacity;
         readonly int gridCells;
         GraphicsBuffer control;
-        GraphicsBuffer gridHead;
-        GraphicsBuffer gridNext;
+        GraphicsBuffer gridStart;
+        GraphicsBuffer gridCursor;
+        GraphicsBuffer gridSorted;
+        GraphicsBuffer gridBlocks;
         GraphicsBuffer bodyCell;
-        GraphicsBuffer staticList;
+        GraphicsBuffer largeList;
         GraphicsBuffer pairs;
         bool disposed;
 
@@ -64,12 +104,14 @@ namespace McKrill.Avbd
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
         static readonly int ControlId = Shader.PropertyToID("_BpControl");
-        static readonly int GridHeadId = Shader.PropertyToID("_GridHead");
-        static readonly int GridNextId = Shader.PropertyToID("_GridNext");
+        static readonly int GridStartId = Shader.PropertyToID("_GridStart");
+        static readonly int GridCursorId = Shader.PropertyToID("_GridCursor");
+        static readonly int GridSortedId = Shader.PropertyToID("_GridSorted");
+        static readonly int GridBlocksId = Shader.PropertyToID("_GridBlocks");
         static readonly int BodyCellId = Shader.PropertyToID("_BodyCell");
-        static readonly int StaticListId = Shader.PropertyToID("_StaticList");
+        static readonly int LargeListId = Shader.PropertyToID("_LargeList");
         static readonly int PairsId = Shader.PropertyToID("_Pairs");
-        static readonly int GridMaskId = Shader.PropertyToID("_GridMask");
+        static readonly int TableMaskId = Shader.PropertyToID("_TableMask");
         static readonly int DynamicCapacityId = Shader.PropertyToID("_DynamicPairCapacity");
         static readonly int StaticCapacityId = Shader.PropertyToID("_StaticPairCapacity");
 
@@ -87,26 +129,34 @@ namespace McKrill.Avbd
 
             resetKernel = shader.FindKernel("BpReset");
             clearGridKernel = shader.FindKernel("BpClearGrid");
-            boundsKernel = shader.FindKernel("BpBounds");
-            insertKernel = shader.FindKernel("BpInsert");
-            pairsDynamicKernel = shader.FindKernel("BpPairsDynamic");
-            pairsStaticKernel = shader.FindKernel("BpPairsStatic");
+            histogramKernel = shader.FindKernel("BpHistogram");
+            classifyKernel = shader.FindKernel("BpClassify");
+            countKernel = shader.FindKernel("BpCount");
+            scanBlockKernel = shader.FindKernel("BpScanBlock");
+            scanTopKernel = shader.FindKernel("BpScanTop");
+            scanApplyKernel = shader.FindKernel("BpScanApply");
+            scatterKernel = shader.FindKernel("BpScatter");
+            pairsKernel = shader.FindKernel("BpPairs");
+            pairsFixedKernel = shader.FindKernel("BpPairsFixed");
 
             this.bodyCapacity = bodyCapacity;
             DynamicPairCapacity = dynamicPairCapacity;
             StaticPairCapacity = staticPairCapacity;
 
-            // A power of two, at least twice the number of bodies, so that a cell holds few bodies on average.
+            // A power of two, at least twice the number of bodies, so that a cell holds few bodies on average (more bodies than half the
+            // largest table share cells, which costs time and not correctness: a probe drops the bodies of other cells).
             int cells = MinGridCells;
-            while (cells < bodyCapacity * 2 && cells < (1 << 30))
+            while (cells < bodyCapacity * 2L && cells < MaxGridCells)
                 cells <<= 1;
             gridCells = cells;
 
             control = new GraphicsBuffer(GraphicsBuffer.Target.Structured, ControlWords, sizeof(uint));
-            gridHead = new GraphicsBuffer(GraphicsBuffer.Target.Structured, gridCells, sizeof(uint));
-            gridNext = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
+            gridStart = new GraphicsBuffer(GraphicsBuffer.Target.Structured, gridCells + 1, sizeof(uint));
+            gridCursor = new GraphicsBuffer(GraphicsBuffer.Target.Structured, gridCells, sizeof(uint));
+            gridSorted = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
+            gridBlocks = new GraphicsBuffer(GraphicsBuffer.Target.Structured, gridCells / ScanGroup, sizeof(uint));
             bodyCell = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, 4 * sizeof(uint));
-            staticList = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
+            largeList = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
             pairs = new GraphicsBuffer(GraphicsBuffer.Target.Structured, dynamicPairCapacity + staticPairCapacity, PairStride);
         }
 
@@ -151,50 +201,82 @@ namespace McKrill.Avbd
             GraphicsBuffer records = constraints != null ? constraints.Records : emptyRecords;
             GraphicsBuffer list = constraints != null ? constraints.List : emptyList;
 
-            foreach (int kernel in new[] { resetKernel, clearGridKernel, boundsKernel, insertKernel, pairsDynamicKernel, pairsStaticKernel })
+            foreach (int kernel in new[] { resetKernel, clearGridKernel, histogramKernel, classifyKernel, countKernel, scanBlockKernel, scanTopKernel, scanApplyKernel, scatterKernel, pairsKernel, pairsFixedKernel })
             {
                 bodies.BindTo(shader, kernel);
                 shader.SetBuffer(kernel, ControlId, control);
-                shader.SetBuffer(kernel, GridHeadId, gridHead);
-                shader.SetBuffer(kernel, GridNextId, gridNext);
+                shader.SetBuffer(kernel, GridStartId, gridStart);
+                shader.SetBuffer(kernel, GridCursorId, gridCursor);
+                shader.SetBuffer(kernel, GridSortedId, gridSorted);
+                shader.SetBuffer(kernel, GridBlocksId, gridBlocks);
                 shader.SetBuffer(kernel, BodyCellId, bodyCell);
-                shader.SetBuffer(kernel, StaticListId, staticList);
+                shader.SetBuffer(kernel, LargeListId, largeList);
                 shader.SetBuffer(kernel, PairsId, pairs);
                 shader.SetBuffer(kernel, RecordsId, records);
                 shader.SetBuffer(kernel, ListId, list);
             }
-            shader.SetInt(GridMaskId, gridCells - 1);
+            shader.SetInt(TableMaskId, gridCells - 1);
             shader.SetInt(DynamicCapacityId, DynamicPairCapacity);
             shader.SetInt(StaticCapacityId, StaticPairCapacity);
 
-            shader.Dispatch(resetKernel, 1, 1, 1);
+            AvbdDispatch.Linear(shader, resetKernel, ControlWords);
             if (count <= 0)
                 return;
 
-            AvbdDispatch.Linear(shader, clearGridKernel, gridCells);
-            AvbdDispatch.Linear(shader, boundsKernel, count);
-            AvbdDispatch.Linear(shader, insertKernel, count);
-            AvbdDispatch.Linear(shader, pairsDynamicKernel, count);
-            AvbdDispatch.Linear(shader, pairsStaticKernel, count);
+            AvbdDispatch.Linear(shader, clearGridKernel, gridCells + 1);
+            AvbdDispatch.Linear(shader, histogramKernel, count);
+            shader.Dispatch(classifyKernel, 1, 1, 1);
+            AvbdDispatch.Linear(shader, countKernel, count);
+            shader.Dispatch(scanBlockKernel, gridCells / ScanGroup, 1, 1);
+            shader.Dispatch(scanTopKernel, 1, 1, 1);
+            AvbdDispatch.Linear(shader, scanApplyKernel, gridCells);
+            AvbdDispatch.Linear(shader, scatterKernel, count);
+            AvbdDispatch.Linear(shader, pairsKernel, count);
+            AvbdDispatch.Linear(shader, pairsFixedKernel, count);
         }
 
         /// <summary>Reads the pair counts of the last <see cref="Run"/> back from the GPU (this waits for the GPU).</summary>
         public void ReadCounts()
         {
             if (disposed) throw new ObjectDisposedException(nameof(AvbdBroadphase));
-            var words = new uint[ControlWords];
-            control.GetData(words);
+            uint[] words = ReadStatistics();
             dynamicPairs = words[DynamicPairsWord];
             staticPairs = words[StaticPairsWord];
         }
 
-        /// <summary>Largest bounding-sphere radius among the solved bodies at the last <see cref="Run"/> (read back from the GPU).</summary>
-        public float ReadMaxRadius()
+        /// <summary>
+        /// Upper bound of the largest radius among the small bodies at the last <see cref="Run"/> (read back from the GPU): the radius that sizes the coarse cells.
+        /// It is the upper edge of a radius bin, so between the radius and 1.05 times it.
+        /// </summary>
+        public float ReadMaxRadius() => ReadClassification().MaxSmallRadius;
+
+        /// <summary>What the last <see cref="Run"/> decided about the grid (read back from the GPU).</summary>
+        public BroadphaseClassification ReadClassification()
         {
-            var words = new uint[ControlWords];
-            control.GetData(words);
-            return BitConverter.ToSingle(BitConverter.GetBytes(words[MaxRadiusWord]), 0);
+            if (disposed) throw new ObjectDisposedException(nameof(AvbdBroadphase));
+            uint[] words = ReadStatistics();
+            return new BroadphaseClassification
+            {
+                MaxSmallRadius = AsFloat(words[MaxRadiusWord]),
+                LargeCount = (int)words[LargeCountWord],
+                TwoLevels = words[TwoLevelsWord] != 0u,
+                CoarseCell = AsFloat(words[CoarseCellWord]),
+                FineCell = AsFloat(words[FineCellWord]),
+                SmallBin = (int)words[SmallBinWord],
+                FineBin = (int)words[FineBinWord],
+                LiveCount = (int)words[LiveCountWord],
+                SolvedCount = (int)words[SolvedCountWord],
+            };
         }
+
+        uint[] ReadStatistics()
+        {
+            var words = new uint[StatWords];
+            control.GetData(words, 0, 0, StatWords);
+            return words;
+        }
+
+        static float AsFloat(uint bits) => BitConverter.ToSingle(BitConverter.GetBytes(bits), 0);
 
         /// <summary>Reads the stored pairs of both bins back from the GPU: the dynamic-dynamic ones, then the dynamic-static ones. Calls <see cref="ReadCounts"/>.</summary>
         public PairRecord[] ReadPairs()
@@ -225,10 +307,12 @@ namespace McKrill.Avbd
                 return;
             disposed = true;
             Release(ref control);
-            Release(ref gridHead);
-            Release(ref gridNext);
+            Release(ref gridStart);
+            Release(ref gridCursor);
+            Release(ref gridSorted);
+            Release(ref gridBlocks);
             Release(ref bodyCell);
-            Release(ref staticList);
+            Release(ref largeList);
             Release(ref pairs);
             Release(ref emptyRecords);
             Release(ref emptyList);

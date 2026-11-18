@@ -545,12 +545,146 @@ namespace McKrill.Avbd.Tests
                 buffers.Spawn(BodyDescriptor.Box(new float3(1f), 0f, new float3(0.2f, 0f, 0f)));
                 broadphase.Run(buffers, null);
                 Assert.AreEqual(0, broadphase.ReadPairs().Length, "two static bodies make no pair");
-                Assert.AreEqual(0f, broadphase.ReadMaxRadius(), "the radius is that of the solved bodies");
+                Assert.AreEqual(2, broadphase.ReadClassification().LiveCount);
+                Assert.AreEqual(0, broadphase.ReadClassification().SolvedCount);
 
                 buffers.Spawn(BodyDescriptor.Box(new float3(2f, 0.01f, 0.01f), 1f, new float3(0.1f, 0f, 0f))); // a thin rod: radius 1
                 broadphase.Run(buffers, null);
                 Assert.AreEqual(2, broadphase.ReadPairs().Length);
-                Assert.AreEqual(1f, broadphase.ReadMaxRadius(), 1e-4f);
+                float bound = broadphase.ReadMaxRadius(); // the upper edge of the bin of the largest small body: the rod, radius 1
+                Assert.GreaterOrEqual(bound, 1f);
+                Assert.LessOrEqual(bound, 1.06f);
+            }
+        }
+
+        // ---- the grid ----------------------------------------------------------------------------------------------------
+
+        // Many static tiles and a few solved bodies that are all about the same size, so the median is large; small solved bodies that move (the fine
+        // level); solved bodies as large as the tiles (the coarse level); small static pieces (fine static bodies that coarse movers must still find,
+        // through BpPairsFixed); and a slab (large). The pair set is the oracle's, and the classification the model's.
+        [Test]
+        public void Gpu_TwoLevels_FindsThePairsAcrossLevels()
+        {
+            RequireCompute();
+            const int capacity = 1024;
+            using (var buffers = new AvbdBodyBuffers(capacity))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), capacity, 1 << 16, 1 << 16))
+            {
+                var rng = new System.Random(21);
+                for (int x = 0; x < 15; x++)
+                    for (int z = 0; z < 15; z++)
+                        buffers.Spawn(BodyDescriptor.Box(new float3(2f), 0f, new float3(x * 2.1f, 0f, z * 2.1f)));              // 225 static tiles: radius 1.73
+                buffers.Spawn(BodyDescriptor.Box(new float3(300f, 1f, 300f), 0f, new float3(15f, -1f, 15f)));                      // a slab: large
+                for (int i = 0; i < 60; i++)
+                    buffers.Spawn(BodyDescriptor.Box(new float3(0.5f), 1f, new float3(Range(rng, 0f, 30f), Range(rng, 0.5f, 3f), Range(rng, 0f, 30f)))); // small movers: radius 0.43
+                for (int i = 0; i < 12; i++)
+                    buffers.Spawn(BodyDescriptor.Box(new float3(2f), 1f, new float3(Range(rng, 0f, 30f), Range(rng, 1f, 4f), Range(rng, 0f, 30f))));   // movers as large as the tiles: coarse level
+                for (int i = 0; i < 20; i++)
+                    buffers.Spawn(BodyDescriptor.Box(new float3(0.5f), 0f, new float3(Range(rng, 0f, 30f), Range(rng, 0.5f, 3f), Range(rng, 0f, 30f)))); // small static pieces: fine level
+                // A coarse mover on a fine static piece, which only BpPairsFixed can find, and a fine mover on a coarse static tile.
+                buffers.Spawn(BodyDescriptor.Box(new float3(0.5f), 0f, new float3(100f, 0f, 100f)));
+                buffers.Spawn(BodyDescriptor.Box(new float3(2f), 1f, new float3(100.2f, 0f, 100f)));
+                buffers.Spawn(BodyDescriptor.Box(new float3(2f), 0f, new float3(120f, 0f, 120f)));
+                buffers.Spawn(BodyDescriptor.Box(new float3(0.5f), 1f, new float3(120.2f, 0f, 120f)));
+
+                broadphase.Run(buffers, null);
+                CpuBodyArrays held = ReadBodies(buffers);
+                CpuBroadphase.GridModel model = CpuBroadphase.Classification(held, buffers.HighWaterMark);
+                BroadphaseClassification classification = broadphase.ReadClassification();
+                Assert.IsTrue(model.TwoLevels, "the scene is meant to have two levels");
+                Assert.IsTrue(classification.TwoLevels);
+                Assert.AreEqual(model.LargeCount, classification.LargeCount);
+                Assert.AreEqual(1, classification.LargeCount, "the slab");
+                Assert.Less(classification.FineCell, classification.CoarseCell);
+                Assert.AreEqual(model.SmallBin, classification.SmallBin);
+                Assert.AreEqual(model.FineBin, classification.FineBin);
+
+                SortedSet<ulong> got = ToSet(broadphase.ReadPairs());
+                AssertSameSets(CpuBroadphase.Pairs(held, buffers.HighWaterMark, new ConstraintRecord[0], 0), got, "two levels");
+                Assert.IsFalse(broadphase.Overflowed);
+
+                int fineStatic = buffers.HighWaterMark - 4, coarseMoverOnFine = buffers.HighWaterMark - 3;
+                int coarseStatic = buffers.HighWaterMark - 2, fineMoverOnCoarse = buffers.HighWaterMark - 1;
+                Assert.IsTrue(got.Contains(CpuBroadphase.Key((uint)coarseMoverOnFine, (uint)fineStatic, PairKind.DynamicStatic)), "a coarse mover and a fine static piece");
+                Assert.IsTrue(got.Contains(CpuBroadphase.Key((uint)fineMoverOnCoarse, (uint)coarseStatic, PairKind.DynamicStatic)), "a fine mover and a coarse static tile");
+            }
+        }
+
+        // More large candidates than the large list takes: at most MaxLarge of the largest bodies are large, the rest are small and size the cells.
+        [Test]
+        public void Gpu_LargeBodies_AreAtMostTheLargestFewAndStillFindTheirPairs()
+        {
+            RequireCompute();
+            const int capacity = 1024;
+            using (var buffers = new AvbdBodyBuffers(capacity))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), capacity, 1 << 17, 1 << 17))
+            {
+                var rng = new System.Random(33);
+                for (int i = 0; i < 300; i++)
+                    buffers.Spawn(BodyDescriptor.Box(new float3(Range(rng, 0.9f, 1.1f)), i % 4 == 0 ? 0f : 1f, new float3(Range(rng, -40f, 40f), Range(rng, 0f, 3f), Range(rng, -40f, 40f))));
+                for (int i = 0; i < 90; i++)                                            // 90 bodies far above twice the median, all different
+                {
+                    float size = 8f * math.pow(1.045f, i);
+                    buffers.Spawn(BodyDescriptor.Box(new float3(size, size * 0.2f, size), i % 3 == 0 ? 1f : 0f, new float3(Range(rng, -30f, 30f), Range(rng, 0f, 3f), Range(rng, -30f, 30f))));
+                }
+
+                broadphase.Run(buffers, null);
+                CpuBodyArrays held = ReadBodies(buffers);
+                CpuBroadphase.GridModel model = CpuBroadphase.Classification(held, buffers.HighWaterMark);
+                BroadphaseClassification classification = broadphase.ReadClassification();
+                Assert.AreEqual(model.LargeCount, classification.LargeCount);
+                Assert.Greater(classification.LargeCount, 0);
+                Assert.LessOrEqual(classification.LargeCount, AvbdBroadphase.MaxLarge);
+                AssertSameSets(CpuBroadphase.Pairs(held, buffers.HighWaterMark, new ConstraintRecord[0], 0), ToSet(broadphase.ReadPairs()), "many large bodies");
+            }
+        }
+
+        // The classification is made again by every run, from the bodies as they are: a body that grows becomes large, and shrinks back.
+        [Test]
+        public void Gpu_Classification_FollowsTheBodies()
+        {
+            RequireCompute();
+            const int capacity = 256;
+            using (var buffers = new AvbdBodyBuffers(capacity))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), capacity, BigBin, BigBin))
+            {
+                var rng = new System.Random(9);
+                var handles = new List<BodyHandle>();
+                for (int i = 0; i < 80; i++)
+                    handles.Add(buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(Range(rng, -6f, 6f), Range(rng, 0f, 3f), Range(rng, -6f, 6f)))));
+
+                broadphase.Run(buffers, null);
+                Assert.AreEqual(0, broadphase.ReadClassification().LargeCount);
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0), ToSet(broadphase.ReadPairs()), "all small");
+
+                buffers.SetShape(handles[5], new float3(60f, 1f, 60f), 1f);
+                broadphase.Run(buffers, null);
+                Assert.AreEqual(1, broadphase.ReadClassification().LargeCount);
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0), ToSet(broadphase.ReadPairs()), "one large body");
+
+                buffers.SetShape(handles[5], new float3(1f), 1f);
+                broadphase.Run(buffers, null);
+                Assert.AreEqual(0, broadphase.ReadClassification().LargeCount);
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0), ToSet(broadphase.ReadPairs()), "small again");
+            }
+        }
+
+        // More bodies than the table has cells: bodies of different cells share a hashed cell and the probe must drop them.
+        [Test]
+        public void Gpu_Grid_HandlesMoreBodiesThanCellsOfTheScanBlocks()
+        {
+            RequireCompute();
+            const int capacity = 3000; // a table of 8192 cells: eight scan blocks
+            using (var buffers = new AvbdBodyBuffers(capacity))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), capacity, 1 << 18, 1 << 18))
+            {
+                var rng = new System.Random(77);
+                for (int i = 0; i < 2900; i++)
+                    buffers.Spawn(BodyDescriptor.Box(new float3(Range(rng, 0.8f, 1.2f)), i % 5 == 0 ? 0f : 1f, new float3(Range(rng, -30f, 30f), Range(rng, 0f, 20f), Range(rng, -30f, 30f))));
+
+                broadphase.Run(buffers, null);
+                AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), buffers.HighWaterMark, new ConstraintRecord[0], 0), ToSet(broadphase.ReadPairs()), "a crowded table");
+                Assert.IsFalse(broadphase.Overflowed);
             }
         }
 
@@ -656,7 +790,12 @@ namespace McKrill.Avbd.Tests
                 // The oracle's pair set is the reference solver's without the pairs of boxes that are apart, so the GPU's is too.
                 AssertOnlyApartPairsDropped(ReferencePairs(reference), got, reference, what + " (reference solver)");
 
-                Assert.AreEqual(CpuBroadphase.MaxRadius(held, scene.bodyCount), broadphase.ReadMaxRadius(), 1e-5f, what + ": largest radius");
+                // The classification is the model's, up to a bin (the rounding of log2 on the GPU can put a radius on a bin edge into the next bin).
+                CpuBroadphase.GridModel model = CpuBroadphase.Classification(held, scene.bodyCount);
+                BroadphaseClassification classification = broadphase.ReadClassification();
+                Assert.AreEqual(model.LiveCount, classification.LiveCount, what + ": live bodies");
+                Assert.AreEqual(model.SolvedCount, classification.SolvedCount, what + ": solved bodies");
+                Assert.AreEqual(1f, classification.MaxSmallRadius / model.MaxSmallRadius, 0.07f, what + ": largest small radius");
             }
         }
 

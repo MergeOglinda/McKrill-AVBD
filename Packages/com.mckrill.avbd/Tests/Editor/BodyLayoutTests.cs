@@ -445,11 +445,29 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)PairKind.DynamicDynamic, d["AVBD_PAIR_DYNAMIC_DYNAMIC"]);
             Assert.AreEqual((uint)PairKind.DynamicStatic, d["AVBD_PAIR_DYNAMIC_STATIC"]);
             Assert.AreEqual((uint)AvbdBroadphase.MaxRadiusWord, d["AVBD_BP_MAX_RADIUS"]);
-            Assert.AreEqual((uint)AvbdBroadphase.StaticCountWord, d["AVBD_BP_STATIC_COUNT"]);
+            Assert.AreEqual((uint)AvbdBroadphase.LargeCountWord, d["AVBD_BP_LARGE_COUNT"]);
             Assert.AreEqual((uint)AvbdBroadphase.DynamicPairsWord, d["AVBD_BP_DYNAMIC_PAIRS"]);
             Assert.AreEqual((uint)AvbdBroadphase.StaticPairsWord, d["AVBD_BP_STATIC_PAIRS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.SmallBinWord, d["AVBD_BP_SMALL_BIN"]);
+            Assert.AreEqual((uint)AvbdBroadphase.FineBinWord, d["AVBD_BP_FINE_BIN"]);
+            Assert.AreEqual((uint)AvbdBroadphase.TwoLevelsWord, d["AVBD_BP_TWO_LEVELS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.CoarseCellWord, d["AVBD_BP_COARSE_CELL"]);
+            Assert.AreEqual((uint)AvbdBroadphase.FineCellWord, d["AVBD_BP_FINE_CELL"]);
+            Assert.AreEqual((uint)AvbdBroadphase.LiveCountWord, d["AVBD_BP_LIVE_COUNT"]);
+            Assert.AreEqual((uint)AvbdBroadphase.SolvedCountWord, d["AVBD_BP_SOLVED_COUNT"]);
+            Assert.AreEqual((uint)AvbdBroadphase.StatWords, d["AVBD_BP_STAT_WORDS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.HistAllWord, d["AVBD_BP_HIST_ALL"]);
+            Assert.AreEqual((uint)AvbdBroadphase.HistSolvedWord, d["AVBD_BP_HIST_SOLVED"]);
             Assert.AreEqual((uint)AvbdBroadphase.ControlWords, d["AVBD_BP_CONTROL_WORDS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.BinsPerOctave, d["AVBD_BP_BINS_PER_OCTAVE"]);
+            Assert.AreEqual((uint)AvbdBroadphase.BinOctaves, d["AVBD_BP_BIN_OCTAVES"]);
+            Assert.AreEqual((uint)AvbdBroadphase.RadiusBins, d["AVBD_BP_RADIUS_BINS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.LargeFactorBins, d["AVBD_BP_LARGE_FACTOR_BINS"]);
+            Assert.AreEqual((uint)AvbdBroadphase.MaxLarge, d["AVBD_BP_MAX_LARGE"]);
+            Assert.AreEqual((uint)AvbdBroadphase.ScanGroup, d["AVBD_BP_SCAN_GROUP"]);
             Assert.AreEqual(AvbdBroadphase.StaticCellFlag, d["AVBD_BP_STATIC_FLAG"]);
+            Assert.AreEqual(AvbdBroadphase.LargeCellFlag, d["AVBD_BP_LARGE_FLAG"]);
+            Assert.AreEqual(AvbdBroadphase.CoarseCellFlag, d["AVBD_BP_COARSE_FLAG"]);
             StringAssert.Contains("AVBD_BP_CELL_MARGIN " + AvbdBroadphase.CellMargin.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture),
                 ReadInclude("AvbdBroadphaseParams.hlsl"));
 
