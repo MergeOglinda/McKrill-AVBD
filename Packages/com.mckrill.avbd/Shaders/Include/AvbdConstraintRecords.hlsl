@@ -11,6 +11,8 @@
 #define AVBD_CONSTRAINT_FLAG_HARD_ANG    (1u << 1) // angular part is hard. Stored stiffness is ignored
 #define AVBD_CONSTRAINT_FLAG_FRACTURABLE (1u << 2) // breaks above the stored fracture threshold
 #define AVBD_CONSTRAINT_FLAG_BROKEN      (1u << 3) // fractured. Owner: D
+#define AVBD_CONSTRAINT_FLAG_PLASTIC     (1u << 5) // plastic joint: its PlasticRecord is slot ident.w (AvbdPlasticRecords.hlsl). Owner: creation
+#define AVBD_CONSTRAINT_FLAG_BEND_BREAK  (1u << 6) // a plastic joint breaks when it has bent past the limit. Owner: creation
 // Bit 4 is the CPU oracle's stick flag of a contact record. On the GPU the stick bits are in the pair record of the manifold (AvbdContactRecords.hlsl).
 
 #define AVBD_CONSTRAINT_FLAGS_MASK 0x00FFFFFFu
@@ -24,7 +26,7 @@
 // 160 B: a joint or a spring.
 struct ConstraintRecord
 {
-    uint4  ident;      // x = body A (AVBD_INVALID = world), y = body B, z = flags | kind << 24, w = unused
+    uint4  ident;      // x = body A (AVBD_INVALID = world), y = body B, z = flags | kind << 24, w = plastic slot (only with the PLASTIC flag)
     float4 anchorA;    // xyz = anchor on A, w = linear stiffness (joint) / stiffness (spring)
     float4 anchorB;    // xyz = anchor on B, w = angular stiffness (joint) / rest length (spring)
     float4 c0Lin;      // xyz = linear constraint at the step start, w = torque arm

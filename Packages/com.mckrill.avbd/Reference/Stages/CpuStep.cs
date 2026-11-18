@@ -13,18 +13,18 @@ namespace McKrill.Avbd.Reference
         /// <paramref name="constraints"/> holds the joints and springs first, then the contact region. Returns the number of failed primal solves.
         /// </summary>
         public static int Run(CpuBodyArrays bodies, ConstraintRecord[] constraints, int jointCount, CpuContacts contacts,
-            int bodyCount, in AvbdSolverSettings settings)
+            int bodyCount, in AvbdSolverSettings settings, PlasticRecord[] plastic = null)
         {
             CpuPredict.Run(bodies, settings, bodyCount);
             contacts.Narrowphase(bodies, constraints, settings, bodyCount);
             ConstraintTopology topology = contacts.BuildTopology(bodies, constraints, jointCount, bodyCount);
-            CpuConstraintInit.Run(bodies, constraints, jointCount, settings);
+            CpuConstraintInit.Run(bodies, constraints, jointCount, settings, plastic);
 
             int failures = 0;
             for (int it = 0; it < settings.iterations; it++)
             {
-                failures += CpuPrimal.Sweep(bodies, constraints, topology, settings);
-                CpuDual.Run(bodies, constraints, jointCount, settings);
+                failures += CpuPrimal.Sweep(bodies, constraints, topology, settings, plastic);
+                CpuDual.Run(bodies, constraints, jointCount, settings, plastic);
                 contacts.Dual(bodies, constraints, settings, bodyCount);
             }
 
@@ -34,16 +34,16 @@ namespace McKrill.Avbd.Reference
 
         /// <summary>Runs one step. Returns the number of failed primal solves.</summary>
         public static int Run(CpuBodyArrays bodies, ConstraintRecord[] constraints, int constraintCount, ConstraintTopology topology,
-            int bodyCount, in AvbdSolverSettings settings)
+            int bodyCount, in AvbdSolverSettings settings, PlasticRecord[] plastic = null)
         {
             CpuPredict.Run(bodies, settings, bodyCount);
-            CpuConstraintInit.Run(bodies, constraints, constraintCount, settings);
+            CpuConstraintInit.Run(bodies, constraints, constraintCount, settings, plastic);
 
             int failures = 0;
             for (int it = 0; it < settings.iterations; it++)
             {
-                failures += CpuPrimal.Sweep(bodies, constraints, topology, settings);
-                CpuDual.Run(bodies, constraints, constraintCount, settings);
+                failures += CpuPrimal.Sweep(bodies, constraints, topology, settings, plastic);
+                CpuDual.Run(bodies, constraints, constraintCount, settings, plastic);
             }
 
             CpuVelocity.Run(bodies, settings, bodyCount);

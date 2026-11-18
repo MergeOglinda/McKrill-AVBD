@@ -6,13 +6,17 @@ using UnityEngine;
 namespace McKrill.Avbd.Samples
 {
     /// <summary>
-    /// A brick wall of 225 or more blocks (15 x 15 by default) with an immobile bottom row, on the GPU solver, held together by joints that fracture, and a camera you can shoot boxes from.
-    /// The panel can set up several walls, one behind the other, 4 m apart (one by default).
+    /// A brick wall (75 x 75 blocks by default) with an immobile bottom row, on the GPU solver, held together by joints that fracture, and a camera you can shoot boxes from.
+    /// The panel can set up several walls, one behind the other, 4 m apart (ten by default).
     ///
     /// Every block is joined to its neighbors (the one beside it and the two under it in a running bond) by a ball-socket joint at the
     /// middle of the shared face, with a hard angle lock. A joint breaks when its angular multiplier exceeds the fracture threshold
     /// (stage D). The panel sets the properties of the joints and the blocks; they take effect on Reset, because the package cannot change a
     /// joint after it was added. A fractured joint leaves the solver, and its two blocks collide again like any other pair.
+    ///
+    /// The joints can also be plastic (off by default). A plastic joint yields when its angular multiplier is above the yield threshold: the angle
+    /// lock gives way and the joint keeps the bend it ends up with, instead of springing back. A bend limit breaks a joint that has bent too far.
+    /// The yield threshold should be below the fracture threshold, which then only catches the loads that jump past it within one step.
     ///
     /// The simulation runs entirely through the package's public API: <see cref="AvbdBodyBuffers"/> holds the bodies,
     /// <see cref="AvbdSolver.Step"/> advances them. Collisions are part of that step: the broadphase finds the touching pairs, the narrow
@@ -54,20 +58,30 @@ namespace McKrill.Avbd.Samples
         }
 
         [Header("Wall (applied on Reset)")]
-        [Tooltip("Blocks per row. 15 columns and 15 rows are 225 blocks.")]
-        [SerializeField, Range(MinColumns, MaxColumns)] int columns = 15;
+        [Tooltip("Blocks per row. 75 columns and 75 rows are 5625 blocks per wall.")]
+        [SerializeField, Range(MinColumns, MaxColumns)] int columns = 75;
         [Tooltip("Rows of blocks. The bottom row is immobile.")]
-        [SerializeField, Range(MinRows, MaxRows)] int rows = 15;
+        [SerializeField, Range(MinRows, MaxRows)] int rows = 75;
         [Tooltip("Walls one behind the other, 4 meters apart along the camera's viewing direction (z). Each has the size above.")]
-        [SerializeField, Range(MinWalls, MaxWalls)] int walls = 1;
+        [SerializeField, Range(MinWalls, MaxWalls)] int walls = 10;
         [SerializeField] Vector3 blockSize = new Vector3(1f, 0.5f, 0.5f);
         [SerializeField, Min(0.01f)] float blockDensity = 1f;
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
         [SerializeField] bool rigidJoints = false;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
-        [SerializeField, Min(1f)] float jointStiffness = 2e3f;
+        [SerializeField, Min(1f)] float jointStiffness = 5e3f;
         [Tooltip("A joint breaks when the norm of its angular multiplier is above this.")]
-        [SerializeField, Min(0.01f)] float fractureThreshold = 19f;
+        [SerializeField, Min(0.01f)] float fractureThreshold = 40f;
+
+        [Header("Plastic joints (applied on Reset)")]
+        [Tooltip("Joints yield instead of holding: above the yield threshold the angle lock gives way and the joint keeps the bend. Off: the joints are rigid up to the fracture threshold, and the package runs without any plastic code or buffer.")]
+        [SerializeField] bool plasticJoints = false;
+        [Tooltip("A plastic joint yields when the norm of its angular multiplier is above this. Keep it below the fracture threshold: a joint breaks before it can yield otherwise.")]
+        [SerializeField, Min(0.1f)] float yieldThreshold = 8f;
+        [Tooltip("A plastic joint that has yielded breaks once it is bent further than the angle below from where it started.")]
+        [SerializeField] bool bendBreak = true;
+        [Tooltip("The bend, in degrees, above which a plastic joint breaks (with bend break on).")]
+        [SerializeField, Range(1f, 180f)] float bendBreakDegrees = 30f;
 
         [Header("Solver")]
         [SerializeField, Range(1, 30)] int iterations = 10;
@@ -90,8 +104,8 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(0.1f)] float moveSpeed = 8f;
         [SerializeField, Min(0.01f)] float lookSensitivity = 0.2f;
 
-        // The wall sizes: 15 x 15 = 225 blocks at least, 22 x 18 = 396 at most. The limit is what was tried: the constraint lists are built on
-        // the GPU now (stage G), but the graph coloring still reads two small things back every step, and nobody has measured larger walls.
+        // The wall sizes: 15 x 15 blocks at least, 75 x 75 at most, in 1 to 10 walls. The limit is what was tried: the constraint lists are built on
+        // the GPU (stage G), but the graph coloring still reads two small things back every step.
         const int MinColumns = 15;
         const int MaxColumns = 75;
         const int MinRows = 15;
@@ -298,7 +312,9 @@ namespace McKrill.Avbd.Samples
             // lie on or inside a dozen, so this has room to spare (pairs a joint joins make no manifold); a pair that finds no slot just gets
             // no contacts until one is free.
             int manifoldSlots = Mathf.Min(blocks * 8 + maxShots * 16 + 256, AvbdConstraintBuffers.MaxContactManifolds);
-            constraints = new AvbdConstraintBuffers(bodies, blocks * 3 + 8, null, manifoldSlots);
+            // The plastic array only exists if the joints can be plastic: without it the solver runs the joint kernels with no plastic code at all.
+            int jointCapacity = blocks * 3 + 8;
+            constraints = new AvbdConstraintBuffers(bodies, jointCapacity, null, manifoldSlots, plasticJoints ? jointCapacity : 0);
             solver = new AvbdSolver(bodies, settings, null, constraints);
 
             // Ground: a static slab whose top face is the plane y = 0.
@@ -365,7 +381,9 @@ namespace McKrill.Avbd.Samples
                 return;
             float3 anchor = (positionA + positionB) * 0.5f;
             float linear = rigidJoints ? float.PositiveInfinity : jointStiffness;
-            if (constraints.AddJoint(a, b, anchor - positionA, anchor - positionB, linear, float.PositiveInfinity, fractureThreshold) >= 0)
+            float yield = plasticJoints ? yieldThreshold : float.PositiveInfinity;
+            float bendLimit = plasticJoints && bendBreak ? Mathf.Min(bendBreakDegrees * Mathf.Deg2Rad, Mathf.PI) : float.PositiveInfinity;
+            if (constraints.AddJoint(a, b, anchor - positionA, anchor - positionB, linear, float.PositiveInfinity, fractureThreshold, yield, bendLimit) >= 0)
                 jointCount++;
         }
 
@@ -582,7 +600,7 @@ namespace McKrill.Avbd.Samples
         void DrawPanel()
         {
             const float margin = 8f;
-            const float width = 300f;
+            const float width = 340f;
             float scale = Mathf.Clamp(Screen.height / 800f, 1f, 2.5f);
 
             Matrix4x4 oldMatrix = GUI.matrix;
@@ -590,8 +608,6 @@ namespace McKrill.Avbd.Samples
 
             GUILayout.BeginArea(new Rect(margin, margin, width, Screen.height / scale - 2f * margin));
             GUILayout.BeginVertical(GUI.skin.box);
-
-            GUILayout.Label("AVBD GPU solver: fracturing wall", boldLabel);
 
             GUILayout.Label("Shot", boldLabel);
             GUILayout.Label("Speed: " + shotSpeed.ToString("0") + " m/s");
@@ -614,12 +630,21 @@ namespace McKrill.Avbd.Samples
             iterations = Mathf.RoundToInt(GUILayout.HorizontalSlider(iterations, 1, 30));
 
             GUILayout.Space(4f);
-            GUILayout.Label("Wall (applied on Reset)", boldLabel);
-            GUILayout.Label("Columns: " + columns + "   Rows: " + rows + "   (" + BlockCount(columns, rows) + " blocks)");
+            GUILayout.Label("Wall size (Reset to apply)", boldLabel);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("C " + columns, GUILayout.Width(38f));
             columns = Mathf.RoundToInt(GUILayout.HorizontalSlider(columns, MinColumns, MaxColumns));
+            GUILayout.Label("R " + rows, GUILayout.Width(38f));
             rows = Mathf.RoundToInt(GUILayout.HorizontalSlider(rows, MinRows, MaxRows));
-            GUILayout.Label("Walls: " + walls + "   (" + BlockCount(columns, rows, walls) + " blocks, " + WallSpacing.ToString("0") + " m apart)");
+            GUILayout.Label("W " + walls, GUILayout.Width(38f));
             walls = Mathf.RoundToInt(GUILayout.HorizontalSlider(walls, MinWalls, MaxWalls));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(paused ? "Play" : "Pause")) paused = !paused;
+            if (GUILayout.Button("Step")) { paused = true; requestStep = true; }
+            if (GUILayout.Button("Clear shots")) requestClearShots = true;
+            if (GUILayout.Button("Reset")) requestReset = true;
+            GUILayout.EndHorizontal();
 
             // Density, stiffness and the threshold on log scales.
             GUILayout.Label("Block density: " + blockDensity.ToString("0.00") + "   (" + (blockDensity * blockSize.x * blockSize.y * blockSize.z).ToString("0.00") + " kg per block)");
@@ -632,13 +657,21 @@ namespace McKrill.Avbd.Samples
             GUILayout.Label("Fracture threshold: " + fractureThreshold.ToString(fractureThreshold < 10f ? "0.0" : "0"));
             fractureThreshold = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(fractureThreshold), 0f, 4f)), 1f, 1e4f);
 
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button(paused ? "Play" : "Pause")) paused = !paused;
-            if (GUILayout.Button("Step")) { paused = true; requestStep = true; }
-            if (GUILayout.Button("Clear shots")) requestClearShots = true;
-            if (GUILayout.Button("Reset")) requestReset = true;
-            GUILayout.EndHorizontal();
-
+            // Plastic joints. The controls are always drawn (greyed out when plastic joints are off): a control that comes and goes while the panel
+            // is being laid out is an IMGUI error, and a click on the toggle changes the state in the middle of an event.
+            GUILayout.Space(4f);
+            plasticJoints = GUILayout.Toggle(plasticJoints, "Plastic yield: joints give way and keep the bend");
+            bool wasEnabled = GUI.enabled;
+            GUI.enabled = wasEnabled && plasticJoints;
+            GUILayout.Label("Yield threshold: " + yieldThreshold.ToString(yieldThreshold < 10f ? "0.0" : "0")
+                + (yieldThreshold >= fractureThreshold ? "   (not below the fracture threshold: joints break first)" : ""));
+            yieldThreshold = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(yieldThreshold), -1f, 4f)), 0.1f, 1e4f);
+            bendBreak = GUILayout.Toggle(bendBreak, "Bend break: a joint breaks when bent too far");
+            GUI.enabled = wasEnabled && plasticJoints && bendBreak;
+            GUILayout.Label("Bend limit: " + bendBreakDegrees.ToString("0") + " degrees");
+            bendBreakDegrees = Mathf.Round(GUILayout.HorizontalSlider(bendBreakDegrees, 1f, 180f));
+            GUI.enabled = wasEnabled;
+            GUILayout.Space(4f);
             GUILayout.Space(4f);
             GUILayout.Label("bodies " + (staticCount + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
             GUILayout.Label("joints broken " + (constraints != null ? constraints.BrokenCount : 0) + " / " + jointCount);

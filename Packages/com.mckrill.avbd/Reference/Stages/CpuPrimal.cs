@@ -10,21 +10,23 @@ namespace McKrill.Avbd.Reference
     internal static class CpuPrimal
     {
         /// <summary>Runs one primal sweep: every color in turn, every body of the color. Returns the number of failed solves.</summary>
-        public static int Sweep(CpuBodyArrays bodies, ConstraintRecord[] constraints, ConstraintTopology topology, in AvbdSolverSettings settings)
+        /// <param name="plastic">The plastic array, for joints with the Plastic flag; null if there are none.</param>
+        public static int Sweep(CpuBodyArrays bodies, ConstraintRecord[] constraints, ConstraintTopology topology, in AvbdSolverSettings settings, PlasticRecord[] plastic = null)
         {
             int failures = 0;
             for (int color = 0; color < topology.ColorCount; color++)
             {
                 int end = topology.ColorOffsets[color + 1];
                 for (int k = topology.ColorOffsets[color]; k < end; k++)
-                    if (!SolveBody(bodies, constraints, topology, (int)topology.ColorBodies[k], settings))
+                    if (!SolveBody(bodies, constraints, topology, (int)topology.ColorBodies[k], settings, plastic))
                         failures++;
             }
             return failures;
         }
 
         // Returns false only if the 6x6 solve failed. A skipped body (free, kinematic, massless) counts as success.
-        public static bool SolveBody(CpuBodyArrays bodies, ConstraintRecord[] constraints, ConstraintTopology topology, int slot, in AvbdSolverSettings settings)
+        public static bool SolveBody(CpuBodyArrays bodies, ConstraintRecord[] constraints, ConstraintTopology topology, int slot, in AvbdSolverSettings settings,
+            PlasticRecord[] plastic = null)
         {
             uint flagsWord = bodies.Meta[slot].ident.x;
             if ((flagsWord & ((uint)BodyFlags.Free | (uint)BodyFlags.Kinematic)) != 0u)
@@ -60,7 +62,7 @@ namespace McKrill.Avbd.Reference
                 switch (ConstraintFlagLayout.KindOf(c.ident.z))
                 {
                     case ConstraintKind.Joint:
-                        StampJoint(bodies, c, (ConstraintFlags)flags, (uint)slot, position, rotation, settings, ref sys);
+                        StampJoint(bodies, c, (ConstraintFlags)flags, (uint)slot, position, rotation, settings, plastic, ref sys);
                         break;
                     case ConstraintKind.Spring:
                         StampSpring(bodies, c, (uint)slot, position, rotation, ref sys);
@@ -108,7 +110,7 @@ namespace McKrill.Avbd.Reference
 
         static void StampJoint(
             CpuBodyArrays bodies, in ConstraintRecord c, ConstraintFlags flags, uint slot, float3 selfPos, quaternion selfRot,
-            in AvbdSolverSettings settings, ref AvbdPrimalSystem sys)
+            in AvbdSolverSettings settings, PlasticRecord[] plastic, ref AvbdPrimalSystem sys)
         {
             float alpha = settings.alpha;
             bool hasA = c.ident.x != AvbdConst.Invalid;
@@ -164,7 +166,7 @@ namespace McKrill.Avbd.Reference
             if (math.lengthsq(penaltyAng) > 0f)
             {
                 float3x3 K = AvbdMat3.Diagonal(penaltyAng);
-                float3 C = AvbdQuat.DifferenceRaw(rotA, rotB) * torqueArm;
+                float3 C = AvbdQuat.JointAngularError(rotA, rotB, CpuPlastic.RestOf(plastic, c, flags)) * torqueArm;
 
                 if ((flags & ConstraintFlags.HardAngular) != 0)
                     C -= c.c0Ang.xyz * alpha;

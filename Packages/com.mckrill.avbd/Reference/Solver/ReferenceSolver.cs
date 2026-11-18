@@ -50,9 +50,10 @@ namespace McKrill.Avbd.Reference
         /// <summary>Adds a ball-socket joint. Pass a null bodyA to pin bodyB to the world point rA.</summary>
         public AvbdJoint AddJoint(
             AvbdBody bodyA, AvbdBody bodyB, float3 rA, float3 rB,
-            float stiffnessLin = float.PositiveInfinity, float stiffnessAng = 0f, float fracture = float.PositiveInfinity)
+            float stiffnessLin = float.PositiveInfinity, float stiffnessAng = 0f, float fracture = float.PositiveInfinity,
+            float yield = float.PositiveInfinity, float breakBend = float.PositiveInfinity)
         {
-            var joint = new AvbdJoint(this, bodyA, bodyB, rA, rB, stiffnessLin, stiffnessAng, fracture);
+            var joint = new AvbdJoint(this, bodyA, bodyB, rA, rB, stiffnessLin, stiffnessAng, fracture, yield, breakBend);
             AddForce(joint);
             return joint;
         }
