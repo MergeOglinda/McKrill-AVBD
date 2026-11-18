@@ -23,6 +23,8 @@ namespace McKrill.Avbd.Tests
             var counts = new long[]
             {
                 0, 1, ThreadsPerGroup - 1, ThreadsPerGroup, ThreadsPerGroup + 1, 300,
+                AvbdGraphColoring.PrimalLanesFrom4 - 1, AvbdGraphColoring.PrimalLanesFrom4,
+                AvbdGraphColoring.PrimalLanesFrom2 - 1, AvbdGraphColoring.PrimalLanesFrom2,
                 (long)AvbdGraphColoring.RowGroups * ThreadsPerGroup - 1,
                 (long)AvbdGraphColoring.RowGroups * ThreadsPerGroup,
                 (long)AvbdGraphColoring.RowGroups * ThreadsPerGroup + 1,
@@ -33,7 +35,7 @@ namespace McKrill.Avbd.Tests
             {
                 (uint x, uint y) = AvbdGraphColoring.GroupsFor(count);
                 long rowWidth = (long)AvbdGraphColoring.RowGroups * ThreadsPerGroup;
-                long items = count * AvbdGraphColoring.PrimalLanes; // the primal sweep has several threads per body
+                long items = count * AvbdGraphColoring.PrimalLanesFor(count); // the primal sweep has several threads per body, fewer in a big color
 
                 Assert.LessOrEqual(x, (uint)AvbdGraphColoring.RowGroups, "count " + count + ": one dimension of a dispatch is at most 65535 groups");
                 Assert.GreaterOrEqual(y, 1u, "count " + count + ": at least one row, so the dispatch is a valid (empty) one");
@@ -49,7 +51,23 @@ namespace McKrill.Avbd.Tests
 
             Assert.AreEqual(((uint)0, (uint)1), AvbdGraphColoring.GroupsFor(0), "an empty color is a 0 x 1 dispatch");
             Assert.AreEqual(((uint)38, (uint)1), AvbdGraphColoring.GroupsFor(300), "300 bodies x 8 lanes = 2400 threads = 37.5 groups");
-            Assert.AreEqual(ThreadsPerGroup % AvbdGraphColoring.PrimalLanes, 0, "the lanes of a body share a thread group");
+            Assert.AreEqual(((uint)256, (uint)1), AvbdGraphColoring.GroupsFor(AvbdGraphColoring.PrimalLanesFrom4), "4096 bodies x 4 lanes = 16384 threads = 256 groups");
+            Assert.AreEqual(((uint)2048, (uint)1), AvbdGraphColoring.GroupsFor(AvbdGraphColoring.PrimalLanesFrom2 - 1), "32767 bodies x 4 lanes = 131068 threads = 2047.9 groups");
+            Assert.AreEqual(((uint)1024, (uint)1), AvbdGraphColoring.GroupsFor(AvbdGraphColoring.PrimalLanesFrom2), "32768 bodies x 2 lanes = 65536 threads = 1024 groups");
+        }
+
+        [Test]
+        public void PrimalLanesFor_FallsWithTheSizeOfTheColor_AndDividesAThreadGroup()
+        {
+            Assert.AreEqual(8, AvbdGraphColoring.PrimalLanesFor(0));
+            Assert.AreEqual(8, AvbdGraphColoring.PrimalLanesFor(1));
+            Assert.AreEqual(8, AvbdGraphColoring.PrimalLanesFor(AvbdGraphColoring.PrimalLanesFrom4 - 1));
+            Assert.AreEqual(4, AvbdGraphColoring.PrimalLanesFor(AvbdGraphColoring.PrimalLanesFrom4));
+            Assert.AreEqual(4, AvbdGraphColoring.PrimalLanesFor(AvbdGraphColoring.PrimalLanesFrom2 - 1));
+            Assert.AreEqual(2, AvbdGraphColoring.PrimalLanesFor(AvbdGraphColoring.PrimalLanesFrom2));
+            Assert.AreEqual(2, AvbdGraphColoring.PrimalLanesFor(4_000_000), "never one lane");
+            foreach (int lanes in new[] { 2, 4, 8 })
+                Assert.AreEqual(0, ThreadsPerGroup % lanes, lanes + " lanes of a body share a thread group");
         }
 
         // ---- the GPU -------------------------------------------------------------------------------------------------------
