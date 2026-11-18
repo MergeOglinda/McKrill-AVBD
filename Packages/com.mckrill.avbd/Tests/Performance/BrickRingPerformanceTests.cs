@@ -20,7 +20,7 @@ namespace McKrill.Avbd.Tests.Performance
     {
         const int Iterations = 4;
         const int LeadSteps = 60;   // including the first
-        const int WindowSteps = 100;
+        const int WindowSteps = 500;
 
         [Test, Performance, Timeout(3_600_000)]
         public void Scenario5_BrickRing110k()
