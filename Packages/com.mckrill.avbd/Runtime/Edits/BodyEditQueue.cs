@@ -72,6 +72,40 @@ namespace McKrill.Avbd
             return handle;
         }
 
+        /// <summary>
+        /// Spawns every descriptor of a list; <c>handles[i]</c> is the handle of <c>descriptors[i]</c>. With <paramref name="spatialOrder"/> the bodies are
+        /// allocated in Morton order of their positions (<see cref="SpatialOrder"/>), so that bodies that are close in space get slots that are close
+        /// together (when the slots are fresh; a free slot is reused first, see <see cref="BodySlotAllocator"/>); without it, in list order.
+        /// Every descriptor is checked before the first body is spawned: a bad one throws ArgumentException and uses no slot. Bodies that find no
+        /// free slot get the invalid handle and count as overflow, like <see cref="Spawn"/>.
+        /// </summary>
+        public void SpawnBatch(IReadOnlyList<BodyDescriptor> descriptors, BodyHandle[] handles, bool spatialOrder)
+        {
+            if (descriptors == null) throw new ArgumentNullException(nameof(descriptors));
+            if (handles == null) throw new ArgumentNullException(nameof(handles));
+            int count = descriptors.Count;
+            if (handles.Length < count)
+                throw new ArgumentException("handles must have room for " + count + " handles.", nameof(handles));
+
+            var positions = new float3[count];
+            for (int i = 0; i < count; i++)
+            {
+                BodyDescriptor d = descriptors[i];
+                ValidateDescriptor(d);
+                positions[i] = d.position;
+            }
+
+            int[] order = null;
+            if (spatialOrder)
+                order = SpatialOrder.Order(positions);
+
+            for (int k = 0; k < count; k++)
+            {
+                int i = order != null ? order[k] : k;
+                handles[i] = Spawn(descriptors[i]);
+            }
+        }
+
         /// <summary>Frees the body. Returns false for an invalid or stale handle.</summary>
         public bool Remove(BodyHandle handle)
         {

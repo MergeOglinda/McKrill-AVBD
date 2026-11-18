@@ -151,6 +151,7 @@ namespace McKrill.Avbd.Samples
 
         // Requests made from OnGUI, applied in Update so the IMGUI control count never changes between Layout and Repaint.
         bool requestShoot;
+        bool requestVolley;
         bool requestReset;
         bool requestClearShots;
         bool requestStep;
@@ -224,6 +225,7 @@ namespace McKrill.Avbd.Samples
                 BuildSimulation();
                 requestReset = false;
                 requestShoot = false;
+                requestVolley = false;
                 requestClearShots = false;
             }
             if (requestClearShots)
@@ -235,6 +237,11 @@ namespace McKrill.Avbd.Samples
             {
                 Shoot();
                 requestShoot = false;
+            }
+            if (requestVolley)
+            {
+                FireVolley();
+                requestVolley = false;
             }
 
             MoveCamera();
@@ -317,22 +324,29 @@ namespace McKrill.Avbd.Samples
             constraints = new AvbdConstraintBuffers(bodies, jointCapacity, null, manifoldSlots, plasticJoints ? jointCapacity : 0);
             solver = new AvbdSolver(bodies, settings, null, constraints);
 
-            // Ground: a static slab whose top face is the plane y = 0.
-            var ground = new float3(GroundHalfExtent * 2f, 1f, GroundHalfExtent * 2f);
-            AddStaticInstance(bodies.Spawn(BodyDescriptor.Box(ground, 0f, new float3(0f, -0.5f, 0f))), ground, new Color(0.30f, 0.33f, 0.36f));
-
+            // The ground and every block go in one batch (the ground is element 0, then the blocks wall by wall, row by row, column by column), so that
+            // the bodies can be placed in Z-curve order. The handles come back in the order of the list; the joints and the instances use them.
             // Walls: wall w stands at z = w * WallSpacing, the first one in front. Row r is shifted by half a block when r is odd (a running bond),
             // so every block rests on two blocks of the row under it.
-            jointCount = 0;
+            int perWall = rows * columns;
+            var descriptors = new List<BodyDescriptor>(1 + blocks);
+            var instanceSizes = new List<float3>(1 + blocks);
+            var instanceColors = new List<Color>(1 + blocks);
+            var positions = new float3[walls * perWall];
+
+            // Ground: a static slab whose top face is the plane y = 0.
+            var ground = new float3(GroundHalfExtent * 2f, 1f, GroundHalfExtent * 2f);
+            descriptors.Add(BodyDescriptor.Box(ground, 0f, new float3(0f, -0.5f, 0f)));
+            instanceSizes.Add(ground);
+            instanceColors.Add(new Color(0.30f, 0.33f, 0.36f));
+
+            float3 size = new float3(blockSize.x, blockSize.y, blockSize.z);
+            float stepX = size.x + BlockGap;
+            float stepY = size.y + BlockGap;
+            float centerColumn = (columns - 1) * 0.5f + 0.25f;
             for (int w = 0; w < walls; w++)
             {
                 float z = w * WallSpacing;
-                float3 size = new float3(blockSize.x, blockSize.y, blockSize.z);
-                float stepX = size.x + BlockGap;
-                float stepY = size.y + BlockGap;
-                float centerColumn = (columns - 1) * 0.5f + 0.25f;
-                var handles = new BodyHandle[rows, columns];
-                var positions = new float3[rows, columns];
                 for (int r = 0; r < rows; r++)
                 {
                     float y = size.y * 0.5f + BlockGap + r * stepY;
@@ -340,28 +354,38 @@ namespace McKrill.Avbd.Samples
                     for (int c = 0; c < columns; c++)
                     {
                         var position = new float3((c + 0.5f * (r & 1) - centerColumn) * stepX, y, z);
+                        positions[w * perWall + r * columns + c] = position;
                         // The bottom row is immobile: a body without mass is static.
-                        handles[r, c] = bodies.Spawn(BodyDescriptor.Box(size, r == 0 ? 0f : blockDensity, position));
-                        positions[r, c] = position;
-                        AddStaticInstance(handles[r, c], size, color);
+                        descriptors.Add(BodyDescriptor.Box(size, r == 0 ? 0f : blockDensity, position));
+                        instanceSizes.Add(size);
+                        instanceColors.Add(color);
                     }
                 }
+            }
+            var spawned = new BodyHandle[descriptors.Count];
+            bodies.SpawnBatch(descriptors, spawned, true);
+            for (int i = 0; i < spawned.Length; i++)
+                AddStaticInstance(spawned[i], instanceSizes[i], instanceColors[i]);
 
-                // Joints. The bottom row is not joined to itself, only to the row above it. A block is joined to the block on its left, and to the two blocks under it: with a shift of half a block, those are
-                // (c, c + 1) in an odd row and (c - 1, c) in an even one.
-                for (int r = 0; r < rows; r++)
+            // Joints. The bottom row is not joined to itself, only to the row above it. A block is joined to the block on its left, and to the two blocks under it: with a shift of half a block, those are
+            // (c, c + 1) in an odd row and (c - 1, c) in an even one.
+            jointCount = 0;
+            for (int w = 0; w < walls; w++)
+            {
+                int first = w * perWall;
+                for (int r = 1; r < rows; r++)   // the bottom row is static: its blocks need no joints to each other
                     for (int c = 0; c < columns; c++)
                     {
-                        if (r == 0)
-                            continue; // the bottom row is static: its blocks need no joints to each other
+                        BodyHandle self = spawned[1 + first + r * columns + c];
+                        float3 selfPosition = positions[first + r * columns + c];
                         if (c > 0)
-                            Join(handles[r, c], positions[r, c], handles[r, c - 1], positions[r, c - 1]);
+                            Join(self, selfPosition, spawned[1 + first + r * columns + c - 1], positions[first + r * columns + c - 1]);
                         int firstBelow = (r & 1) == 1 ? c : c - 1;
                         for (int k = 0; k < 2; k++)
                         {
                             int below = firstBelow + k;
                             if (below >= 0 && below < columns)
-                                Join(handles[r, c], positions[r, c], handles[r - 1, below], positions[r - 1, below]);
+                                Join(self, selfPosition, spawned[1 + first + (r - 1) * columns + below], positions[first + (r - 1) * columns + below]);
                         }
                     }
             }
@@ -454,6 +478,36 @@ namespace McKrill.Avbd.Samples
                 return;
 
             shots.Add(new Shot { handle = handle, size = size });
+            shotsChanged = true;
+        }
+
+        // The volley of the performance tests (FractureWallScene.ShootVolley): 15 shots from a grid of 5 columns by 3 rows in front of the first wall, 10 m
+        // away, all fired at once along +z with the panel's speed, size and mass. At the default wall (75 x 75 blocks) the grid is the test's (x = -30 to 30 m,
+        // y = 6, 19 and 32 m); a smaller wall gets a proportionally smaller grid.
+        static readonly float[] VolleyX = { -30f, -15f, 0f, 15f, 30f };
+        static readonly float[] VolleyY = { 6f, 19f, 32f };
+        const float VolleyZ = -10f;
+
+        void FireVolley()
+        {
+            int volley = VolleyX.Length * VolleyY.Length;
+            int shotLimit = Mathf.Min(maxShots, instances.Length - staticCount);
+            while (shots.Count > 0 && shots.Count + volley > shotLimit)
+                RemoveShot(0);
+
+            float size = shotSize;
+            float density = shotMass / (size * size * size);
+            for (int i = 0; i < volley && shots.Count < shotLimit; i++)
+            {
+                float x = VolleyX[i % VolleyX.Length] * (columns / 75f);
+                float y = VolleyY[i / VolleyX.Length] * (rows / 75f);
+                BodyDescriptor descriptor = BodyDescriptor.Box(new float3(size), density, new float3(x, y, VolleyZ));
+                descriptor.linearVelocity = new float3(0f, 0f, shotSpeed);
+                BodyHandle handle = bodies.Spawn(descriptor);
+                if (!handle.IsValid)
+                    break;
+                shots.Add(new Shot { handle = handle, size = size });
+            }
             shotsChanged = true;
         }
 
@@ -680,7 +734,7 @@ namespace McKrill.Avbd.Samples
                 GUILayout.Label("running slower than real time");
 
             GUILayout.Space(4f);
-            GUILayout.Label("Left click: shoot   Space: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
+            GUILayout.Label("Left click: shoot   V: volley   Space: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
 
             GUILayout.EndVertical();
             Rect used = GUILayoutUtility.GetLastRect();
@@ -700,6 +754,7 @@ namespace McKrill.Avbd.Samples
                     held.Add(e.keyCode);
                     if (e.keyCode == KeyCode.Space) { paused = !paused; e.Use(); }
                     else if (e.keyCode == KeyCode.R) { requestReset = true; e.Use(); }
+                    else if (e.keyCode == KeyCode.V) { requestVolley = true; e.Use(); }
                     else if (e.keyCode == KeyCode.N) { paused = true; requestStep = true; e.Use(); }
                     return;
 

@@ -22,6 +22,7 @@ The project needs a render pipeline that draws a `Universal Render Pipeline/Lit`
 | `W` `A` `S` `D`, `Q` `E` | Move, down and up. `Shift` is three times faster |
 | Mouse wheel | Move forward and back |
 | `Space`, `N` | Pause / play, single step |
+| `V` | Fire a volley: 15 shots at once at the first wall (the panel's **Fire volley** button) |
 | `R` | Rebuild the wall with the panel's settings and remove the shots |
 
 ## The panel
@@ -32,6 +33,8 @@ The shot's speed, size and mass, the solver's iterations and the buttons are as 
 | --- | --- |
 | C, R, W | Columns (15 to 75), rows (15 to 75) and walls (1 to 10), three sliders on one row; the defaults are 75, 75 and 10. The total block count is shown under them |
 | Block density | 0.1 to 10 (log scale). A block is 1 x 0.5 x 0.5 m, so density 1 is 0.25 kg. Does not apply to the bottom row, which is immobile |
+| Fire volley | Fires 15 shots at once from a grid of 5 by 3 in front of the first wall (x = -30 to 30 m, y = 6, 19 and 32 m, 10 m away, at the default wall size; a smaller wall gets a smaller grid), along +z, with the panel's shot speed, size and mass. It is the volley of the performance tests `Scenario1` to `Scenario4` (`Tests/Performance/FractureWallScene.cs`): with a 2 m or a 1 m shot size and *Plastic yield* off or on, the demo shows the scenario the test times |
+| Z-curve body order | Off (the default): the bodies are in the GPU arrays in the order the wall is built, row by row. On: in Z-curve order of their positions (`AvbdBodyBuffers.SpawnBatch`), so that blocks that touch are near each other in memory. Takes effect on **Reset**; use it to compare frame times |
 | Rigid joints | Joints with infinite stiffness. Off: the joints' linear part is a spring with the stiffness below |
 | Joint stiffness | 1e2 to 1e8 (log scale), used when the joints are not rigid |
 | Fracture threshold | A joint breaks when the norm of its angular multiplier is above this (1 to 1e4, log scale) |

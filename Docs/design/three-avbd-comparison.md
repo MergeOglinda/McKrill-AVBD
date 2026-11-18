@@ -98,6 +98,8 @@ Ours (PR #27, `SortBodies`, off by default): a runtime Morton sort that produces
 
 **Verdict: theirs.** It confirms the diagnosis in the PR: the benefit is a physical arrangement of the data, applied once at build, not an iteration order. We have the pieces for that (`BodyHandle` indirection, `BodySlotAllocator`), so an initial Morton ordering of slots when a scene is spawned in one batch is the straightforward version. Their gain is biggest for scrambled or builder-ordered piles and nearly zero for regular columns.
 
+**Status: implemented (initial ordering only).** `AvbdBodyBuffers.SpawnBatch` places the bodies of a batch in Z-curve order of their positions (`SpatialOrder`, `Runtime/Edits/SpatialOrder.cs`) and returns the handles in the order of the input; the brick ring and fracture wall performance scenes use it, with `_BuilderOrder` test variants as the baseline. Where we differ from three-avbd: the sort is on the position of the body at spawn, as theirs is, but it needs a batch (bodies spawned one by one stay in call order), and the demos in `Samples~` still spawn one by one. Not compiled, not run, not measured.
+
 ## 8–9. Dual
 
 Theirs launches **one** dual dispatch per iteration (`dual`, indirect, over `IA_CONSTRAINTS`) that covers joints and pair manifolds, plus the `warmStart*` kernels. Ours has `Dual` (joints and springs) and `DualContact` (indirect, one thread per contact *record* of every slot below the high-water mark, `8 × slots`). Free records return at once. A dual over manifolds with consecutive points, as in section 3, removes the idle threads and merges the two dispatches. They profile the dual at about a third of the solve (gables: 4.85 of 14.7 ms; streams ~700 MB per iteration at ~440 GB/s on a 546 GB/s device).

@@ -24,7 +24,7 @@ namespace McKrill.Avbd.Tests.Performance
     public sealed class FractureWallPerformanceTests
     {
         const int RestSteps = 29;      // after the first step
-        const int ImpactSteps = 180;   // after the volley
+        const int ImpactSteps = 380;   // after the volley
 
         [Test, Performance, Timeout(1_800_000)]
         public void Scenario1_Shots2m_PlasticYieldOff()

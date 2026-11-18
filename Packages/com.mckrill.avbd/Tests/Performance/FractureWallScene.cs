@@ -18,7 +18,7 @@ namespace McKrill.Avbd.Tests.Performance
         public float blockDensity = 1f;
         public bool rigidJoints = false;
         public float jointStiffness = 5e3f;
-        public float fractureThreshold = 40f;
+        public float fractureThreshold = 19f;
 
         // Plastic joints
         public bool plasticJoints = false;

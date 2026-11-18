@@ -157,6 +157,21 @@ namespace McKrill.Avbd
             return queue.Spawn(descriptor);
         }
 
+        /// <summary>
+        /// Spawns a scene's bodies in one call: <c>handles[i]</c> is the handle of <c>descriptors[i]</c>, whatever the order of the slots. By default the
+        /// bodies are placed in Z-curve order of their positions (<see cref="SpatialOrder"/>), which puts bodies that touch each other near each other in
+        /// memory: the solver reads the poses of partners and neighbors by slot, so a pile that was built layer by layer (neighbors thousands of slots
+        /// apart) runs faster in this order. Pass false to keep the order of the list. The order is physical and is made once; nothing is moved later.
+        /// It matters on a fresh buffer: freed slots are reused first and take bodies wherever they are.
+        /// Every descriptor is validated before the first body is spawned (ArgumentException, no slot used). Bodies that do not fit get the invalid
+        /// handle and count in <see cref="OverflowCount"/>.
+        /// </summary>
+        public void SpawnBatch(IReadOnlyList<BodyDescriptor> descriptors, BodyHandle[] handles, bool spatialOrder = true)
+        {
+            ThrowIfDisposed();
+            queue.SpawnBatch(descriptors, handles, spatialOrder);
+        }
+
         /// <summary>Frees the body. Returns false for an invalid or stale handle.</summary>
         public bool Remove(BodyHandle handle)
         {
