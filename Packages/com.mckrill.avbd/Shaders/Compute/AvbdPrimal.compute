@@ -1,4 +1,4 @@
-// Stage V: primal update. AVBD_PRIMAL_LANES threads cooperate on one body: each assembles the 6x6 system of its share of the constraints in
+// Stage V: primal update. 2, 4 or 8 threads (AvbdPrimalLanes of the size of the color) cooperate on one body: each assembles the 6x6 system of its share of the constraints in
 // the body's list (lane 0 also adds the inertia term), the shares are added up in groupshared memory, and lane 0 solves the sum with an LDL^T
 // factorization and applies the Newton step (Eqs. 4-6). A body with many constraints (a contact-heavy body has dozens of entries) is then
 // walked by several threads instead of one, which is what bounds the time of a color when the colors are small.
@@ -278,20 +278,23 @@ void StorePartial(uint tid, PrimalSystem sys)
     }
 }
 
-// AVBD_PRIMAL_LANES threads solve one body. Lane l stamps the entries l, l + AVBD_PRIMAL_LANES, ... of the body's list into its own partial system;
-// the partial systems are added up in groupshared memory, and lane 0 solves the sum once and writes the pose. The lanes of a body are
-// adjacent threads of a group, so a group of AVBD_GROUP_SIZE threads solves AVBD_GROUP_SIZE / AVBD_PRIMAL_LANES bodies.
+// `lanes` threads solve one body (the same for every body of a color, so it is uniform in a dispatch). Lane l stamps the entries l, l + lanes, ... of
+// the body's list into its own partial system; the partial systems are added up in groupshared memory, and lane 0 solves the sum once and writes
+// the pose. The lanes of a body are adjacent threads of a group, so a group of AVBD_GROUP_SIZE threads solves AVBD_GROUP_SIZE / lanes bodies.
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 {
     // Item of the dispatch: body (entry of the color) times lanes, plus the lane. A big color is laid out in rows of AVBD_COLOR_ROW_GROUPS
     // groups (see AvbdColoringParams.hlsl). Every thread reaches the barriers below, so nothing returns early.
     uint item = id.y * (AVBD_COLOR_ROW_GROUPS * AVBD_GROUP_SIZE) + id.x;
-    uint index = item / AVBD_PRIMAL_LANES;
-    uint lane = item % AVBD_PRIMAL_LANES;
+    uint bodies = _ColorWork[AVBD_COLOR_COUNTS_OFFSET + _Color];
+    uint lanes = AvbdPrimalLanes(bodies); // the number ColorPlan sized this dispatch with: 2, 4 or 8
+    uint laneShift = firstbitlow(lanes);
+    uint index = item >> laneShift;
+    uint lane = item & (lanes - 1u);
     uint first = tid - lane; // the thread of lane 0 of this body
 
-    bool active = index < _ColorWork[AVBD_COLOR_COUNTS_OFFSET + _Color];
+    bool active = index < bodies;
     uint slot = 0u;
     float mass = 0.0;
     float4 momentMass = float4(0.0, 0.0, 0.0, 0.0);
@@ -339,7 +342,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
         // This lane's share of the constraints of the body.
         uint2 range = _BodyRange[slot].range.xy;
-        for (uint e = lane; e < range.y; e += AVBD_PRIMAL_LANES)
+        for (uint e = lane; e < range.y; e += lanes)
         {
             uint entry = _ConstraintList[range.x + e];
             if (entry & AVBD_LIST_CONTACT_FLAG)
@@ -364,14 +367,13 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     // Add up the partial systems of the body's lanes into lane 0's words, in lane order (so the sum does not depend on timing). Lane l adds
-    // the terms l, l + AVBD_PRIMAL_LANES, ...; a term is read and written by one lane only, so this needs no second copy.
+    // the terms l, l + lanes, ...; a term is read and written by one lane only, so this needs no second copy.
     if (active)
     {
-        for (uint t = lane; t < AVBD_PRIMAL_TERMS; t += AVBD_PRIMAL_LANES)
+        for (uint t = lane; t < AVBD_PRIMAL_TERMS; t += lanes)
         {
             float sum = 0.0;
-            [unroll]
-            for (uint l = 0; l < AVBD_PRIMAL_LANES; l++)
+            for (uint l = 0; l < lanes; l++)
                 sum += gsTerms[t * AVBD_GROUP_SIZE + first + l];
             gsTerms[t * AVBD_GROUP_SIZE + first] = sum;
         }

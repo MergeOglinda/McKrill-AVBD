@@ -132,22 +132,63 @@ namespace McKrill.Avbd.Tests
             }
         }
 
-        static void CheckGpuAgainstOracle(ReferenceSolver reference, string what)
+        // A chain of bodies, created in a random order so that the coloring takes few rounds, has three colors, of which the biggest holds more than a
+        // third of the bodies: with 12 000 links a color has the 4 lanes of a color of 4096 to 32767 bodies, with 100 000 the 2 lanes of 32768 and up.
+        // The lanes of a body share the work differently in each case (entries l, l + lanes, ... of the body's list, and the sums over the lanes).
+        [TestCase(12000, 4)]
+        [TestCase(100000, 2)]
+        public void Gpu_MatchesTheOracle_OnAChainWithColorsThatGetFewerLanes(int links, int lanes)
+        {
+            RequireCompute();
+            var rng = new System.Random(links);
+            var solver = new ReferenceSolver();
+            solver.Clear();
+
+            var order = new int[links];
+            for (int i = 0; i < links; i++)
+                order[i] = i;
+            for (int i = links - 1; i > 0; i--)
+            {
+                int j = rng.Next(i + 1);
+                (order[i], order[j]) = (order[j], order[i]);
+            }
+
+            var bodies = new AvbdBody[links];
+            for (int k = 0; k < links; k++)
+            {
+                int i = order[k]; // body k of the creation order is link i of the chain
+                float3 jitter = new float3((float)rng.NextDouble() - 0.5f, (float)rng.NextDouble() - 0.5f, (float)rng.NextDouble() - 0.5f) * 0.3f;
+                bodies[i] = solver.AddBody(new float3(1f), 1f, 0.5f, new float3(i * 2f, 0f, 0f) + jitter, float3.zero);
+            }
+            for (int i = 1; i < links; i++)
+                solver.AddJoint(bodies[i - 1], bodies[i], new float3(1f, 0f, 0f), new float3(-1f, 0f, 0f));
+            solver.AddJoint(null, bodies[0], new float3(0f, 0f, 0f), new float3(-1f, 0f, 0f)); // the end is pinned
+            ConstraintTestScenes.RandomizeJointState(solver, rng);
+
+            CheckGpuAgainstOracle(solver, links + " links", links + 16, links + 16, lanes);
+        }
+
+        // With expectedLanes above zero, also checks that the biggest color is of a size the primal sweep gives that many lanes per body. A scene of more than
+        // Capacity bodies needs its own capacities, and the reference solver's coloring order (the default order colors differently).
+        static void CheckGpuAgainstOracle(ReferenceSolver reference, string what, int capacity = Capacity, int constraintCapacity = 128, int expectedLanes = 0)
         {
             AvbdSolverSettings settings = ZUpSettings();
-            SceneArrays scene = ConstraintTestScenes.FromReference(reference, Capacity);
+            SceneArrays scene = ConstraintTestScenes.FromReference(reference, capacity);
 
             // Oracle: constraint warm start, predict, one primal sweep.
             CpuBodyArrays oracle = scene.bodies;
             CpuConstraintInit.Run(oracle, scene.constraints, scene.constraintCount, settings);
             ConstraintTopology expectedTopology = scene.BuildTopology();
 
-            using (var buffers = new AvbdBodyBuffers(Capacity))
-            using (var constraints = new AvbdConstraintBuffers(buffers, 128))
+            using (var buffers = new AvbdBodyBuffers(capacity))
+            using (var constraints = new AvbdConstraintBuffers(buffers, constraintCapacity))
             {
                 for (int i = 0; i < scene.descriptors.Count; i++)
                     Assert.AreEqual(i, buffers.Spawn(scene.descriptors[i]).Slot);
                 buffers.ApplyEdits();
+
+                if (expectedLanes > 0)
+                    constraints.ColoringOrder = GraphColoringOrder.SlotOrder;
 
                 // The initialized records go to the GPU as they are: the warm start kernel belongs to stage D.
                 for (int i = 0; i < scene.constraintCount; i++)
@@ -169,10 +210,18 @@ namespace McKrill.Avbd.Tests
                     CollectionAssert.AreEqual(expectedSlots, gpuSlots, what + ": bodies of color " + c);
                 }
 
-                var gpuRanges = new BodyRangeRecord[Capacity];
+                var gpuRanges = new BodyRangeRecord[capacity];
                 buffers.Range.GetData(gpuRanges);
                 for (int s = 0; s < scene.bodyCount; s++)
                     Assert.IsTrue(math.all(expectedTopology.Ranges[s].range == gpuRanges[s].range), what + ": range of slot " + s);
+
+                if (expectedLanes > 0)
+                {
+                    int largest = 0;
+                    for (int c = 0; c < constraints.ColorCount; c++)
+                        largest = Math.Max(largest, constraints.ColorSize(c));
+                    Assert.AreEqual(expectedLanes, AvbdGraphColoring.PrimalLanesFor(largest), what + ": the biggest color has " + largest + " bodies");
+                }
 
                 var solver = new AvbdSolver(buffers, settings, null, constraints);
                 solver.DispatchPredict();
@@ -183,7 +232,7 @@ namespace McKrill.Avbd.Tests
                 Assert.AreEqual(0, failures, what + ": the oracle must not fail a solve");
                 Assert.AreEqual(0, constraints.ReadSolveFailures(), what + ": GPU solve failures");
 
-                var state = new BodyStateRecord[Capacity];
+                var state = new BodyStateRecord[capacity];
                 buffers.State.GetData(state);
                 for (int s = 0; s < scene.bodyCount; s++)
                 {

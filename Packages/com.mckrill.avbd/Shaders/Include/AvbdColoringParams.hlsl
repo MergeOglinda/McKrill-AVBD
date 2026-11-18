@@ -27,13 +27,28 @@
 #define AVBD_COLOR_LANES 8u
 
 // Threads that solve one body in the primal sweep (they stamp its constraints in parallel and add up the partial systems in groupshared
-// memory). A power of two that divides AVBD_GROUP_SIZE, so the lanes of a body are in one group.
-#define AVBD_PRIMAL_LANES 8u
+// memory). The number depends on the size of the color (after three-avbd's lanesFor): a small color is as slow as the longest serial chain of
+// loads of its busiest body, so it gets the most lanes, and a big color fills the GPU anyway and would only pay for the reduction and for
+// groups of few bodies. AVBD_PRIMAL_LANES_MAX lanes up to AVBD_PRIMAL_LANES_FROM_4 - 1 bodies, 4 lanes from there, 2 lanes from
+// AVBD_PRIMAL_LANES_FROM_2 bodies. Never 1. Always a power of two that divides AVBD_GROUP_SIZE, so the lanes of a body are in one group.
+// ColorPlan sizes the dispatch with this function and the Primal kernel reads the same number from the size of its color.
+#define AVBD_PRIMAL_LANES_MAX    8u
+#define AVBD_PRIMAL_LANES_FROM_4 4096u
+#define AVBD_PRIMAL_LANES_FROM_2 32768u
+
+uint AvbdPrimalLanes(uint bodies)
+{
+    if (bodies >= AVBD_PRIMAL_LANES_FROM_2)
+        return 2u;
+    if (bodies >= AVBD_PRIMAL_LANES_FROM_4)
+        return 4u;
+    return AVBD_PRIMAL_LANES_MAX;
+}
 
 // Indirect dispatch arguments of the primal sweep: three words (groups x, y, z) per color, written by ColorPlan. The sweep has
-// AVBD_PRIMAL_LANES threads per body, so a color of n bodies is n * AVBD_PRIMAL_LANES items. A color of more than AVBD_COLOR_ROW_GROUPS thread
+// AvbdPrimalLanes(n) threads per body, so a color of n bodies is n * AvbdPrimalLanes(n) items. A color of more than AVBD_COLOR_ROW_GROUPS thread
 // groups is laid out in rows of that many groups (x = the row width, y = the number of rows), so the thread with SV_DispatchThreadID (x, y)
-// handles item y * AVBD_COLOR_ROW_GROUPS * AVBD_GROUP_SIZE + x, which is lane (item % AVBD_PRIMAL_LANES) of entry (item / AVBD_PRIMAL_LANES)
+// handles item y * AVBD_COLOR_ROW_GROUPS * AVBD_GROUP_SIZE + x, which is lane (item % lanes) of entry (item / lanes), with lanes = AvbdPrimalLanes(the size of the color)
 // of its color; the last row may overshoot.
 #define AVBD_COLOR_ARGS_STRIDE 12    // bytes per color
 #define AVBD_COLOR_ROW_GROUPS 65535u

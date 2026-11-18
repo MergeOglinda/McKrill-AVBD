@@ -14,7 +14,7 @@ Compared: `Packages/com.mckrill.avbd` (HLSL compute, Unity) against `three-avbd-
 | # | Difference | Better | Size of the effect |
 |---|---|---|---|
 | 1 | Graph coloring: carried over, async tuning (theirs) vs from scratch with a blocking readback each step (ours) | theirs | Large for CPU stalls, unmeasured for us |
-| 2 | Primal lanes per body: 1/2/4/8 chosen per color (theirs) vs a fixed 8 (ours) | theirs | −5% to −53% in their sweep |
+| 2 | Primal lanes per body: 1/2/4/8 chosen per color (theirs) vs a fixed 8 (ours) | theirs | −5% to −53% in their sweep. **Implemented on branch `per-color-primal-lanes`** (2/4/8, never 1) |
 | 3 | Contact storage: 32 B pair + 64 B points, pair-level adjacency (theirs) vs 160 B generic records, one per point, 8 slots per manifold (ours) | theirs | Their probe: +16 B per point cost 5–8%; ours is +96 B **Implemented on branch `compact-contacts`** |
 | 4 | Broadphase pair test: sphere + AABB + face axes (theirs) vs bounding sphere only (ours) | theirs | −15% on a brick ring, −2% to −5% on others. **Done in PR #32** |
 | 5 | Broadphase grid: counting-sort CSR, two levels (theirs) vs atomic linked list, one level (ours) | theirs, modestly | Their findPairs is about 1/3 of collision time |
@@ -42,7 +42,9 @@ Compared: `Packages/com.mckrill.avbd` (HLSL compute, Unity) against `three-avbd-
 
 Both designs use several threads per body, each stamping a share of the body's constraint list into a partial 6×6 system, summed in workgroup/groupshared memory, then one thread does the LDLᵀ solve. That part is the same idea (ours: `AvbdPrimal.compute`, `StorePartial`, sum in lane order; theirs: `primalColor` plus `finishBody`).
 
-The difference: ours is `AvbdGraphColoring.PrimalLanes = 8`, a compile-time constant for every color. Theirs picks 1/2/4/8 per color **on the GPU** from the color's size (`primalLanes` rule: never 1, 2 lanes from 32k bodies, 4 from 4k, else 8), and the args kernel sizes each color's dispatch the same way.
+**Status: implemented on branch `per-color-primal-lanes`** (8 lanes below 4096 bodies in a color, 4 from 4096, 2 from 32768, never 1; `AvbdPrimalLanes` in `AvbdColoringParams.hlsl`, mirrored by `AvbdGraphColoring.PrimalLanesFor`; both `ColorPlan` and `Primal` compute it from the size of the color, so the lane count is not stored anywhere). Not compiled, not run, not measured. The text below describes the situation before that change.
+
+The difference: ours was `AvbdGraphColoring.PrimalLanes = 8`, a compile-time constant for every color. Theirs picks 1/2/4/8 per color **on the GPU** from the color's size (`primalLanes` rule: never 1, 2 lanes from 32k bodies, 4 from 4k, else 8), and the args kernel sizes each color's dispatch the same way.
 
 Their sweep (against one lane): wall smash −53%, chain mail −15%, jointed drop 34k −35%, settled pile 32k −19%, ring 110k −14%, gables 506k −15%, but box columns 100k +4%. Against the previous commit on AC: ring −12.7%, jointed drop −16.5%, gables −5.2%, columns +8.2%.
 
@@ -132,7 +134,7 @@ They add features we do not have: sphere and convex-hull shapes, collision group
 
 1. ~~**Broadphase AABB and face-axis rejection** (section 4).~~ **Done in PR #32.** Small change, strongest evidence, no layout change.
 2. **Persistent colouring with asynchronous tuning** (section 1). Removes the per-step CPU stall; needs a test that starts with too small a cap. **Implemented on branch `persistent-coloring`, not yet measured.** The coloring is not three-avbd's: it uses a fixed number of Jones-Plassmann rounds and a one-group finish kernel, so the colors never depend on when the statistics arrive.
-3. **Per-color lane count** (section 2). Small shader and `ColorPlan` change; profile first on a large single-layer scene to see whether 8 lanes hurts.
+3. **Per-color lane count** (section 2). Small shader and `ColorPlan` change; profile first on a large single-layer scene to see whether 8 lanes hurts. **Implemented on branch `per-color-primal-lanes`, not yet measured.**
 4. **Compact contact point plus pair record** (section 3, which also gives 8–9). **Implemented on branch `compact-contacts`, not yet measured.** Largest change and largest expected effect on bandwidth.
 5. **Initial Morton slot order at batch spawn** (section 7), replacing the runtime sort for the cases where it was meant to help.
 6. **Contact reuse as an opt-in** (section 6).
