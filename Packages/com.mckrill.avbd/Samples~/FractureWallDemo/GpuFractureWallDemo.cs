@@ -115,6 +115,7 @@ namespace McKrill.Avbd.Samples
         const float WallSpacing = 4f; // meters between the walls (from the middle of one to the middle of the next, along z)
         const float GroundHalfExtent = 100f;
         const float BlockGap = 0.01f; // between neighbors; the wall starts almost at rest
+        const bool zCurveOrder = true;
 
         AvbdBodyBuffers bodies;
         AvbdConstraintBuffers constraints;
