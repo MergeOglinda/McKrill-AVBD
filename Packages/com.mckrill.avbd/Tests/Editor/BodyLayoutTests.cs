@@ -135,6 +135,7 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(BodyFlagLayout.FlagsMask, d["AVBD_BODY_FLAGS_MASK"]);
             Assert.AreEqual((uint)BodyFlagLayout.KindShift, d["AVBD_BODY_KIND_SHIFT"]);
             Assert.AreEqual((uint)ShapeKind.Box, d["AVBD_KIND_BOX"]);
+            Assert.AreEqual((uint)ShapeKind.Sphere, d["AVBD_KIND_SPHERE"]);
 
             Assert.AreEqual((uint)EditKind.Spawn, d["AVBD_EDIT_SPAWN"]);
             Assert.AreEqual((uint)EditKind.Remove, d["AVBD_EDIT_REMOVE"]);
@@ -342,6 +343,12 @@ namespace McKrill.Avbd.Tests
             string text = ReadInclude("AvbdContacts.hlsl");
             Assert.AreEqual(ContactLayout.CollisionMargin, ReadFloatDefine(text, "AVBD_COLLISION_MARGIN"));
             Assert.AreEqual(ContactLayout.StickThreshold, ReadFloatDefine(text, "AVBD_STICK_THRESHOLD"));
+
+            // The feature key of a sphere contact is written as (3 << 24) in the HLSL: the top byte holds 3, the box keys use 0 to 2 there.
+            var m = System.Text.RegularExpressions.Regex.Match(text, @"#define\s+AVBD_SPHERE_FEATURE\s+\((\d+)\s*<<\s*(\d+)\)");
+            Assert.IsTrue(m.Success, "define AVBD_SPHERE_FEATURE not found as (a << b)");
+            Assert.AreEqual(ContactLayout.SphereFeature, int.Parse(m.Groups[1].Value) << int.Parse(m.Groups[2].Value));
+            Assert.AreEqual(3, ContactLayout.SphereFeature >> 24, "the box feature keys use the values 0 to 2 in the top byte");
         }
 
         [Test]

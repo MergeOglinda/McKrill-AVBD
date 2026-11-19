@@ -156,6 +156,13 @@ namespace McKrill.Avbd
         /// <summary>A contact sticks if its tangential constraint value is below this after the dual update.</summary>
         public const float StickThreshold = 0.00001f;
 
+        /// <summary>
+        /// Mirrors AVBD_SPHERE_FEATURE: the feature key of every contact that involves a sphere (one point per pair). The key sits in the top byte; the
+        /// box keys use 0 to 2 there (the axis type). A contact with this key keeps no anchors when it sticks, and the primal and dual stages take its
+        /// lever arms at the rotation of the start of the step, because a rolling sphere's contact point moves over its surface.
+        /// </summary>
+        public const int SphereFeature = 3 << 24;
+
         /// <summary>Mirrors AVBD_NP_FREE_TOP: the free-slot count in the pool's control buffer.</summary>
         public const int PoolFreeTopWord = 0;
 

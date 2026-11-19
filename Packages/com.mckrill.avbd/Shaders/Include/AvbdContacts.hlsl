@@ -13,6 +13,10 @@
 #define AVBD_COLLISION_MARGIN  0.01
 #define AVBD_STICK_THRESHOLD   0.00001
 
+// The feature key of every contact that involves a sphere: the top byte is 3 (the box keys use 0 to 2 there). Mirrors ContactLayout.SphereFeature.
+// Such a contact keeps no anchors when it sticks, and the primal and dual stages take its lever arms at the rotation of the start of the step.
+#define AVBD_SPHERE_FEATURE    (3 << 24)
+
 // Words of the manifold pool's control buffer (_NpControl).
 #define AVBD_NP_FREE_TOP      0 // number of free slots: the top of the stack of free slots
 #define AVBD_NP_OVERFLOW      1 // candidate pairs dropped because no slot was free, since the buffer was made

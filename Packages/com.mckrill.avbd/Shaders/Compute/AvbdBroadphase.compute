@@ -1,7 +1,7 @@
 // Stage B: broadphase. Finds the pairs of bodies whose bounding spheres overlap, with a two-level counting-sort grid like three-avbd's, and drops
 // the ones whose boxes are visibly apart.
 //
-// A body's bounding sphere is centered on its position and has the radius |size| / 2 (half the box diagonal), which is what the
+// A body's bounding sphere is centered on its position and has the radius |size| / 2 (half the box diagonal; for a sphere body its radius), which is what the
 // reference solver's broadphase uses: two bodies are a pair when |dp|^2 <= (rA + rB)^2 and no constraint joins them.
 // The bounding spheres of boxes overlap far more often than the boxes do (a long bar and its neighbor, a ground slab under everything), and
 // every such candidate costs a manifold lookup and a full collision test in the narrow phase, again every step. So a candidate that passes
@@ -109,9 +109,13 @@ uint Classify(uint slot)
     return CLASS_STATIC;
 }
 
+// The radius of the bounding sphere: half the diagonal of a box, the radius of a sphere (half of its diameter, which is in size.x).
 float Radius(uint slot)
 {
-    return length(_BodyShape[slot].sizeFriction.xyz * 0.5);
+    float3 size = _BodyShape[slot].sizeFriction.xyz;
+    if (AvbdBodyKind(_BodyMeta[slot].ident.x) == AVBD_KIND_SPHERE)
+        return size.x * 0.5;
+    return length(size * 0.5);
 }
 
 // The radius bin of a radius: AVBD_BP_BINS_PER_OCTAVE bins per doubling, centered on 1 m.
@@ -211,9 +215,13 @@ BpBox MakeBpBox(uint slot)
     BpBox box;
     box.center = state.position.xyz;
     box.halfSize = _BodyShape[slot].sizeFriction.xyz * 0.5;
-    box.axis0 = AvbdQuatRotate(state.rotation, float3(1.0, 0.0, 0.0));
-    box.axis1 = AvbdQuatRotate(state.rotation, float3(0.0, 1.0, 0.0));
-    box.axis2 = AvbdQuatRotate(state.rotation, float3(0.0, 0.0, 1.0));
+    // A sphere is tested as the cube around it, along the world axes (its rotation changes nothing): its bounding box and its "face axes" are then
+    // exact for the world axes and a little too wide for the others, so a sphere is never rejected wrongly.
+    bool sphere = AvbdBodyKind(_BodyMeta[slot].ident.x) == AVBD_KIND_SPHERE;
+    float4 rotation = sphere ? float4(0.0, 0.0, 0.0, 1.0) : state.rotation;
+    box.axis0 = AvbdQuatRotate(rotation, float3(1.0, 0.0, 0.0));
+    box.axis1 = AvbdQuatRotate(rotation, float3(0.0, 1.0, 0.0));
+    box.axis2 = AvbdQuatRotate(rotation, float3(0.0, 0.0, 1.0));
     box.aabb = abs(box.axis0) * box.halfSize.x + abs(box.axis1) * box.halfSize.y + abs(box.axis2) * box.halfSize.z;
     return box;
 }

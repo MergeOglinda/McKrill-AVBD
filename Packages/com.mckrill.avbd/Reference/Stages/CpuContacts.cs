@@ -109,7 +109,7 @@ namespace McKrill.Avbd.Reference
                     return;
                 }
                 float3 dp = posA - posB;
-                float r = math.length(shapeA.xyz * 0.5f) + math.length(shapeB.xyz * 0.5f);
+                float r = CpuBroadphase.Radius(bodies, a) + CpuBroadphase.Radius(bodies, b);
                 if (!(math.dot(dp, dp) <= r * r))
                 {
                     PairCounts[pair] = 0;
@@ -126,7 +126,11 @@ namespace McKrill.Avbd.Reference
 
             Array.Clear(scratch, 0, scratch.Length);
             float3x3 basis = float3x3.identity;
-            int count = BoxCollision.Collide(bodyA, bodyB, scratch, ref basis);
+            bool sphereA = CpuBroadphase.IsSphere(bodies, a);
+            bool sphereB = CpuBroadphase.IsSphere(bodies, b);
+            int count = sphereA || sphereB
+                ? CpuSphereCollision.Collide(sphereA, sphereB, bodyA, bodyB, scratch, ref basis)
+                : BoxCollision.Collide(bodyA, bodyB, scratch, ref basis);
             if (count == 0)
             {
                 PairCounts[pair] = 0;
@@ -156,7 +160,8 @@ namespace McKrill.Avbd.Reference
                     penalty = old[j].penaltyLin.xyz;
                     lambda = old[j].lambdaLin.xyz;
                     stick = (old[j].ident.z & (uint)ConstraintFlags.Stick) != 0u;
-                    if (stick)
+                    // Not for a sphere: its contact point moves over the surfaces as it rolls (see the shader's AvbdInitContacts).
+                    if (stick && scratch[i].featureKey != ContactLayout.SphereFeature)
                     {
                         rA = old[j].anchorA.xyz;
                         rB = old[j].anchorB.xyz;
@@ -243,6 +248,7 @@ namespace McKrill.Avbd.Reference
         {
             var e = new Eval();
             float3x3 basis = Basis(c.c0Ang.xyz);
+            // The lever arms are taken at the rotations given (the current ones; EvaluateAt passes the start-of-step ones for a sphere contact).
             float3 rAWorld = AvbdQuat.Rotate(rotA, c.anchorA.xyz);
             float3 rBWorld = AvbdQuat.Rotate(rotB, c.anchorB.xyz);
 
@@ -276,8 +282,13 @@ namespace McKrill.Avbd.Reference
         {
             BodyStateRecord a = bodies.State[c.ident.x];
             BodyStateRecord b = bodies.State[c.ident.y];
+            // A sphere contact takes its lever arms at the rotation of the start of the step (three-avbd): a rolling sphere turns about 0.1 rad per step,
+            // and a lever arm that turned with it would put a false separation into the normal row. The angular displacement is still measured from the start.
+            bool sphere = (int)c.ident.w == ContactLayout.SphereFeature;
+            quaternion leverA = sphere ? new quaternion(a.startRotation) : rotA;
+            quaternion leverB = sphere ? new quaternion(b.startRotation) : rotB;
             return Evaluate(
-                c, rotA, rotB,
+                c, leverA, leverB,
                 posA - a.startPosition.xyz, AvbdQuat.DifferenceRaw(rotA, new quaternion(a.startRotation)),
                 posB - b.startPosition.xyz, AvbdQuat.DifferenceRaw(rotB, new quaternion(b.startRotation)), alpha);
         }
