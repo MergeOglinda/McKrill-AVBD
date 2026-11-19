@@ -216,14 +216,22 @@ void DualContact(uint3 id : SV_DispatchThreadID)
 
     uint stick = pair.ident.w;
     uint first = slot * AVBD_MAX_CONTACTS;
+
+    // Lever arms of a sphere contact at the rotation of the start of the step, as in the primal stage, decided once per manifold (see StampManifold).
+    float4 leverRotA = stateA.rotation;
+    float4 leverRotB = stateB.rotation;
+    if (ContactPointKey(_ContactPoints[first]) == AVBD_SPHERE_FEATURE)
+    {
+        leverRotA = stateA.startRotation;
+        leverRotB = stateB.startRotation;
+    }
+
     for (uint k = 0; k < count; k++)
     {
         ContactPointRecord p = _ContactPoints[first + k];
         float3 penalty = ContactPointPenalty(p);
-        bool sphere = ContactPointKey(p) == AVBD_SPHERE_FEATURE; // lever arms at the start-of-step rotation, as in the primal stage
         AvbdContactEval e = AvbdEvaluateContactInBasis(
-            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz,
-            sphere ? stateA.startRotation : stateA.rotation, sphere ? stateB.startRotation : stateB.rotation,
+            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, leverRotA, leverRotB,
             dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
         AvbdContactDualResult r = AvbdContactDual(e, penalty, (stick & (1u << k)) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
 
