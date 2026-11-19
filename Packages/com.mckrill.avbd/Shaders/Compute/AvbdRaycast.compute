@@ -1,0 +1,69 @@
+// Ray against every body's box, on the GPU. The nearest hit distance is kept as the bits of a float in a one-element uint buffer: for floats
+// from 0 up the bits sort like the values, so InterlockedMin finds the nearest hit without a sort. Used by AvbdRaycaster.
+
+#pragma kernel Clear
+#pragma kernel Cast
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
+
+StructuredBuffer<BodyStateRecord> _BodyState;
+StructuredBuffer<BodyShapeRecord> _BodyShape;
+StructuredBuffer<BodyMetaRecord>  _BodyMeta;
+
+RWStructuredBuffer<uint> _RayHit; // [0]: the bits of the nearest hit distance, or of the maximum distance if nothing was hit
+
+float4 _RayOrigin;    // xyz: origin, w: the farthest distance that counts
+float4 _RayDirection; // xyz: unit direction
+
+uint _Base;
+uint _Count; // slots to process: [0, _Count)
+
+[numthreads(1, 1, 1)]
+void Clear(uint3 id : SV_DispatchThreadID)
+{
+    _RayHit[0] = asuint(_RayOrigin.w);
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Cast(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    if (_BodyMeta[slot].ident.x & AVBD_BODY_FLAG_FREE)
+        return;
+
+    // The ray in the box's frame, where the box is axis-aligned and centered at the origin: the slab method.
+    BodyStateRecord s = _BodyState[slot];
+    float4 inverse = AvbdQuatConjugate(s.rotation);
+    float3 o = AvbdQuatRotate(inverse, _RayOrigin.xyz - s.position.xyz);
+    float3 d = AvbdQuatRotate(inverse, _RayDirection.xyz);
+    float3 halfSize = _BodyShape[slot].sizeFriction.xyz * 0.5;
+
+    float tNear = -1e30;
+    float tFar = 1e30;
+    [unroll]
+    for (int axis = 0; axis < 3; axis++)
+    {
+        if (abs(d[axis]) < 1e-8)
+        {
+            if (abs(o[axis]) > halfSize[axis])
+                return; // parallel to the slab and outside it
+            continue;
+        }
+        float t1 = (-halfSize[axis] - o[axis]) / d[axis];
+        float t2 = (halfSize[axis] - o[axis]) / d[axis];
+        tNear = max(tNear, min(t1, t2));
+        tFar = min(tFar, max(t1, t2));
+    }
+
+    if (tNear > tFar || tFar < 0.0)
+        return; // misses, or the box is behind the ray
+
+    float t = max(tNear, 0.0); // a ray that starts inside the box hits it at 0
+    if (t < _RayOrigin.w)
+        InterlockedMin(_RayHit[0], asuint(t));
+}
