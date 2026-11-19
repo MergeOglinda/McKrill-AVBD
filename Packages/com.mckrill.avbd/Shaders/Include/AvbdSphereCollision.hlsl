@@ -64,16 +64,15 @@ int AvbdCollideSphereBox(bool sphereIsA, float3 posA, float4 rotA, float3 sizeA,
     {
         // The center is inside the box: out through the face of least penetration.
         float3 depth = boxHalf - abs(p);
-        int k = 0;
-        if (depth.y < depth[k])
-            k = 1;
-        if (depth.z < depth[k])
-            k = 2;
-        float s = p[k] >= 0.0 ? 1.0 : -1.0;
-        // No dynamic index on the left of an assignment: a vector component is not addressable on every backend (DX12 refuses it).
-        float3 axis = float3(k == 0 ? 1.0 : 0.0, k == 1 ? 1.0 : 0.0, k == 2 ? 1.0 : 0.0);
+        // The axis of the least depth, the lower axis on a tie (x, then y if it is less deep than x, then z if it is less deep than both). One-hot
+        // vector and dot products instead of a runtime index: a vector indexed by a variable becomes a local array on some backends (and DX12 refuses
+        // it on the left of an assignment), which can cost occupancy in the whole kernel.
+        bool yBeatsX = depth.y < depth.x;
+        bool zBeatsBest = depth.z < (yBeatsX ? depth.y : depth.x);
+        float3 axis = zBeatsBest ? float3(0.0, 0.0, 1.0) : (yBeatsX ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0));
+        float s = dot(p, axis) >= 0.0 ? 1.0 : -1.0;
         nLocal = axis * s;
-        onBoxLocal = onBoxLocal * (float3(1.0, 1.0, 1.0) - axis) + axis * (s * boxHalf[k]);
+        onBoxLocal = onBoxLocal * (float3(1.0, 1.0, 1.0) - axis) + axis * (s * dot(boxHalf, axis));
     }
 
     float3 n = AvbdQuatRotate(boxRotation, nLocal);        // from the box toward the sphere
