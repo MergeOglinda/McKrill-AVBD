@@ -20,6 +20,8 @@ namespace McKrill.Avbd
         AvbdBroadphase broadphase;
         readonly int predictKernel;
         readonly int predictExplosionsKernel;
+        readonly int predictForcesKernel;
+        readonly int predictForcesExplosionsKernel;
         readonly int primalKernel;
         readonly int initKernel;
         readonly int dualKernel;
@@ -57,6 +59,8 @@ namespace McKrill.Avbd
         static readonly int DirtySlotsId = Shader.PropertyToID("_DirtySlots");
         static readonly int ExplosionsId = Shader.PropertyToID("_Explosions");
         static readonly int ExplosionCountId = Shader.PropertyToID("_ExplosionCount");
+        static readonly int ForceFieldsId = Shader.PropertyToID("_ForceFields");
+        static readonly int ForceFieldCountId = Shader.PropertyToID("_ForceFieldCount");
 
         /// <summary>Most explosions one <see cref="Step"/> applies (<see cref="Explode"/> returns false for more). Mirrors AVBD_MAX_EXPLOSIONS in AvbdExplosions.hlsl.</summary>
         public const int MaxExplosionsPerStep = 16;
@@ -66,6 +70,18 @@ namespace McKrill.Avbd
         int pendingExplosionCount;
         uint explosionSeed;
         GraphicsBuffer explosionBuffer;
+
+        /// <summary>Most force fields a solver holds at once (<see cref="AddForceField"/> returns an invalid handle for more). Mirrors AVBD_MAX_FORCE_FIELDS in AvbdForceFields.hlsl.</summary>
+        public const int MaxForceFields = 16;
+
+        // The force fields: a small table, kept here and uploaded when it changes (made at the first use; 16 records of 64 B). An empty slot has kind 0.
+        readonly ForceFieldRecord[] forceFieldRecords = new ForceFieldRecord[MaxForceFields];
+        readonly uint[] forceFieldGenerations = new uint[MaxForceFields];
+        readonly bool[] forceFieldUsed = new bool[MaxForceFields];
+        int forceFieldCount;     // fields in use
+        int forceFieldSlots;     // one past the last slot in use: what the shader loops over
+        bool forceFieldsDirty;
+        GraphicsBuffer forceFieldBuffer;
 
         /// <param name="constraints">Joints and springs, or null for a solver of free bodies only.</param>
         public AvbdSolver(AvbdBodyBuffers bodies, AvbdSolverSettings settings, AvbdShaderSet shaderSet = null, AvbdConstraintBuffers constraints = null)
@@ -83,6 +99,8 @@ namespace McKrill.Avbd
 
             predictKernel = shaders.Predict.FindKernel("Predict");
             predictExplosionsKernel = shaders.Predict.FindKernel("PredictExplosions");
+            predictForcesKernel = shaders.Predict.FindKernel("PredictForces");
+            predictForcesExplosionsKernel = shaders.Predict.FindKernel("PredictForcesExplosions");
 
             if (shaders.Primal == null)
                 throw new System.InvalidOperationException("The AvbdShaderSet has no primal shader.");
@@ -199,6 +217,75 @@ namespace McKrill.Avbd
             return true;
         }
 
+        /// <summary>
+        /// Adds a force that acts on a group of bodies in every <see cref="Step"/> from now on, until it is removed: stage P adds its acceleration to the
+        /// inertial target (the same place as gravity), so contacts and joints resist it like gravity. The group is the bodies whose group mask has a bit
+        /// in common with the mask of the field; the label is the group mask that every body already has, so no per-body data is added. A body in
+        /// several groups gets the sum of their fields. Examples: <c>AddForceField(ForceFieldDescriptor.Wing(wings, up, area))</c> gives lift to the blocks
+        /// labelled <c>wings</c> only; <c>ForceFieldDescriptor.GravityScale(light, 0.3f)</c> makes the bodies labelled <c>light</c> fall slowly.
+        /// Static and kinematic bodies are never moved. A step without fields runs the plain predict kernel.
+        /// </summary>
+        /// <returns>The handle of the field, or <see cref="ForceFieldHandle.Invalid"/> if <see cref="MaxForceFields"/> fields exist already.</returns>
+        /// <exception cref="System.ArgumentException">A value is not valid for the kind of the field (see <see cref="ForceFieldDescriptor"/>).</exception>
+        public ForceFieldHandle AddForceField(in ForceFieldDescriptor field)
+        {
+            field.Validate();
+            for (int slot = 0; slot < MaxForceFields; slot++)
+            {
+                if (forceFieldUsed[slot])
+                    continue;
+
+                forceFieldUsed[slot] = true;
+                forceFieldGenerations[slot]++;
+                forceFieldRecords[slot] = field.ToRecord();
+                forceFieldCount++;
+                forceFieldSlots = System.Math.Max(forceFieldSlots, slot + 1);
+                forceFieldsDirty = true;
+                return new ForceFieldHandle(slot, forceFieldGenerations[slot]);
+            }
+            return ForceFieldHandle.Invalid;
+        }
+
+        /// <summary>Replaces what a field does (its kind may change too), for example to change a thrust or a gravity scale while it runs. The new values apply from the next step.</summary>
+        /// <returns>False if the handle is stale or invalid.</returns>
+        /// <exception cref="System.ArgumentException">A value is not valid for the kind of the field.</exception>
+        public bool UpdateForceField(ForceFieldHandle handle, in ForceFieldDescriptor field)
+        {
+            field.Validate();
+            if (!IsForceFieldAlive(handle))
+                return false;
+
+            forceFieldRecords[handle.Slot] = field.ToRecord();
+            forceFieldsDirty = true;
+            return true;
+        }
+
+        /// <summary>Removes a force field. Its slot can be given to a new field; the old handle stays stale.</summary>
+        /// <returns>False if the handle is stale or invalid.</returns>
+        public bool RemoveForceField(ForceFieldHandle handle)
+        {
+            if (!IsForceFieldAlive(handle))
+                return false;
+
+            int slot = handle.Slot;
+            forceFieldUsed[slot] = false;
+            forceFieldRecords[slot] = default;
+            forceFieldCount--;
+            while (forceFieldSlots > 0 && !forceFieldUsed[forceFieldSlots - 1])
+                forceFieldSlots--;
+            forceFieldsDirty = true;
+            return true;
+        }
+
+        /// <summary>True if the handle is of a force field that has not been removed.</summary>
+        public bool IsForceFieldAlive(ForceFieldHandle handle)
+        {
+            return handle.IsValid && handle.Slot < MaxForceFields && forceFieldUsed[handle.Slot] && forceFieldGenerations[handle.Slot] == handle.Generation;
+        }
+
+        /// <summary>Number of force fields in use.</summary>
+        public int ForceFieldCount => forceFieldCount;
+
         /// <summary>Number of explosions queued for the next <see cref="Step"/>.</summary>
         public int PendingExplosionCount => pendingExplosionCount;
 
@@ -241,22 +328,43 @@ namespace McKrill.Avbd
             explosionBuffer?.Release();
             explosionBuffer = null;
             pendingExplosionCount = 0;
+            forceFieldBuffer?.Release();
+            forceFieldBuffer = null;
             if (ownsConstraints)
                 constraints.Dispose();
             constraints = null;
             ownsConstraints = false;
         }
 
-        // Stage P over every slot that has ever been used. With explosions queued it runs the variant that applies them first, and the queue is emptied.
+        // Stage P over every slot that has ever been used. With explosions queued it runs the variant that applies them first, and the queue is emptied. With
+        // force fields it runs the variant that adds their acceleration.
         internal void DispatchPredict()
         {
             ComputeShader shader = shaders.Predict;
             SolverUniforms.Bind(shader, settings);
 
-            int kernel = predictKernel;
-            if (pendingExplosionCount > 0)
+            bool forces = forceFieldCount > 0;
+            bool blasts = pendingExplosionCount > 0;
+            int kernel = forces ? (blasts ? predictForcesExplosionsKernel : predictForcesKernel) : (blasts ? predictExplosionsKernel : predictKernel);
+
+            if (forces)
             {
-                kernel = predictExplosionsKernel;
+                if (forceFieldBuffer == null)
+                {
+                    forceFieldBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, MaxForceFields, Unity.Collections.LowLevel.Unsafe.UnsafeUtility.SizeOf<ForceFieldRecord>());
+                    forceFieldsDirty = true;
+                }
+                if (forceFieldsDirty)
+                {
+                    forceFieldBuffer.SetData(forceFieldRecords);
+                    forceFieldsDirty = false;
+                }
+                shader.SetBuffer(kernel, ForceFieldsId, forceFieldBuffer);
+                shader.SetInt(ForceFieldCountId, forceFieldSlots);
+            }
+
+            if (blasts)
+            {
                 if (explosionBuffer == null)
                     explosionBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, MaxExplosionsPerStep, Unity.Collections.LowLevel.Unsafe.UnsafeUtility.SizeOf<ExplosionRecord>());
                 explosionBuffer.SetData(pendingExplosions, 0, 0, pendingExplosionCount);

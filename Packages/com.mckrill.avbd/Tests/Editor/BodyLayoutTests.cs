@@ -237,6 +237,21 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void ForceFieldRecord_HasTheDocumentedSize_AndMatchesTheHlslStruct()
+        {
+            Assert.AreEqual(64, UnsafeUtility.SizeOf<ForceFieldRecord>());
+            Dictionary<string, uint> d = ReadDefines("AvbdForceFields.hlsl");
+            Assert.AreEqual((uint)AvbdSolver.MaxForceFields, d["AVBD_MAX_FORCE_FIELDS"]);
+            Assert.AreEqual(0u, d["AVBD_FORCE_NONE"]);
+            Assert.AreEqual((uint)ForceKind.Constant, d["AVBD_FORCE_CONSTANT"]);
+            Assert.AreEqual((uint)ForceKind.GravityScale, d["AVBD_FORCE_GRAVITY_SCALE"]);
+            Assert.AreEqual((uint)ForceKind.Drag, d["AVBD_FORCE_DRAG"]);
+            Assert.AreEqual((uint)ForceKind.Wing, d["AVBD_FORCE_WING"]);
+            Assert.AreEqual((uint)ForceSpace.Body, d["AVBD_FORCE_FLAG_BODY_SPACE"]);
+            AssertStructMatches(ReadInclude("AvbdForceFields.hlsl"), "ForceFieldRecord", typeof(ForceFieldRecord));
+        }
+
+        [Test]
         public void PlasticRecord_HasTheDocumentedSize_AndMatchesTheHlslStruct()
         {
             Assert.AreEqual(PlasticRecordStrides.Plastic, UnsafeUtility.SizeOf<PlasticRecord>());

@@ -319,6 +319,23 @@ The random offset is a PCG hash of `(slot, seed)` with 23-bit integers scaled by
 
 The oracle is `CpuExplosionMath` (called by `CpuPredict.Run`). `PredictTests` checks the arithmetic (impulse over mass, falloff, no upward bias, spin, a body at the center, static and kinematic bodies, an empty queue) and the GPU kernel against the oracle on random bodies, and that an explosion is one-shot.
 
+#### Force fields
+
+`AvbdSolver.AddForceField(in ForceFieldDescriptor)` adds a force that acts on a group of bodies in every step until `RemoveForceField` (`UpdateForceField` changes it, for a thrust or a gravity scale that changes while it runs). At most 16 (`AvbdSolver.MaxForceFields`); a full table returns an invalid handle.
+
+*The label is the group mask.* A body belongs to a group through its group mask (the meta record's `ident.y`, `BodyDescriptor.groupMask`, `AvbdBodyBuffers.SetGroupMask`). It is already in every body and nothing else reads it, so labelling bodies adds no per-body data. A field targets the bodies whose group mask has a bit in common with the field's mask, so 32 groups are available and a body can be in several (it gets the sum of their fields). A new body has all bits set and is therefore in every group: give the bodies the masks of their groups (for an airplane, say 1 for the blocks of the wings and 2 for the rest, and a wing field with the mask 1). The field table is the only GPU memory added: 16 records of 64 B (`ForceFieldRecord`, only `float4` and `uint4` members), created when the first field is added and uploaded when the table changes.
+
+*The kernel.* A step with fields runs the `PredictForces` kernel (`PredictForcesExplosions` with explosions queued too, which apply first, so the fields see the velocity they left), a variant of the predict kernel compiled with `AVBD_FORCES`. A step without fields runs the plain kernel and is bit-identical to before. One thread per body loops over the table (up to its last used slot), skips empty slots and fields of other groups, adds up the acceleration of the fields and adds `a dt^2` to the inertial target, the place of gravity (Eq. 2), so contacts and joints resist it like gravity. The warm start does not include it: the adaptive weight reads the acceleration of the last step from the velocity change, so a body held up by lift has no gravity in its warm start. Static and kinematic bodies are skipped like in the rest of stage P.
+
+| Kind | Acceleration |
+| --- | --- |
+| Constant | `F / m`, with the force F in N in the world's frame or the body's. It acts on each body of the group (it is not a total shared among them) |
+| GravityScale | `g (s - 1)`, so that gravity plus the field is `s g`: 0 is weightless, 1 changes nothing, negative falls up. Uses the solver's gravity |
+| Drag | `F / m` with `F = -(c1 + c2 \|v\|) v` for the velocity `v` of the body relative to the wind. The acceleration is limited to `\|v\| / dt`, so one step cannot reverse the relative velocity |
+| Wing | a flat plate of area S with normal `n` in the body's frame, density of air `rho`, at relative velocity `v` with direction `vhat` and `q = 0.5 rho S \|v\|^2`: `F = -q (k (vhat . n) n + cd0 vhat)` with the lift slope `k` and the drag `cd0` at no angle of attack. The part across the flow is lift and the induced drag comes from the same term; the same limit as drag applies. There is no stall: the force keeps growing with the sine of the angle of attack |
+
+*Limits.* Forces act at the center of mass, so there is no torque from a field: a plane turns because its wing blocks sit away from the center of gravity of the plane and are joined to it. Forces are explicit in the velocity at the start of the step, which is why drag and wing are limited. The oracle is `CpuForceFieldMath` (called by `CpuPredict.Run`). `ForceFieldTests` checks each kind against numbers worked out by hand, the groups (also static and kinematic bodies, and bodies in several groups), and the GPU kernel against the oracle on random bodies with all kinds, an update, a removal and explosions in the same step.
+
 The oracle is `CpuPredict`. With zero iterations the reference solver runs exactly this phase, so `PredictTests` compares the oracle against `ReferenceSolver` directly, and then the GPU kernel against the oracle.
 
 ### Stage V: primal update
