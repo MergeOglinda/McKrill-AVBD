@@ -9,8 +9,8 @@ Python 3 standard library only.
 
 Columns: test, group, unit, kind, baseline/candidate status, then for the median, average, sum, min, max, standard deviation and sample count the value in
 each run, and delta_median / delta_median_pct / delta_avg_pct (candidate minus baseline, in the baseline's unit), and a verdict.
-On the console, every time group whose median moved by more than the threshold is listed, and so is every time group whose sum (baseline_sum to
-candidate_sum) moved by more than the threshold, with the difference in the group's unit; the sum depends on the number of samples, so a different
+On the console, every time group whose median moved by more than the threshold is listed, and so is every time group with more than one sample whose
+sum (baseline_sum to candidate_sum) moved by more than the threshold, with the difference in the group's unit; the sum depends on the number of samples, so a different
 count is shown next to it.
 
 Verdict: 'better' or 'worse' when the median moved by more than --threshold percent (the direction follows the group's IncreaseIsBetter flag), 'same'
@@ -160,8 +160,9 @@ def main():
         if r["verdict"] in ("better", "worse"):
             print("  %-8s %+7.1f%%  %s  (median %.2f -> %.2f %s)" % (r["verdict"], r["delta_median_pct"], name,
                                                                   r["baseline_median"], r["candidate_median"], r["unit"]))
-        # The sum of the samples, when it moved by more than the threshold too. It depends on the number of samples, which is shown when it differs.
-        if abs(r.get("delta_sum_pct", 0.0)) > args.threshold:
+        # The sum of the samples, when it moved by more than the threshold too. A group with a single sample (in either run) has a sum equal to its
+        # median, so it is left out. The sum depends on the number of samples, which is shown when it differs.
+        if abs(r.get("delta_sum_pct", 0.0)) > args.threshold and r["baseline_samples"] > 1 and r["candidate_samples"] > 1:
             samples = "" if r["baseline_samples"] == r["candidate_samples"] else ", samples %d vs %d" % (r["baseline_samples"], r["candidate_samples"])
             print("  sum %-4s %+7.1f%%  %s  (sum %.2f -> %.2f %s, difference %+.2f %s%s)" % (
                 r["sum_verdict"], r["delta_sum_pct"], name, r["baseline_sum"], r["candidate_sum"], r["unit"], r["delta_sum"], r["unit"], samples))

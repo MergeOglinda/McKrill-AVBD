@@ -15,6 +15,6 @@ Per row: the median, average, sum, min, max, standard deviation and number of sa
 - Counters without a unit (bodies, joints, manifold slots, overflow) are `same` or `changed`.
 - `only in baseline` / `only in candidate`: the test or group is missing from one run.
 
-The console lists the time groups whose median moved by more than the threshold, and, on separate `sum` lines, those whose sum of the samples moved by more than the threshold (with the difference in the group's unit). The sum depends on the number of samples, so the console shows the sample counts when they differ.
+The console lists the time groups whose median moved by more than the threshold, and, on separate `sum` lines, those with more than one sample (in both runs) whose sum of the samples moved by more than the threshold (with the difference in the group's unit). The sum depends on the number of samples, so the console shows the sample counts when they differ.
 
 Units that differ between the runs are converted to the baseline's unit. A group with a single sample (`Build scene`, `Step, first`) is noisy; look at the sampled groups first.
