@@ -30,7 +30,7 @@ namespace McKrill.Avbd.Reference
                     float3 explodedLinear = v.linearVel.xyz;
                     float3 explodedPrev = v.prevLinearVel.xyz;
                     float3 explodedAngular = v.angularVel.xyz;
-                    if (CpuExplosionMath.Apply((uint)slot, bodies.Mass[slot].momentMass.w, bodies.Mass[slot].momentMass.xyz, bodies.Shape[slot].sizeFriction.xyz,
+                    if (CpuExplosionMath.Apply((uint)slot, bodies.Mass[slot].momentMass.w, bodies.Meta[slot].ident.y, bodies.Mass[slot].momentMass.xyz, bodies.Shape[slot].sizeFriction.xyz,
                             new quaternion(s.rotation), position, explosions, explosionCount, ref explodedLinear, ref explodedPrev, ref explodedAngular))
                     {
                         v.linearVel = new float4(explodedLinear, 0f);

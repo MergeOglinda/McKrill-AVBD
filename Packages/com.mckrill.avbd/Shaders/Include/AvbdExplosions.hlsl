@@ -11,13 +11,18 @@
 // (half its diagonal) away from the center of mass, in a direction hashed from the slot.
 #define AVBD_EXPLOSION_KICK 0.25
 
-// 32 B. One explosion, applied in the step it was queued in.
+// The region an explosion reaches (ExplosionRegion on the CPU).
+#define AVBD_EXPLOSION_SPHERE 0
+#define AVBD_EXPLOSION_BOX 1
+
+// 64 B. One explosion, applied in the step it was queued in. Only float4 and uint4 members, like every record (layout rule P1).
 struct ExplosionRecord
 {
-    float4 centerRadius; // xyz = center, w = radius: a body whose center of mass is farther away is not touched
-    float  impulse;      // N s that a body at the center would receive (its velocity changes by impulse / mass)
-    uint   seed;         // makes the hashed kicks of different explosions different
-    float2 padding;
+    float4 centerRadius;      // xyz = center, w = radius of a sphere region: a body whose center of mass is farther away is not touched (not used by a box)
+    float4 boxRotation;       // box region: orientation (unit quaternion)
+    float4 halfExtentsImpulse; // xyz = box region: half the size along each of its axes, w = N s that a body at the center would receive (its velocity changes by impulse / mass)
+    uint4  ident;             // x = seed (makes the hashed kicks of different explosions different), y = shape (AVBD_EXPLOSION_SPHERE or _BOX),
+                              // z = include mask: a body is hit only if its group mask has one of these bits ..., w = exclude mask: ... and none of these
 };
 
 // A 32-bit integer hash (PCG), the same arithmetic as AvbdExplosion.Hash on the CPU.

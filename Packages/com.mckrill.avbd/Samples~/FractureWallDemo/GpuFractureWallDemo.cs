@@ -105,6 +105,10 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Range(0.1f, 1000f)] float explosionForce = 10f;
         [Tooltip("Meters behind the surface that the camera ray hits, along the ray, where the explosion goes off: 0 on the surface, more to go inside.")]
         [SerializeField, Range(0f, 20f)] float explosionDepth = 1f;
+        [Tooltip("The volume an explosion reaches. Sphere: every body closer than Radius. Box: every body inside a cube whose half size is Radius, turned like the camera.")]
+        [SerializeField] ExplosionRegion explosionRegion = ExplosionRegion.Sphere;
+        [Tooltip("Which bodies an explosion hits: the blocks, the shots, or both (a filter on the bodies' group masks).")]
+        [SerializeField] ExplosionTargets explosionTargets = ExplosionTargets.Everything;
 
         [Header("View")]
         [Tooltip("Fly camera: right drag to look, W A S D to move, Q and E for down and up, Shift for faster, mouse wheel to dolly.")]
@@ -124,6 +128,17 @@ namespace McKrill.Avbd.Samples
         const float GroundHalfExtent = 100f;
         const float BlockGap = 0.01f; // between neighbors; the wall starts almost at rest
         const bool zCurveOrder = true;
+
+        // The group masks that the demo gives its bodies, for the filter of an explosion. Nothing else in the demo uses group masks.
+        const uint BlockGroup = 1u;
+        const uint ShotGroup = 2u;
+
+        enum ExplosionTargets
+        {
+            Everything,
+            BlocksOnly,
+            ShotsOnly,
+        }
 
         // What a left click does.
         enum ClickMode
@@ -169,6 +184,8 @@ namespace McKrill.Avbd.Samples
         bool requestShoot;
         bool requestExplode;
         bool requestToggleMode;
+        bool requestToggleRegion;
+        bool requestCycleTargets;
         bool requestVolley;
         bool requestReset;
         bool requestClearShots;
@@ -257,6 +274,16 @@ namespace McKrill.Avbd.Samples
             {
                 clickMode = clickMode == ClickMode.Shoot ? ClickMode.Explode : ClickMode.Shoot;
                 requestToggleMode = false;
+            }
+            if (requestToggleRegion)
+            {
+                explosionRegion = explosionRegion == ExplosionRegion.Sphere ? ExplosionRegion.Box : ExplosionRegion.Sphere;
+                requestToggleRegion = false;
+            }
+            if (requestCycleTargets)
+            {
+                explosionTargets = (ExplosionTargets)(((int)explosionTargets + 1) % 3);
+                requestCycleTargets = false;
             }
             if (requestClearShots)
             {
@@ -393,7 +420,9 @@ namespace McKrill.Avbd.Samples
                         var position = new float3((c + 0.5f * (r & 1) - centerColumn) * stepX, y, z);
                         positions[w * perWall + r * columns + c] = position;
                         // The bottom row is immobile: a body without mass is static.
-                        descriptors.Add(BodyDescriptor.Box(size, r == 0 ? 0f : blockDensity, position));
+                        BodyDescriptor block = BodyDescriptor.Box(size, r == 0 ? 0f : blockDensity, position);
+                        block.groupMask = BlockGroup;
+                        descriptors.Add(block);
                         instanceSizes.Add(size);
                         instanceColors.Add(color);
                     }
@@ -511,6 +540,7 @@ namespace McKrill.Avbd.Samples
             BodyDescriptor descriptor = BodyDescriptor.Box(new float3(size), shotMass / (size * size * size), (float3)t.position + direction * (size + 0.6f));
             descriptor.rotation = t.rotation;
             descriptor.linearVelocity = direction * shotSpeed;
+            descriptor.groupMask = ShotGroup;
 
             BodyHandle handle = bodies.Spawn(descriptor);
             if (!handle.IsValid)
@@ -542,6 +572,7 @@ namespace McKrill.Avbd.Samples
                 float y = VolleyY[i / VolleyX.Length] * (rows / 75f);
                 BodyDescriptor descriptor = BodyDescriptor.Box(new float3(size), density, new float3(x, y, VolleyZ));
                 descriptor.linearVelocity = new float3(0f, 0f, shotSpeed);
+                descriptor.groupMask = ShotGroup;
                 BodyHandle handle = bodies.Spawn(descriptor);
                 if (!handle.IsValid)
                     break;
@@ -553,7 +584,8 @@ namespace McKrill.Avbd.Samples
         // An explosion where the ray from the center of the camera meets a body, pushed explosionDepth meters further along the ray. The ray is cast on the GPU
         // (AvbdRaycaster) against the poses where they are, so the CPU never reads them: only the distance of the nearest hit comes back, a few frames later, and
         // then the explosion is queued (AvbdSolver.Explode). The package applies it in the predict stage of the next step, so while the simulation is paused
-        // it waits for the next Step. The radius, force and depth of the click are the ones in the panel when it is clicked.
+        // it waits for the next Step. The radius, force, depth, region and filter of the click are the ones in the panel when it is clicked; a box region is a cube
+        // with half size Radius, turned like the camera.
         void Explode()
         {
             if (cam == null)
@@ -565,6 +597,9 @@ namespace McKrill.Avbd.Samples
             float radius = explosionRadius;
             float force = explosionForce;
             float depth = explosionDepth;
+            ExplosionRegion region = explosionRegion;
+            ExplosionTargets targets = explosionTargets;
+            quaternion rotation = t.rotation;
             int version = simulationVersion; // a Reset before the answer arrives makes it stale
 
             explosionStatus = "Casting the ray...";
@@ -579,7 +614,15 @@ namespace McKrill.Avbd.Samples
                 }
 
                 float3 center = origin + math.normalizesafe(direction) * (distance + depth);
-                explosionStatus = solver.Explode(center, radius, force)
+                ExplosionDescriptor explosion = region == ExplosionRegion.Box
+                    ? ExplosionDescriptor.Box(center, new float3(radius), rotation, force)
+                    : ExplosionDescriptor.Sphere(center, radius, force);
+                if (targets == ExplosionTargets.BlocksOnly)
+                    explosion = explosion.WithFilter(BlockGroup);
+                else if (targets == ExplosionTargets.ShotsOnly)
+                    explosion = explosion.WithFilter(ShotGroup);
+
+                explosionStatus = solver.Explode(explosion)
                     ? "Explosion at (" + center.x.ToString("0.0") + ", " + center.y.ToString("0.0") + ", " + center.z.ToString("0.0") + "), "
                         + distance.ToString("0.0") + " m to the surface" + (paused ? " (waits for the next step)" : "")
                     : "Not queued: too many explosions for one step.";
@@ -763,7 +806,15 @@ namespace McKrill.Avbd.Samples
             else
             {
                 GUILayout.Label("Explosion", boldLabel);
-                GUILayout.Label("Radius: " + explosionRadius.ToString("0.0") + " m");
+
+                // The buttons only ask, as above: the values change in Update.
+                if (GUILayout.Button(explosionRegion == ExplosionRegion.Sphere ? "Region: sphere   (switch to box)" : "Region: box, turned like the camera   (switch to sphere)"))
+                    requestToggleRegion = true;
+                string affects = explosionTargets == ExplosionTargets.Everything ? "blocks and shots" : explosionTargets == ExplosionTargets.BlocksOnly ? "blocks only" : "shots only";
+                if (GUILayout.Button("Affects: " + affects + "   (next)"))
+                    requestCycleTargets = true;
+
+                GUILayout.Label((explosionRegion == ExplosionRegion.Sphere ? "Radius: " : "Half size: ") + explosionRadius.ToString("0.0") + " m");
                 explosionRadius = GUILayout.HorizontalSlider(explosionRadius, 1f, 50f);
 
                 // Force on a log scale: 0.1 to 1000 N s. A block (0.25 kg by default) at the center gets force / mass.

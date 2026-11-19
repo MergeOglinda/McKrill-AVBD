@@ -32,7 +32,9 @@ The click mode button, the shot's speed, size and mass (or the explosion's radiu
 | Control | What it does |
 | --- | --- |
 | Click mode button | Switches the left click between shooting boxes and explosions. In explosion mode the panel stops showing the shot's Speed, Size and Mass and shows the explosion's Radius, Force and Depth instead (the shot's values are kept) |
-| Radius | 1 to 50 m. A block whose center is farther from the explosion than this is not touched |
+| Region | Sphere (the default) or box. A sphere reaches every body whose center is closer than the radius. A box is a cube whose half size is the *Radius* slider, turned like the camera when you click; it reaches every body whose center is inside it, and the push falls off toward the nearest face. Either way the push goes away from the center of the explosion |
+| Affects | Blocks and shots (the default), blocks only, or shots only: a filter on the bodies' group masks (the demo gives the blocks group bit 1 and the shots bit 2). The ground and the bottom row do not move in any case |
+| Radius | 1 to 50 m (*Half size* for a box). A block whose center is farther from the explosion than this is not touched |
 | Force | 0.1 to 1000 N s (log scale): the impulse at the center of the explosion. A body's velocity changes by this times a falloff `(1 - r/radius)^2` divided by its mass. The label shows the speed a default block (0.25 kg) at the center would get |
 | Depth | 0 to 20 m: how far behind the surface the camera ray hits the explosion goes off, along the ray. 0 is on the surface |
 | C, R, W | Columns (15 to 75), rows (15 to 75) and walls (1 to 10), three sliders on one row; the defaults are 75, 75 and 10. The total block count is shown under them |
@@ -52,7 +54,7 @@ The panel also shows how many joints have broken, out of all. Plastic yield, the
 
 In explosion mode a left click casts a ray from the center of the camera. The ray is cast on the GPU (`AvbdRaycaster`), against the ground, the blocks and the shots where they are, so the CPU never reads the poses; only the distance of the nearest hit comes back, a few frames after the click. The explosion goes off at the nearest hit plus *Depth* meters along the ray. If the ray hits nothing, nothing happens and the panel says so.
 
-The physics is `AvbdSolver.Explode`: a radial impulse applied in the next step's predict stage, so the joints and contacts resist it in the same step. The push falls off to zero at the radius, is radial (no upward bias and no shock shell), and has a small off-center angular kick, hashed from the body's slot, that makes the blocks tumble. The immobile bottom row and the ground do not move. The explosion has no visual or audio effect. While the simulation is paused, the explosion waits for the next step (**Step** or **Space**). At most 16 explosions are applied per step.
+The physics is `AvbdSolver.Explode`: a radial impulse applied in the next step's predict stage, so the joints and contacts resist it in the same step. The push falls off to zero at the edge of the region, is radial (no upward bias and no shock shell), and has a small off-center angular kick, hashed from the body's slot, that makes the blocks tumble. The immobile bottom row and the ground do not move. The explosion has no visual or audio effect. While the simulation is paused, the explosion waits for the next step (**Step** or **Space**). At most 16 explosions are applied per step.
 
 ## The wall
 

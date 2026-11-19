@@ -270,7 +270,7 @@ namespace McKrill.Avbd.Tests
 
         // ---- explosions ------------------------------------------------------------------------------------------
 
-        static CpuBodyArrays OneBody(float3 size, float density, float3 position, quaternion rotation, float3 linear, float3 angular)
+        static CpuBodyArrays OneBody(float3 size, float density, float3 position, quaternion rotation, float3 linear, float3 angular, uint groupMask = 0xFFFFFFFFu)
         {
             var queue = new BodyEditQueue(8);
             var oracle = new CpuBodyArrays(8);
@@ -278,6 +278,7 @@ namespace McKrill.Avbd.Tests
             d.rotation = rotation;
             d.linearVelocity = linear;
             d.angularVelocity = angular;
+            d.groupMask = groupMask;
             queue.Spawn(d);
             var commands = new List<EditCommand>();
             queue.Drain(commands);
@@ -286,7 +287,7 @@ namespace McKrill.Avbd.Tests
         }
 
         static CpuExplosion Blast(float3 center, float radius, float impulse, uint seed = 0u) =>
-            new CpuExplosion { center = center, radius = radius, impulse = impulse, seed = seed };
+            CpuExplosion.Sphere(center, radius, impulse, seed);
 
         [Test]
         public void Explosion_Hash_IsDeterministic_AndTheRandomNumbersStayInRange()
@@ -520,6 +521,161 @@ namespace McKrill.Avbd.Tests
                 solver.DispatchPredict();
                 buffers.Motion.GetData(motion);
                 AssertNear(first, motion[h.Slot].linearVel.xyz, 0f, "no explosion queued: the second predict does not touch the velocity");
+            }
+        }
+
+        [Test]
+        public void Explosion_Filter_HitsOnlyBodiesWithAnIncludedGroupAndNoExcludedOne()
+        {
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            settings.gravity = float3.zero;
+
+            // A body in group bit 0 (1), one in bit 1 (2) and one in both (3), all 2 m from the center, with 1 kg each.
+            uint[] groups = { 1u, 2u, 3u };
+            ExplosionDescriptor sphere = ExplosionDescriptor.Sphere(float3.zero, 10f, 100f);
+            (uint include, uint exclude, bool[] hit)[] cases =
+            {
+                (0xFFFFFFFFu, 0u, new[] { true, true, true }),
+                (1u, 0u, new[] { true, false, true }),
+                (2u, 0u, new[] { false, true, true }),
+                (3u, 2u, new[] { true, false, false }),
+                (0xFFFFFFFFu, 1u, new[] { false, true, false }),
+                (0u, 0u, new[] { false, false, false }),
+            };
+            foreach (var c in cases)
+            {
+                for (int i = 0; i < groups.Length; i++)
+                {
+                    CpuBodyArrays bodies = OneBody(new float3(1f), 1f, new float3(2f, 0f, 0f), quaternion.identity, float3.zero, float3.zero, groups[i]);
+                    CpuExplosion blast = CpuExplosion.From(sphere.WithFilter(c.include, c.exclude), 0u);
+                    CpuPredict.Run(bodies, settings, 1, new[] { blast }, 1);
+                    bool moved = bodies.Motion[0].linearVel.x != 0f;
+                    Assert.AreEqual(c.hit[i], moved, "include " + c.include + " exclude " + c.exclude + " group " + groups[i]);
+                }
+            }
+        }
+
+        [Test]
+        public void Explosion_BoxRegion_ReachesWhatIsInsideTheOrientedBox_AndFallsOffTowardItsFaces()
+        {
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            settings.gravity = float3.zero;
+
+            // A box 8 m long (half 4) and 2 m wide and high (half 1), its long axis turned from x to z.
+            ExplosionDescriptor box = ExplosionDescriptor.Box(float3.zero, new float3(4f, 1f, 1f), quaternion.RotateY(math.radians(90f)), 80f);
+
+            // 3 m along z: inside (3/4 of the way to the end), so the push is 80 (1 - 0.75)^2 = 5 along z, for 1 kg.
+            CpuBodyArrays inside = OneBody(new float3(1f), 1f, new float3(0f, 0f, 3f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(inside, settings, 1, new[] { CpuExplosion.From(box, 0u) }, 1);
+            Assert.AreEqual(5f, inside.Motion[0].linearVel.z, 1e-4f);
+            Assert.AreEqual(0f, inside.Motion[0].linearVel.x, 1e-4f);
+
+            // 3 m along x: outside, because the box is only 1 m wide that way. The same body in a sphere of radius 4 would be hit.
+            CpuBodyArrays outside = OneBody(new float3(1f), 1f, new float3(3f, 0f, 0f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(outside, settings, 1, new[] { CpuExplosion.From(box, 0u) }, 1);
+            Assert.AreEqual(0f, outside.Motion[0].linearVel.x, 0f);
+
+            CpuBodyArrays sphereHit = OneBody(new float3(1f), 1f, new float3(3f, 0f, 0f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(sphereHit, settings, 1, new[] { CpuExplosion.Sphere(float3.zero, 4f, 80f) }, 1);
+            Assert.Greater(sphereHit.Motion[0].linearVel.x, 0f);
+
+            // The edge of the box (u = 1) is outside; the push goes away from the center, here along a diagonal, and the largest axis sets the falloff.
+            CpuBodyArrays diagonal = OneBody(new float3(1f), 1f, new float3(0.5f, 0f, 2f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(diagonal, settings, 1, new[] { CpuExplosion.From(box, 0u) }, 1);
+            float3 v = diagonal.Motion[0].linearVel.xyz;
+            float expected = 80f * 0.25f; // u = max(0.5 / 1 across, 2 / 4 along) = 0.5, so (1 - 0.5)^2 = 0.25
+            Assert.AreEqual(expected, math.length(v), 1e-3f);
+            Assert.AreEqual(0.5f / math.length(new float3(0.5f, 0f, 2f)), v.x / math.length(v), 1e-4f, "radial from the center");
+        }
+
+        [Test]
+        public void Gpu_RegionsAndFilters_MatchTheOracle_OnRandomBodies()
+        {
+            RequireCompute();
+            var rng = new System.Random(417);
+
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            var oracle = new CpuBodyArrays(Capacity);
+            var applied = new List<EditCommand>();
+            var handles = new List<BodyHandle>();
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            {
+                for (int i = 0; i < 100; i++)
+                {
+                    BodyDescriptor d = BodyDescriptor.Box(new float3(F(rng, 0.3f, 2f), F(rng, 0.3f, 2f), F(rng, 0.3f, 2f)),
+                        i % 7 == 0 ? 0f : F(rng, 0.2f, 2f), V(rng, 12f));
+                    d.rotation = quaternion.EulerXYZ(F(rng, 0f, 6f), F(rng, 0f, 6f), F(rng, 0f, 6f));
+                    d.linearVelocity = V(rng, 5f);
+                    d.angularVelocity = V(rng, 5f);
+                    d.kinematic = i % 11 == 0;
+                    d.groupMask = (uint)rng.Next(0, 8); // some bodies are in no group at all
+                    handles.Add(buffers.Spawn(d));
+                }
+                buffers.ApplyEdits(applied);
+                oracle.Apply(applied);
+                for (int slot = 0; slot < buffers.HighWaterMark; slot++)
+                    oracle.Motion[slot].prevLinearVel = new float4(oracle.Motion[slot].linearVel.xyz - V(rng, 0.2f), 0f);
+                buffers.Motion.SetData(oracle.Motion);
+
+                var blasts = new List<CpuExplosion>();
+                using (var solver = new AvbdSolver(buffers, settings))
+                {
+                    ExplosionDescriptor[] descriptors =
+                    {
+                        ExplosionDescriptor.Box(new float3(1f, 0f, 0f), new float3(9f, 3f, 5f), quaternion.EulerXYZ(0.4f, 1.1f, -0.7f), 50f),
+                        ExplosionDescriptor.Sphere(new float3(-2f, 2f, 1f), 11f, 40f).WithFilter(1u),
+                        ExplosionDescriptor.Box(new float3(0f, -3f, 2f), new float3(6f, 6f, 6f), quaternion.identity, -30f).WithFilter(0xFFFFFFFFu, 2u),
+                        ExplosionDescriptor.Sphere(new float3(3f, 1f, -2f), 13f, 25f).WithFilter(6u, 4u),
+                    };
+                    foreach (ExplosionDescriptor e in descriptors)
+                    {
+                        blasts.Add(CpuExplosion.From(e, (uint)blasts.Count)); // the solver hands out the seeds 0, 1, 2 and 3
+                        Assert.IsTrue(solver.Explode(e));
+                    }
+
+                    CpuPredict.Run(oracle, settings, buffers.HighWaterMark, blasts.ToArray(), blasts.Count);
+                    solver.DispatchPredict();
+                }
+
+                var motion = new BodyMotionRecord[Capacity];
+                var state = new BodyStateRecord[Capacity];
+                buffers.Motion.GetData(motion);
+                buffers.State.GetData(state);
+
+                int moved = 0;
+                for (int slot = 0; slot < Capacity; slot++)
+                {
+                    string what = "slot " + slot;
+                    AssertNear(oracle.Motion[slot].linearVel, motion[slot].linearVel, 1e-4f, what + " velocity");
+                    AssertNear(oracle.Motion[slot].prevLinearVel, motion[slot].prevLinearVel, 1e-4f, what + " previous velocity");
+                    AssertNear(oracle.Motion[slot].angularVel, motion[slot].angularVel, 1e-3f, what + " angular velocity");
+                    AssertNear(oracle.State[slot].position, state[slot].position, 1e-4f, what + " position");
+                    if (math.any(oracle.Motion[slot].linearVel != float4.zero))
+                        moved++;
+                }
+                Assert.Greater(moved, 20, "the scene is meant to have bodies in reach");
+            }
+        }
+
+        [Test]
+        public void Explode_RejectsBadRegions()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(16))
+            using (var solver = new AvbdSolver(buffers, AvbdSolverSettings.Default))
+            {
+                Assert.Throws<ArgumentException>(() => solver.Explode(ExplosionDescriptor.Box(float3.zero, new float3(1f, 0f, 1f), quaternion.identity, 1f)));
+                Assert.Throws<ArgumentException>(() => solver.Explode(ExplosionDescriptor.Box(float3.zero, new float3(1f, float.NaN, 1f), quaternion.identity, 1f)));
+                Assert.Throws<ArgumentException>(() => solver.Explode(ExplosionDescriptor.Box(float3.zero, new float3(1f), new quaternion(0f, 0f, 0f, 0f), 1f)));
+                Assert.Throws<ArgumentException>(() => solver.Explode(ExplosionDescriptor.Sphere(float3.zero, 0f, 1f)));
+                ExplosionDescriptor unknown = ExplosionDescriptor.Sphere(float3.zero, 1f, 1f);
+                unknown.region = (ExplosionRegion)7;
+                Assert.Throws<ArgumentException>(() => solver.Explode(unknown));
+                Assert.AreEqual(0, solver.PendingExplosionCount);
+
+                Assert.IsTrue(solver.Explode(ExplosionDescriptor.Box(float3.zero, new float3(1f), new quaternion(0f, 2f, 0f, 0f), 1f)), "a rotation that is not a unit quaternion is normalized");
+                Assert.AreEqual(1, solver.PendingExplosionCount);
             }
         }
 
