@@ -9,6 +9,10 @@ Python 3 standard library only.
 
 Columns: test, group, unit, kind, baseline/candidate status, then for the median, average, sum, min, max, standard deviation and sample count the value in
 each run, and delta_median / delta_median_pct / delta_avg_pct (candidate minus baseline, in the baseline's unit), and a verdict.
+On the console, every time group whose median moved by more than the threshold is listed, and so is every time group whose sum (baseline_sum to
+candidate_sum) moved by more than the threshold, with the difference in the group's unit; the sum depends on the number of samples, so a different
+count is shown next to it.
+
 Verdict: 'better' or 'worse' when the median moved by more than --threshold percent (the direction follows the group's IncreaseIsBetter flag), 'same'
 otherwise. A group that is a plain count (unit Undefined: bodies, joints, manifold slots, ...) is 'same' or 'changed'. A test or group that is in only one
 run gets 'only in baseline' or 'only in candidate'.
@@ -104,6 +108,11 @@ def compare(base_tests, cand_tests, threshold):
                 row["delta_median"] = delta
                 if row["baseline_median"]:
                     row["delta_median_pct"] = 100.0 * delta / abs(row["baseline_median"])
+                if row["baseline_sum"]:
+                    row["delta_sum"] = row["candidate_sum"] - row["baseline_sum"]
+                    row["delta_sum_pct"] = 100.0 * row["delta_sum"] / abs(row["baseline_sum"])
+                    increase_is_better = bool(gb.get("IncreaseIsBetter"))
+                    row["sum_verdict"] = "better" if (row["delta_sum"] > 0) == increase_is_better else "worse"
                 if row["baseline_avg"]:
                     row["delta_avg_pct"] = 100.0 * (row["candidate_avg"] - row["baseline_avg"]) / abs(row["baseline_avg"])
                 if kind == "count":
@@ -145,9 +154,17 @@ def main():
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
     print("%d rows written to %s (%s)" % (len(rows), args.output, ", ".join("%s: %d" % kv for kv in sorted(counts.items()))))
     for r in rows:
-        if r["verdict"] in ("better", "worse") and r["kind"] == "time":
-            print("  %-8s %+7.1f%%  %s / %s  (%.2f -> %.2f %s)" % (r["verdict"], r["delta_median_pct"], r["test"].split(".")[-1], r["group"],
-                                                               r["baseline_median"], r["candidate_median"], r["unit"]))
+        if r["kind"] != "time":
+            continue
+        name = "%s / %s" % (r["test"].split(".")[-1], r["group"])
+        if r["verdict"] in ("better", "worse"):
+            print("  %-8s %+7.1f%%  %s  (median %.2f -> %.2f %s)" % (r["verdict"], r["delta_median_pct"], name,
+                                                                  r["baseline_median"], r["candidate_median"], r["unit"]))
+        # The sum of the samples, when it moved by more than the threshold too. It depends on the number of samples, which is shown when it differs.
+        if abs(r.get("delta_sum_pct", 0.0)) > args.threshold:
+            samples = "" if r["baseline_samples"] == r["candidate_samples"] else ", samples %d vs %d" % (r["baseline_samples"], r["candidate_samples"])
+            print("  sum %-4s %+7.1f%%  %s  (sum %.2f -> %.2f %s, difference %+.2f %s%s)" % (
+                r["sum_verdict"], r["delta_sum_pct"], name, r["baseline_sum"], r["candidate_sum"], r["unit"], r["delta_sum"], r["unit"], samples))
 
 
 if __name__ == "__main__":
