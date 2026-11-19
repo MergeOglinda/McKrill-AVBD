@@ -741,11 +741,9 @@ namespace McKrill.Avbd.Samples
             // What a left click does. The button only asks: the mode changes in Update, so the controls below never change in the middle of an event.
             if (GUILayout.Button(clickMode == ClickMode.Shoot ? "Left click: shoot boxes   (switch to explosions)" : "Left click: explosions   (switch to shooting boxes)"))
                 requestToggleMode = true;
-            GUILayout.Space(4f);
 
             if (clickMode == ClickMode.Shoot)
             {
-                GUILayout.Label("Shot", boldLabel);
                 GUILayout.Label("Speed: " + shotSpeed.ToString("0") + " m/s");
                 shotSpeed = GUILayout.HorizontalSlider(shotSpeed, 5f, 80f);
 
@@ -762,7 +760,6 @@ namespace McKrill.Avbd.Samples
             }
             else
             {
-                GUILayout.Label("Explosion", boldLabel);
                 GUILayout.Label("Radius: " + explosionRadius.ToString("0.0") + " m");
                 explosionRadius = GUILayout.HorizontalSlider(explosionRadius, 1f, 50f);
 
@@ -778,7 +775,6 @@ namespace McKrill.Avbd.Samples
             }
 
             GUILayout.Space(4f);
-            GUILayout.Label("Solver", boldLabel);
             GUILayout.Label("Iterations: " + iterations);
             iterations = Mathf.RoundToInt(GUILayout.HorizontalSlider(iterations, 1, 30));
 
