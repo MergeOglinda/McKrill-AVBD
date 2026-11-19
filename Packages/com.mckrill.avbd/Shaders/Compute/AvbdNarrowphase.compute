@@ -22,6 +22,7 @@
 // NpRetire, NpAllocate and Narrowphase are dispatched indirectly, so the host never needs a count: they run over the slots below the
 // high-water mark and the pairs the broadphase stored, not over the capacity of the pool and of the bins. A thread compares its item with the
 // counts again, because the last group of a dispatch can overshoot.
+// Shapes: a box collides with a box by the SAT, anything with a sphere by one contact point (AvbdSphereCollision.hlsl).
 // A thread of the last kernel reads and writes only its own slot, so there is no ordering. Mirrored by Reference/Stages/CpuContacts.cs,
 // which tests every pair of bodies instead and must give the same manifolds.
 
@@ -37,6 +38,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBroadphaseParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdIndirect.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactWarmStart.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSphereCollision.hlsl"
 
 StructuredBuffer<BodyStateRecord>    _BodyState;
 StructuredBuffer<BodyMassRecord>     _BodyMass;
@@ -59,6 +61,21 @@ uint _SlotCapacity;        // manifold slots
 uint _TableMask;           // size of _PairTable (a power of two) minus one
 uint _DynamicPairCapacity; // capacity of the broadphase's bins, to find the pairs in _Pairs
 uint _StaticPairCapacity;
+
+// Collides two bodies of any kind (AVBD_KIND_BOX, AVBD_KIND_SPHERE): boxes with the SAT of AvbdCollideBoxes, anything with a sphere by one contact.
+// Sizes are the full sizes of the shape record (a sphere: its diameter in every component). Returns the number of contacts and leaves them in the statics.
+int AvbdCollideShapes(uint kindA, float3 posA, float4 rotA, float3 sizeA, uint kindB, float3 posB, float4 rotB, float3 sizeB)
+{
+    if (kindA == AVBD_KIND_SPHERE)
+    {
+        if (kindB == AVBD_KIND_SPHERE)
+            return AvbdCollideSpheres(posA, rotA, sizeA.x * 0.5, posB, rotB, sizeB.x * 0.5);
+        return AvbdCollideSphereBox(true, posA, rotA, sizeA, posB, rotB, sizeB);
+    }
+    if (kindB == AVBD_KIND_SPHERE)
+        return AvbdCollideSphereBox(false, posA, rotA, sizeA, posB, rotB, sizeB);
+    return AvbdCollideBoxes(posA, rotA, sizeA, posB, rotB, sizeB);
+}
 
 // Bit `index` of a bit set stored in 32-bit words, given the word that holds it (bits[index >> 5]).
 bool BitIsSet(uint word, uint index)
@@ -188,8 +205,8 @@ void NpAllocate(uint3 id : SV_DispatchThreadID)
     {
         BodyStateRecord stateA = _BodyState[bodies.x];
         BodyStateRecord stateB = _BodyState[bodies.y];
-        if (AvbdCollideBoxes(stateA.startPosition.xyz, stateA.startRotation, _BodyShape[bodies.x].sizeFriction.xyz,
-                             stateB.startPosition.xyz, stateB.startRotation, _BodyShape[bodies.y].sizeFriction.xyz) == 0)
+        if (AvbdCollideShapes(AvbdBodyKind(_BodyFlags[bodies.x]), stateA.startPosition.xyz, stateA.startRotation, _BodyShape[bodies.x].sizeFriction.xyz,
+                              AvbdBodyKind(_BodyFlags[bodies.y]), stateB.startPosition.xyz, stateB.startRotation, _BodyShape[bodies.y].sizeFriction.xyz) == 0)
             return;
     }
 
@@ -251,7 +268,7 @@ void Narrowphase(uint3 id : SV_DispatchThreadID)
     float4 rotA = stateA.startRotation;
     float4 rotB = stateB.startRotation;
 
-    uint count = (uint)AvbdCollideBoxes(posA, rotA, shapeA.xyz, posB, rotB, shapeB.xyz);
+    uint count = (uint)AvbdCollideShapes(AvbdBodyKind(metaA), posA, rotA, shapeA.xyz, AvbdBodyKind(metaB), posB, rotB, shapeB.xyz);
     if (count == 0u)
     {
         FreeSlot(slot); // the manifold is removed, and with it the multipliers and penalties

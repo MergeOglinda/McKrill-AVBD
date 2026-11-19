@@ -227,11 +227,18 @@ namespace McKrill.Avbd
             return queue.SetVelocity(handle, linear, angular);
         }
 
-        /// <summary>Sets the box size and recomputes mass and inertia from the density. Density 0 makes the body static.</summary>
+        /// <summary>Sets the box size and recomputes mass and inertia from the density. Density 0 makes the body static. For box bodies; see <see cref="SetRadius"/> for spheres.</summary>
         public bool SetShape(BodyHandle handle, float3 size, float density)
         {
             ThrowIfDisposed();
             return queue.SetShape(handle, size, density);
+        }
+
+        /// <summary>Sets the radius of a sphere body (a body spawned with <see cref="BodyDescriptor.Sphere"/>) and recomputes mass and inertia from the density.</summary>
+        public bool SetRadius(BodyHandle handle, float radius, float density)
+        {
+            ThrowIfDisposed();
+            return queue.SetRadius(handle, radius, density);
         }
 
         public bool SetFriction(BodyHandle handle, float friction)

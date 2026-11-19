@@ -96,6 +96,28 @@ namespace McKrill.Avbd.Tests
             return scene;
         }
 
+        /// <summary>Converts bodies given as descriptors (boxes and spheres, in slot order) into the arrays the oracles use. No joints, no springs.</summary>
+        public static SceneArrays FromDescriptors(IList<BodyDescriptor> descriptors, int capacity)
+        {
+            var scene = new SceneArrays
+            {
+                bodies = new CpuBodyArrays(capacity),
+                constraints = new ConstraintRecord[0],
+                bodyCount = descriptors.Count,
+            };
+            var queue = new BodyEditQueue(capacity);
+            var commands = new List<EditCommand>();
+            for (int i = 0; i < descriptors.Count; i++)
+            {
+                scene.descriptors.Add(descriptors[i]);
+                if (queue.Spawn(descriptors[i]).Slot != i)
+                    throw new InvalidOperationException("Slots are not allocated in order.");
+            }
+            queue.Drain(commands);
+            scene.bodies.Apply(commands);
+            return scene;
+        }
+
         /// <summary>Gives every joint of the solver random per-axis penalties and multipliers, so that the primal stage sees large stiffness.</summary>
         public static void RandomizeJointState(ReferenceSolver solver, System.Random rng)
         {

@@ -36,6 +36,12 @@ namespace McKrill.Avbd
     internal enum ShapeKind : uint
     {
         Box = 0,
+
+        /// <summary>
+        /// A ball. The shape record holds its diameter in x, y and z (so code that only needs a size still sees a sensible bounding box), the
+        /// inertia is that of a solid sphere, and the rotation does not change what it collides with, only where its contact anchors are.
+        /// </summary>
+        Sphere = 1,
     }
 
     /// <summary>Packing of the flags word: low 24 bits are flags, high 8 bits are the shape kind.</summary>

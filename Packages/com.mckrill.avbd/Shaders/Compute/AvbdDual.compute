@@ -220,8 +220,10 @@ void DualContact(uint3 id : SV_DispatchThreadID)
     {
         ContactPointRecord p = _ContactPoints[first + k];
         float3 penalty = ContactPointPenalty(p);
+        bool sphere = ContactPointKey(p) == AVBD_SPHERE_FEATURE; // lever arms at the start-of-step rotation, as in the primal stage
         AvbdContactEval e = AvbdEvaluateContactInBasis(
-            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, stateA.rotation, stateB.rotation,
+            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz,
+            sphere ? stateA.startRotation : stateA.rotation, sphere ? stateB.startRotation : stateB.rotation,
             dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
         AvbdContactDualResult r = AvbdContactDual(e, penalty, (stick & (1u << k)) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
 

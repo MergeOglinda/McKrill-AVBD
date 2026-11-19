@@ -33,7 +33,15 @@ namespace McKrill.Avbd.Reference
             return BodyClass.Static;
         }
 
-        public static float Radius(CpuBodyArrays bodies, int slot) => math.length(bodies.Shape[slot].sizeFriction.xyz * 0.5f);
+        /// <summary>True if the body is a sphere (the shape kind in the flags word).</summary>
+        public static bool IsSphere(CpuBodyArrays bodies, int slot) => BodyFlagLayout.KindOf(bodies.Meta[slot].ident.x) == ShapeKind.Sphere;
+
+        /// <summary>The radius of the bounding sphere: half the diagonal of a box, the radius of a sphere (half of size.x, its diameter).</summary>
+        public static float Radius(CpuBodyArrays bodies, int slot)
+        {
+            float3 size = bodies.Shape[slot].sizeFriction.xyz;
+            return IsSphere(bodies, slot) ? size.x * 0.5f : math.length(size * 0.5f);
+        }
 
         /// <summary>
         /// Mirrors BoxesSeparated in the shader: true if the boxes (center, rotation, full sizes) are apart by more than
@@ -67,8 +75,11 @@ namespace McKrill.Avbd.Reference
         /// <summary>The same test on the bodies as the GPU holds them (position and rotation of the state record, full box size).</summary>
         public static bool BoxesSeparated(CpuBodyArrays bodies, int a, int b)
         {
-            return BoxesSeparated(bodies.State[a].position.xyz, new quaternion(bodies.State[a].rotation), bodies.Shape[a].sizeFriction.xyz,
-                                  bodies.State[b].position.xyz, new quaternion(bodies.State[b].rotation), bodies.Shape[b].sizeFriction.xyz);
+            // A sphere is tested as the cube around it along the world axes, like the shader's MakeBpBox: its rotation is ignored.
+            quaternion rotationA = IsSphere(bodies, a) ? quaternion.identity : new quaternion(bodies.State[a].rotation);
+            quaternion rotationB = IsSphere(bodies, b) ? quaternion.identity : new quaternion(bodies.State[b].rotation);
+            return BoxesSeparated(bodies.State[a].position.xyz, rotationA, bodies.Shape[a].sizeFriction.xyz,
+                                  bodies.State[b].position.xyz, rotationB, bodies.Shape[b].sizeFriction.xyz);
         }
 
         /// <summary>A pair as one number, for sets and comparisons. Slots must be below 2^30.</summary>

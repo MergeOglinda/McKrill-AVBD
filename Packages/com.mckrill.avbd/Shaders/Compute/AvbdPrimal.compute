@@ -314,8 +314,12 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
     {
         ContactPointRecord p = _ContactPoints[first + k];
         float3 penalty = ContactPointPenalty(p);
+        // A sphere contact takes its lever arms at the rotation of the start of the step (three-avbd): a rolling sphere turns about 0.1 rad per step,
+        // and a lever arm that turned with it would put a false separation into the normal row. The angular displacement is still measured from the start.
+        bool sphere = ContactPointKey(p) == AVBD_SPHERE_FEATURE;
         AvbdContactEval e = AvbdEvaluateContactInBasis(
-            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, rotA, rotB,
+            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz,
+            sphere ? stateA.startRotation : rotA, sphere ? stateB.startRotation : rotB,
             dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
         AvbdContactStamp s = AvbdStampContact(e, penalty, isA);
 

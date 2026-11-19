@@ -6,10 +6,12 @@ Compiles the package's vector-only contact HLSL as C++ (through `hlsl_shim.h`, w
 Tools/HlslParity/build.sh /some/output/dir
 /some/output/dir/collide_parity 40 200000     # [scene steps] [random cases]
 /some/output/dir/contact_parity 200000        # [random cases]
+/some/output/dir/sphere_check 200000          # [random cases]
 ```
 
 - `collide_parity` runs the demo scenes for a number of steps, then random box pairs, boxes on the ground, grids and crossing bars. It compares `AvbdCollideBoxes` with upstream's `Manifold::collide`: contact count, feature keys, rA, rB and normal. Expected: bit-identical.
 - `contact_parity` compares `AvbdInitContacts` (warm start), `AvbdEvaluateContact` and `AvbdStampContact` (the primal terms: right-hand side and Hessian) and `AvbdContactDual` (multiplier, penalty, stick) with upstream's `Manifold::initialize`, `updatePrimal` and `updateDual`. Expected: bit-identical. The one input that cannot match is the angular constraint: upstream multiplies quaternions in a different order than `AvbdQuatDifference`, which differs by rounding, and penalties up to 1e8 amplify it to a few percent of the right-hand side. The harness therefore feeds the HLSL side upstream's own angular difference; `AvbdQuatDifference` itself is checked by the stage P and U tests.
+- `sphere_check` runs `AvbdCollideSpheres` and `AvbdCollideSphereBox` (sphere as A and as B, centers inside boxes included). Upstream has no spheres, so nothing is compared bit for bit: every result is checked against an independent computation in double precision (a contact exists exactly when the surfaces overlap, the points are on the surfaces, the normal is a unit vector from B to A, the normal row's constraint value is minus the depth, the feature key is `AVBD_SPHERE_FEATURE`). It was checked against mutations of the HLSL.
 
 What it does not check: that Unity compiles the HLSL (`half` and other reserved words, resource arguments), the compute shaders' buffer glue, the C# code.
 
