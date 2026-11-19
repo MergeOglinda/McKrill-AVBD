@@ -176,7 +176,9 @@ namespace McKrill.Avbd.Samples
 
         ClickMode clickMode = ClickMode.Shoot;
         string explosionStatus = "";
-        BodyStateRecord[] poseReadback; // for the ray cast of an explosion
+        AvbdRaycaster raycaster;       // the ray of an explosion, cast on the GPU
+        int simulationVersion;         // counts the simulations built, so that the answer of a ray cast of an old one is dropped
+        const float RayMaxDistance = 10000f;
 
         Rect panelScreenRect;
         GUIStyle boldLabel;
@@ -356,6 +358,8 @@ namespace McKrill.Avbd.Samples
             int jointCapacity = blocks * 3 + 8;
             constraints = new AvbdConstraintBuffers(bodies, jointCapacity, null, manifoldSlots, plasticJoints ? jointCapacity : 0);
             solver = new AvbdSolver(bodies, settings, null, constraints);
+            raycaster = new AvbdRaycaster(bodies);
+            simulationVersion++;
 
             // The ground and every block go in one batch (the ground is element 0, then the blocks wall by wall, row by row, column by column), so that
             // the bodies can be placed in Z-curve order. The handles come back in the order of the list; the joints and the instances use them.
@@ -481,6 +485,8 @@ namespace McKrill.Avbd.Samples
             instanceBuffer = null;
             instances = null;
             staticCount = 0;
+            if (raycaster != null) raycaster.Dispose();
+            raycaster = null;
             if (solver != null) solver.Dispose();
             if (constraints != null) constraints.Dispose();
             if (bodies != null) bodies.Dispose();
@@ -544,86 +550,40 @@ namespace McKrill.Avbd.Samples
             shotsChanged = true;
         }
 
-        // An explosion where the ray from the center of the camera meets a body, pushed explosionDepth meters further along the ray. The package queues it
-        // (AvbdSolver.Explode) and applies it in the predict stage of the next step, so while the simulation is paused it waits for the next Step.
+        // An explosion where the ray from the center of the camera meets a body, pushed explosionDepth meters further along the ray. The ray is cast on the GPU
+        // (AvbdRaycaster) against the poses where they are, so the CPU never reads them: only the distance of the nearest hit comes back, a few frames later, and
+        // then the explosion is queued (AvbdSolver.Explode). The package applies it in the predict stage of the next step, so while the simulation is paused
+        // it waits for the next Step. The radius, force and depth of the click are the ones in the panel when it is clicked.
         void Explode()
         {
             if (cam == null)
                 return;
 
             Transform t = cam.transform;
-            Vector3 origin = t.position;
-            Vector3 direction = t.forward;
-            if (!TryRaycast(origin, direction, out float hitDistance))
+            float3 origin = t.position;
+            float3 direction = t.forward;
+            float radius = explosionRadius;
+            float force = explosionForce;
+            float depth = explosionDepth;
+            int version = simulationVersion; // a Reset before the answer arrives makes it stale
+
+            explosionStatus = "Casting the ray...";
+            raycaster.Cast(origin, direction, RayMaxDistance, (hit, distance) =>
             {
-                explosionStatus = "No explosion: the ray from the camera hit nothing.";
-                return;
-            }
-
-            Vector3 center = origin + direction * (hitDistance + explosionDepth);
-            explosionStatus = solver.Explode(center, explosionRadius, explosionForce)
-                ? "Explosion at (" + center.x.ToString("0.0") + ", " + center.y.ToString("0.0") + ", " + center.z.ToString("0.0") + "), "
-                    + hitDistance.ToString("0.0") + " m to the surface" + (paused ? " (waits for the next step)" : "")
-                : "Not queued: too many explosions for one step.";
-        }
-
-        // The nearest body that the ray hits: the ground, a block or a shot. The poses live on the GPU, so this reads them back (once per click, not per
-        // frame) and tests the boxes on the CPU. Returns false if the ray hits nothing.
-        bool TryRaycast(Vector3 origin, Vector3 direction, out float distance)
-        {
-            distance = float.MaxValue;
-            bodies.ApplyEdits(); // a shot fired a moment ago has its pose
-
-            int count = bodies.State.count;
-            if (poseReadback == null || poseReadback.Length != count)
-                poseReadback = new BodyStateRecord[count];
-            bodies.State.GetData(poseReadback);
-
-            bool hit = false;
-            for (int i = 0; i < staticCount; i++)
-            {
-                InstanceData instance = staticInstances[i];
-                hit |= RayHitsBox(poseReadback[instance.slot], new float3(instance.sizeX, instance.sizeY, instance.sizeZ), origin, direction, ref distance);
-            }
-            for (int i = 0; i < shots.Count; i++)
-                hit |= RayHitsBox(poseReadback[shots[i].handle.Slot], new float3(shots[i].size), origin, direction, ref distance);
-            return hit;
-        }
-
-        // Ray against an oriented box (the slab method in the box's frame). If the hit is nearer than nearest, stores it there and returns true.
-        // A ray that starts inside the box hits it at distance 0.
-        static bool RayHitsBox(in BodyStateRecord pose, float3 size, float3 origin, float3 direction, ref float nearest)
-        {
-            quaternion inverse = math.conjugate(new quaternion(pose.rotation));
-            float3 o = math.rotate(inverse, origin - pose.position.xyz);
-            float3 d = math.rotate(inverse, direction);
-            float3 halfSize = size * 0.5f;
-
-            float near = float.NegativeInfinity;
-            float far = float.PositiveInfinity;
-            for (int axis = 0; axis < 3; axis++)
-            {
-                if (math.abs(d[axis]) < 1e-8f)
+                if (version != simulationVersion || solver == null)
+                    return;
+                if (!hit)
                 {
-                    if (math.abs(o[axis]) > halfSize[axis])
-                        return false; // parallel to the slab and outside it
-                    continue;
+                    explosionStatus = "No explosion: the ray from the camera hit nothing.";
+                    return;
                 }
-                float t1 = (-halfSize[axis] - o[axis]) / d[axis];
-                float t2 = (halfSize[axis] - o[axis]) / d[axis];
-                near = Mathf.Max(near, Mathf.Min(t1, t2));
-                far = Mathf.Min(far, Mathf.Max(t1, t2));
-                if (near > far)
-                    return false;
-            }
 
-            if (far < 0f)
-                return false; // the box is behind the ray
-            float t = Mathf.Max(near, 0f);
-            if (t >= nearest)
-                return false;
-            nearest = t;
-            return true;
+                float3 center = origin + math.normalizesafe(direction) * (distance + depth);
+                explosionStatus = solver.Explode(center, radius, force)
+                    ? "Explosion at (" + center.x.ToString("0.0") + ", " + center.y.ToString("0.0") + ", " + center.z.ToString("0.0") + "), "
+                        + distance.ToString("0.0") + " m to the surface" + (paused ? " (waits for the next step)" : "")
+                    : "Not queued: too many explosions for one step.";
+            });
         }
 
         void RemoveShot(int index)

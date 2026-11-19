@@ -586,6 +586,10 @@ Not measured. Cost: the histogram and the classification are a few hundred bytes
 
 **Limits.** The coloring that follows is persistent with contacts and does not wait; a rebuild still waits (section 9, stage C). Constraints cannot be removed, and removing a body that has constraints is not supported.
 
+### Ray cast
+
+`AvbdRaycaster.Cast(origin, direction, maxDistance, callback)` (`AvbdRaycast.compute`) finds the nearest body a ray hits, without the CPU reading any pose. Two kernels: `Clear` sets a one-word result to the bits of `maxDistance`, and `Cast`, one thread per slot below the high-water mark, skips free slots, takes the ray into the box's frame (state record pose, size from the shape record) and runs the slab test. A ray that starts inside a box hits it at distance 0. A hit nearer than the result does `InterlockedMin` on the float's bits, which sort like the floats for values from 0 up, so no sort or float atomic is needed. The 4-byte result comes back with `AsyncGPUReadback`, a few frames later; the callback gets whether anything was hit and the distance. It is not part of `Step()`; the poses it tests are those the last step left (edits are applied first). The tests are in `RaycastTests`.
+
 ## 12. Constraints (step 4: joints and springs)
 
 Contacts without a broadphase are section 13. Joints and springs share one record, a constraint, with the kind in the high 8 bits of the flags word (rule P7).

@@ -50,7 +50,7 @@ The panel also shows how many joints have broken, out of all. Plastic yield, the
 
 ## Explosions
 
-In explosion mode a left click casts a ray from the center of the camera. The demo reads the poses back and tests the ray against the ground, the blocks and the shots (oriented boxes, on the CPU, once per click). The explosion goes off at the nearest hit plus *Depth* meters along the ray. If the ray hits nothing, nothing happens and the panel says so.
+In explosion mode a left click casts a ray from the center of the camera. The ray is cast on the GPU (`AvbdRaycaster`), against the ground, the blocks and the shots where they are, so the CPU never reads the poses; only the distance of the nearest hit comes back, a few frames after the click. The explosion goes off at the nearest hit plus *Depth* meters along the ray. If the ray hits nothing, nothing happens and the panel says so.
 
 The physics is `AvbdSolver.Explode`: a radial impulse applied in the next step's predict stage, so the joints and contacts resist it in the same step. The push falls off to zero at the radius, is radial (no upward bias and no shock shell), and has a small off-center angular kick, hashed from the body's slot, that makes the blocks tumble. The immobile bottom row and the ground do not move. The explosion has no visual or audio effect. While the simulation is paused, the explosion waits for the next step (**Step** or **Space**). At most 16 explosions are applied per step.
 
