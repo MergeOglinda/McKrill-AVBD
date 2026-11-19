@@ -16,15 +16,15 @@ mkdir -p "$OUT/stub/GL" "$OUT/work" "$OUT/hlsl/$INC"
 for f in maths.h solver.h scenes.h collide.cpp force.cpp joint.cpp manifold.cpp rigid.cpp spring.cpp solver.cpp; do
     cp "$SRC/$f" "$OUT/work/"
 done
-cp "$HERE/hlsl_shim.h" "$HERE/parity_random.h" "$HERE/collide_parity.cpp" "$HERE/contact_parity.cpp" "$OUT/work/"
+cp "$HERE/hlsl_shim.h" "$HERE/parity_random.h" "$HERE/collide_parity.cpp" "$HERE/contact_parity.cpp" "$HERE/sphere_check.cpp" "$OUT/work/"
 
 # HLSL float literals are float; in C++ they would be double and change the rounding. Give them an f suffix.
-for f in AvbdQuaternion AvbdBoxCollision AvbdContacts AvbdCommon AvbdContactSolve AvbdContactWarmStart; do
+for f in AvbdQuaternion AvbdBoxCollision AvbdSphereCollision AvbdContacts AvbdCommon AvbdContactSolve AvbdContactWarmStart; do
     perl -pe 's/(?<![\w.])(\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+|\.\d+)(?![\w.])/$1f/g' "$ROOT/Packages/com.mckrill.avbd/Shaders/Include/$f.hlsl" > "$OUT/hlsl/$INC/$f.hlsl"
 done
 
 # -ffp-contract=off keeps the float results independent of fused multiply-add availability.
 FLAGS="-O2 -ffp-contract=off -std=c++17 -w -I $OUT/stub -I $OUT/hlsl"
 UPSTREAM="collide.cpp force.cpp joint.cpp manifold.cpp rigid.cpp spring.cpp solver.cpp"
-(cd "$OUT/work" && g++ $FLAGS -I. collide_parity.cpp $UPSTREAM -o "$OUT/collide_parity" && g++ $FLAGS -I. contact_parity.cpp $UPSTREAM -o "$OUT/contact_parity")
+(cd "$OUT/work" && g++ $FLAGS -I. collide_parity.cpp $UPSTREAM -o "$OUT/collide_parity" && g++ $FLAGS -I. contact_parity.cpp $UPSTREAM -o "$OUT/contact_parity" && g++ $FLAGS -I. sphere_check.cpp -o "$OUT/sphere_check")
 echo "$OUT"

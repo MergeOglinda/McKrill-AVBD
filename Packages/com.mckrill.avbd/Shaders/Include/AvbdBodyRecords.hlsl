@@ -14,7 +14,14 @@
 #define AVBD_BODY_FLAGS_MASK 0x00FFFFFFu
 #define AVBD_BODY_KIND_SHIFT 24
 
-#define AVBD_KIND_BOX 0u
+#define AVBD_KIND_BOX    0u
+#define AVBD_KIND_SPHERE 1u // the shape record holds the diameter in x, y and z
+
+// The shape kind of a body, from the flags word (_BodyMeta[slot].ident.x).
+uint AvbdBodyKind(uint flagsWord)
+{
+    return flagsWord >> AVBD_BODY_KIND_SHIFT;
+}
 
 // 64 B, hot. Pose and step-start pose.
 struct BodyStateRecord

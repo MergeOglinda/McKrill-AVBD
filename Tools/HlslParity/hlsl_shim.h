@@ -15,6 +15,8 @@ struct float3
     float x, y, z;
     float3() = default;
     float3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+    float &operator[](int i) { return (&x)[i]; }
+    const float &operator[](int i) const { return (&x)[i]; }
 };
 
 // xyz aliases x, y and z, like the swizzle it stands for. (GNU anonymous struct in a union.)
@@ -109,3 +111,9 @@ inline float3x3 mul(float3x3 a, float3x3 b)
     return r;
 }
 inline float3x3 operator+(float3x3 a, float3x3 b) { return float3x3(a.row[0] + b.row[0], a.row[1] + b.row[1], a.row[2] + b.row[2]); }
+
+// Used by AvbdSphereCollision.hlsl. any(a != b) of two float3 is "a differs from b in some component".
+inline float3 abs(float3 v) { return float3(::fabsf(v.x), ::fabsf(v.y), ::fabsf(v.z)); }
+inline float3 clamp(float3 v, float3 lo, float3 hi) { return float3(clamp(v.x, lo.x, hi.x), clamp(v.y, lo.y, hi.y), clamp(v.z, lo.z, hi.z)); }
+inline bool operator!=(float3 a, float3 b) { return a.x != b.x || a.y != b.y || a.z != b.z; }
+inline bool any(bool b) { return b; }
