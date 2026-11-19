@@ -268,6 +268,281 @@ namespace McKrill.Avbd.Tests
             }
         }
 
+        // ---- explosions ------------------------------------------------------------------------------------------
+
+        static CpuBodyArrays OneBody(float3 size, float density, float3 position, quaternion rotation, float3 linear, float3 angular)
+        {
+            var queue = new BodyEditQueue(8);
+            var oracle = new CpuBodyArrays(8);
+            BodyDescriptor d = BodyDescriptor.Box(size, density, position);
+            d.rotation = rotation;
+            d.linearVelocity = linear;
+            d.angularVelocity = angular;
+            queue.Spawn(d);
+            var commands = new List<EditCommand>();
+            queue.Drain(commands);
+            oracle.Apply(commands);
+            return oracle;
+        }
+
+        static CpuExplosion Blast(float3 center, float radius, float impulse, uint seed = 0u) =>
+            new CpuExplosion { center = center, radius = radius, impulse = impulse, seed = seed };
+
+        [Test]
+        public void Explosion_Hash_IsDeterministic_AndTheRandomNumbersStayInRange()
+        {
+            Assert.AreEqual(CpuExplosionMath.Hash(12345u), CpuExplosionMath.Hash(12345u));
+            Assert.AreNotEqual(CpuExplosionMath.Hash(1u), CpuExplosionMath.Hash(2u));
+
+            float3 min = new float3(float.MaxValue), max = new float3(float.MinValue), sum = float3.zero;
+            const int n = 4000;
+            for (uint slot = 0; slot < n; slot++)
+            {
+                float3 r = CpuExplosionMath.Random(slot, 3u);
+                min = math.min(min, r);
+                max = math.max(max, r);
+                sum += r;
+            }
+            Assert.GreaterOrEqual(min.x, -1f);
+            Assert.Less(max.x, 1f);
+            Assert.IsTrue(math.all(min < -0.95f) && math.all(max > 0.95f), "the numbers cover the range");
+            Assert.IsTrue(math.all(math.abs(sum / n) < 0.05f), "and have no bias");
+            Assert.IsFalse(math.all(CpuExplosionMath.Random(5u, 1u) == CpuExplosionMath.Random(5u, 2u)), "another explosion, another kick");
+        }
+
+        [Test]
+        public void Explosion_ChangesTheVelocityByTheImpulseOverTheMass_AlongTheLineFromTheCenter_AndFallsOffToZero()
+        {
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            // A 2 kg box (density 2, 1 m side) 3 m to the +x side of the center, with a radius of 6 m: falloff (1 - 3/6)^2 = 0.25.
+            CpuBodyArrays bodies = OneBody(new float3(1f), 2f, new float3(3f, 0f, 0f), quaternion.identity, new float3(1f, 2f, 3f), float3.zero);
+            bodies.Motion[0].prevLinearVel = new float4(0.5f, 0.5f, 0.5f, 0f);
+
+            CpuPredict.Run(bodies, settings, 1, new[] { Blast(float3.zero, 6f, 80f) }, 1);
+
+            float expected = 80f * 0.25f / 2f; // 10 m/s
+            AssertNear(new float3(1f + expected, 2f, 3f), bodies.Motion[0].linearVel.xyz, 1e-5f, "velocity");
+            AssertNear(new float3(0.5f + expected, 0.5f, 0.5f), bodies.Motion[0].prevLinearVel.xyz, 1e-5f, "previous velocity moves with it, so the warm start sees no blast");
+
+            // At the edge (and outside) nothing happens.
+            bodies = OneBody(new float3(1f), 2f, new float3(6f, 0f, 0f), quaternion.identity, new float3(1f, 2f, 3f), float3.zero);
+            CpuPredict.Run(bodies, settings, 1, new[] { Blast(float3.zero, 6f, 80f) }, 1);
+            AssertNear(new float3(1f, 2f, 3f), bodies.Motion[0].linearVel.xyz, 0f, "at the radius");
+            AssertNear(float3.zero, bodies.Motion[0].angularVel.xyz, 0f, "no spin either");
+        }
+
+        [Test]
+        public void Explosion_HasNoUpwardBias_AndLighterBodiesFlyFaster()
+        {
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            // Below the center: pushed down. Beside it: pushed sideways, not up.
+            CpuBodyArrays below = OneBody(new float3(1f), 1f, new float3(0f, -2f, 0f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(below, settings, 1, new[] { Blast(float3.zero, 10f, 100f) }, 1);
+            Assert.Less(below.Motion[0].linearVel.y, 0f);
+            Assert.AreEqual(0f, below.Motion[0].linearVel.x, 1e-6f);
+
+            CpuBodyArrays beside = OneBody(new float3(1f), 1f, new float3(2f, 0f, 0f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(beside, settings, 1, new[] { Blast(float3.zero, 10f, 100f) }, 1);
+            Assert.AreEqual(0f, beside.Motion[0].linearVel.y, 1e-6f);
+
+            CpuBodyArrays heavy = OneBody(new float3(1f), 4f, new float3(2f, 0f, 0f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(heavy, settings, 1, new[] { Blast(float3.zero, 10f, 100f) }, 1);
+            Assert.AreEqual(beside.Motion[0].linearVel.x / 4f, heavy.Motion[0].linearVel.x, 1e-4f, "four times the mass, a quarter of the speed");
+        }
+
+        [Test]
+        public void Explosion_GivesASmallSpin_ThatTheSlotAndTheSeedDetermine()
+        {
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            float3 size = new float3(1f, 0.5f, 0.5f);
+            CpuBodyArrays a = OneBody(size, 1f, new float3(2f, 0f, 0f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(a, settings, 1, new[] { Blast(float3.zero, 10f, 100f, 4u) }, 1);
+            float3 spin = a.Motion[0].angularVel.xyz;
+            Assert.Greater(math.length(spin), 0f);
+
+            // The same body and explosion again: the same spin.
+            CpuBodyArrays again = OneBody(size, 1f, new float3(2f, 0f, 0f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(again, settings, 1, new[] { Blast(float3.zero, 10f, 100f, 4u) }, 1);
+            AssertNear(spin, again.Motion[0].angularVel.xyz, 0f, "repeatable");
+
+            // Another explosion: another spin.
+            CpuBodyArrays other = OneBody(size, 1f, new float3(2f, 0f, 0f), quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(other, settings, 1, new[] { Blast(float3.zero, 10f, 100f, 5u) }, 1);
+            Assert.Greater(math.length(spin - other.Motion[0].angularVel.xyz), 0f);
+
+            // The angular impulse is bounded by the offset: |offset| <= sqrt(3) * kick * radius of the body, |impulse| = 100 * falloff.
+            float falloff = 0.8f * 0.8f;
+            float bound = math.sqrt(3f) * CpuExplosionMath.Kick * 0.5f * math.length(size) * 100f * falloff;
+            float3 moments = a.Mass[0].momentMass.xyz;
+            Assert.LessOrEqual(math.length(spin * moments), bound * 1.001f, "the spin is a small kick, not a blow");
+        }
+
+        [Test]
+        public void Explosion_AtTheCenter_PicksADirection_AndStaysFinite()
+        {
+            CpuBodyArrays bodies = OneBody(new float3(1f), 1f, float3.zero, quaternion.identity, float3.zero, float3.zero);
+            CpuPredict.Run(bodies, AvbdSolverSettings.Default, 1, new[] { Blast(float3.zero, 5f, 10f) }, 1);
+
+            float3 v = bodies.Motion[0].linearVel.xyz;
+            Assert.IsTrue(math.all(math.isfinite(v)));
+            Assert.AreEqual(10f, math.length(v), 1e-4f, "the full impulse, along a hashed direction");
+        }
+
+        [Test]
+        public void Explosion_DoesNotTouchStaticOrKinematicBodies()
+        {
+            var queue = new BodyEditQueue(8);
+            var oracle = new CpuBodyArrays(8);
+            BodyDescriptor stat = BodyDescriptor.Box(new float3(1f), 0f, new float3(1f, 0f, 0f));
+            BodyDescriptor kin = BodyDescriptor.Box(new float3(1f), 1f, new float3(2f, 0f, 0f));
+            kin.kinematic = true;
+            queue.Spawn(stat);
+            queue.Spawn(kin);
+            var commands = new List<EditCommand>();
+            queue.Drain(commands);
+            oracle.Apply(commands);
+
+            CpuPredict.Run(oracle, AvbdSolverSettings.Default, 2, new[] { Blast(float3.zero, 10f, 100f) }, 1);
+
+            Assert.IsTrue(math.all(oracle.Motion[0].linearVel == float4.zero));
+            Assert.IsTrue(math.all(oracle.Motion[1].linearVel == float4.zero));
+            Assert.IsTrue(math.all(oracle.Motion[1].angularVel == float4.zero));
+        }
+
+        [Test]
+        public void Explosion_NoExplosions_LeavesThePredictPhaseUnchanged()
+        {
+            var rng = new System.Random(3);
+            CpuBodyArrays plain = OneBody(new float3(1f), 1f, new float3(1f, 2f, 3f), quaternion.EulerXYZ(0.3f, 0.2f, 0.1f), V(rng, 3f), V(rng, 3f));
+            CpuBodyArrays none = OneBody(new float3(1f), 1f, new float3(1f, 2f, 3f), quaternion.EulerXYZ(0.3f, 0.2f, 0.1f), plain.Motion[0].linearVel.xyz, plain.Motion[0].angularVel.xyz);
+
+            CpuPredict.Run(plain, AvbdSolverSettings.Default, 1);
+            CpuPredict.Run(none, AvbdSolverSettings.Default, 1, new CpuExplosion[4], 0);
+
+            Assert.IsTrue(math.all(plain.State[0].position == none.State[0].position));
+            Assert.IsTrue(math.all(plain.Inertial[0].position == none.Inertial[0].position));
+        }
+
+        [Test]
+        public void Gpu_Explosions_MatchTheOracle_OnRandomBodies()
+        {
+            RequireCompute();
+            var rng = new System.Random(91);
+
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            var oracle = new CpuBodyArrays(Capacity);
+            var applied = new List<EditCommand>();
+            var handles = new List<BodyHandle>();
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            {
+                for (int i = 0; i < 100; i++)
+                {
+                    BodyDescriptor d = BodyDescriptor.Box(new float3(F(rng, 0.3f, 2f), F(rng, 0.3f, 2f), F(rng, 0.3f, 2f)),
+                        i % 7 == 0 ? 0f : F(rng, 0.2f, 2f), V(rng, 12f));
+                    d.rotation = quaternion.EulerXYZ(F(rng, 0f, 6f), F(rng, 0f, 6f), F(rng, 0f, 6f));
+                    d.linearVelocity = V(rng, 5f);
+                    d.angularVelocity = V(rng, 5f);
+                    d.kinematic = i % 11 == 0;
+                    handles.Add(buffers.Spawn(d));
+                }
+                for (int i = 3; i < handles.Count; i += 9)
+                    buffers.Remove(handles[i]);
+
+                buffers.ApplyEdits(applied);
+                oracle.Apply(applied);
+                for (int slot = 0; slot < buffers.HighWaterMark; slot++)
+                    oracle.Motion[slot].prevLinearVel = new float4(oracle.Motion[slot].linearVel.xyz - V(rng, 0.2f), 0f);
+                buffers.Motion.SetData(oracle.Motion);
+
+                using (var solver = new AvbdSolver(buffers, settings))
+                {
+                    // Overlapping explosions: a body in the reach of several is hit by each in turn, with the seeds 0, 1 and 2 that the solver hands out.
+                    var blasts = new[]
+                    {
+                        Blast(new float3(0f, 0f, 0f), 9f, 40f, 0u),
+                        Blast(new float3(4f, -2f, 3f), 7f, -25f, 1u),
+                        Blast(new float3(-3f, 3f, 1f), 12f, 60f, 2u),
+                    };
+                    foreach (CpuExplosion e in blasts)
+                        Assert.IsTrue(solver.Explode(e.center, e.radius, e.impulse));
+                    Assert.AreEqual(3, solver.PendingExplosionCount);
+
+                    CpuPredict.Run(oracle, settings, buffers.HighWaterMark, blasts, blasts.Length);
+                    solver.DispatchPredict();
+                    Assert.AreEqual(0, solver.PendingExplosionCount, "the queue is emptied by the step that applies it");
+                }
+
+                var state = new BodyStateRecord[Capacity];
+                var motion = new BodyMotionRecord[Capacity];
+                var inertial = new BodyInertialRecord[Capacity];
+                buffers.State.GetData(state);
+                buffers.Motion.GetData(motion);
+                buffers.Inertial.GetData(inertial);
+
+                int moved = 0;
+                for (int slot = 0; slot < Capacity; slot++)
+                {
+                    string what = "slot " + slot;
+                    AssertNear(oracle.Motion[slot].linearVel, motion[slot].linearVel, 1e-4f, what + " velocity");
+                    AssertNear(oracle.Motion[slot].prevLinearVel, motion[slot].prevLinearVel, 1e-4f, what + " previous velocity");
+                    AssertNear(oracle.Motion[slot].angularVel, motion[slot].angularVel, 1e-3f, what + " angular velocity");
+                    AssertNear(oracle.State[slot].position, state[slot].position, 1e-4f, what + " position");
+                    AssertNear(oracle.State[slot].rotation, state[slot].rotation, 1e-5f, what + " rotation");
+                    AssertNear(oracle.Inertial[slot].position, inertial[slot].position, 1e-4f, what + " inertial position");
+                    if (math.any(oracle.Motion[slot].linearVel != float4.zero))
+                        moved++;
+                }
+                Assert.Greater(moved, 20, "the scene is meant to have bodies in reach");
+            }
+        }
+
+        [Test]
+        public void Gpu_Explosion_IsOneShot_AndTheNextPredictLeavesTheVelocityAlone()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(16))
+            using (var solver = new AvbdSolver(buffers, AvbdSolverSettings.Default))
+            {
+                BodyHandle h = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(2f, 0f, 0f)));
+                buffers.ApplyEdits();
+
+                Assert.IsTrue(solver.Explode(float3.zero, 4f, 8f));
+                solver.DispatchPredict();
+
+                var motion = new BodyMotionRecord[16];
+                buffers.Motion.GetData(motion);
+                float falloff = 0.5f * 0.5f;
+                Assert.AreEqual(8f * falloff / 1f, motion[h.Slot].linearVel.x, 1e-4f, "impulse * falloff / mass, away from the center");
+                Assert.AreEqual(0f, motion[h.Slot].linearVel.y, 1e-4f, "no upward bias");
+                float3 first = motion[h.Slot].linearVel.xyz;
+
+                solver.DispatchPredict();
+                buffers.Motion.GetData(motion);
+                AssertNear(first, motion[h.Slot].linearVel.xyz, 0f, "no explosion queued: the second predict does not touch the velocity");
+            }
+        }
+
+        [Test]
+        public void Explode_RejectsBadValues_AndDropsWhatDoesNotFit()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(16))
+            using (var solver = new AvbdSolver(buffers, AvbdSolverSettings.Default))
+            {
+                Assert.Throws<ArgumentException>(() => solver.Explode(new float3(float.NaN, 0f, 0f), 1f, 1f));
+                Assert.Throws<ArgumentException>(() => solver.Explode(float3.zero, 0f, 1f));
+                Assert.Throws<ArgumentException>(() => solver.Explode(float3.zero, -1f, 1f));
+                Assert.Throws<ArgumentException>(() => solver.Explode(float3.zero, 1f, float.PositiveInfinity));
+                Assert.AreEqual(0, solver.PendingExplosionCount);
+
+                for (int i = 0; i < AvbdSolver.MaxExplosionsPerStep; i++)
+                    Assert.IsTrue(solver.Explode(float3.zero, 1f, 1f));
+                Assert.IsFalse(solver.Explode(float3.zero, 1f, 1f), "the queue is full");
+                Assert.AreEqual(AvbdSolver.MaxExplosionsPerStep, solver.PendingExplosionCount);
+            }
+        }
+
         // ---- helpers --------------------------------------------------------------------------------------------
 
         static void RequireCompute()

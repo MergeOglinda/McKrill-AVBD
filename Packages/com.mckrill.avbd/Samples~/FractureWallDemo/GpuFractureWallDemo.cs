@@ -98,6 +98,14 @@ namespace McKrill.Avbd.Samples
         [Tooltip("Shots alive at once. Shooting more removes the oldest.")]
         [SerializeField, Min(1)] int maxShots = 100;
 
+        [Header("Explosion")]
+        [Tooltip("Reach of an explosion in meters: a block whose center is farther from the explosion is not touched, and the push falls off to zero at this distance.")]
+        [SerializeField, Range(1f, 50f)] float explosionRadius = 10f;
+        [Tooltip("Impulse in N s that a body at the center of the explosion would receive. A body's velocity changes by this times a falloff (1 at the center, 0 at the radius, squared) divided by its mass, so the light blocks fly (0.25 kg by default) and a heavy shot hardly moves.")]
+        [SerializeField, Range(0.1f, 1000f)] float explosionForce = 10f;
+        [Tooltip("Meters behind the surface that the camera ray hits, along the ray, where the explosion goes off: 0 on the surface, more to go inside.")]
+        [SerializeField, Range(0f, 20f)] float explosionDepth = 1f;
+
         [Header("View")]
         [Tooltip("Fly camera: right drag to look, W A S D to move, Q and E for down and up, Shift for faster, mouse wheel to dolly.")]
         [SerializeField] bool controlCamera = true;
@@ -116,6 +124,13 @@ namespace McKrill.Avbd.Samples
         const float GroundHalfExtent = 100f;
         const float BlockGap = 0.01f; // between neighbors; the wall starts almost at rest
         const bool zCurveOrder = true;
+
+        // What a left click does.
+        enum ClickMode
+        {
+            Shoot,
+            Explode,
+        }
 
         AvbdBodyBuffers bodies;
         AvbdConstraintBuffers constraints;
@@ -152,10 +167,16 @@ namespace McKrill.Avbd.Samples
 
         // Requests made from OnGUI, applied in Update so the IMGUI control count never changes between Layout and Repaint.
         bool requestShoot;
+        bool requestExplode;
+        bool requestToggleMode;
         bool requestVolley;
         bool requestReset;
         bool requestClearShots;
         bool requestStep;
+
+        ClickMode clickMode = ClickMode.Shoot;
+        string explosionStatus = "";
+        BodyStateRecord[] poseReadback; // for the ray cast of an explosion
 
         Rect panelScreenRect;
         GUIStyle boldLabel;
@@ -226,8 +247,14 @@ namespace McKrill.Avbd.Samples
                 BuildSimulation();
                 requestReset = false;
                 requestShoot = false;
+                requestExplode = false;
                 requestVolley = false;
                 requestClearShots = false;
+            }
+            if (requestToggleMode)
+            {
+                clickMode = clickMode == ClickMode.Shoot ? ClickMode.Explode : ClickMode.Shoot;
+                requestToggleMode = false;
             }
             if (requestClearShots)
             {
@@ -238,6 +265,11 @@ namespace McKrill.Avbd.Samples
             {
                 Shoot();
                 requestShoot = false;
+            }
+            if (requestExplode)
+            {
+                Explode();
+                requestExplode = false;
             }
             if (requestVolley)
             {
@@ -512,6 +544,88 @@ namespace McKrill.Avbd.Samples
             shotsChanged = true;
         }
 
+        // An explosion where the ray from the center of the camera meets a body, pushed explosionDepth meters further along the ray. The package queues it
+        // (AvbdSolver.Explode) and applies it in the predict stage of the next step, so while the simulation is paused it waits for the next Step.
+        void Explode()
+        {
+            if (cam == null)
+                return;
+
+            Transform t = cam.transform;
+            Vector3 origin = t.position;
+            Vector3 direction = t.forward;
+            if (!TryRaycast(origin, direction, out float hitDistance))
+            {
+                explosionStatus = "No explosion: the ray from the camera hit nothing.";
+                return;
+            }
+
+            Vector3 center = origin + direction * (hitDistance + explosionDepth);
+            explosionStatus = solver.Explode(center, explosionRadius, explosionForce)
+                ? "Explosion at (" + center.x.ToString("0.0") + ", " + center.y.ToString("0.0") + ", " + center.z.ToString("0.0") + "), "
+                    + hitDistance.ToString("0.0") + " m to the surface" + (paused ? " (waits for the next step)" : "")
+                : "Not queued: too many explosions for one step.";
+        }
+
+        // The nearest body that the ray hits: the ground, a block or a shot. The poses live on the GPU, so this reads them back (once per click, not per
+        // frame) and tests the boxes on the CPU. Returns false if the ray hits nothing.
+        bool TryRaycast(Vector3 origin, Vector3 direction, out float distance)
+        {
+            distance = float.MaxValue;
+            bodies.ApplyEdits(); // a shot fired a moment ago has its pose
+
+            int count = bodies.State.count;
+            if (poseReadback == null || poseReadback.Length != count)
+                poseReadback = new BodyStateRecord[count];
+            bodies.State.GetData(poseReadback);
+
+            bool hit = false;
+            for (int i = 0; i < staticCount; i++)
+            {
+                InstanceData instance = staticInstances[i];
+                hit |= RayHitsBox(poseReadback[instance.slot], new float3(instance.sizeX, instance.sizeY, instance.sizeZ), origin, direction, ref distance);
+            }
+            for (int i = 0; i < shots.Count; i++)
+                hit |= RayHitsBox(poseReadback[shots[i].handle.Slot], new float3(shots[i].size), origin, direction, ref distance);
+            return hit;
+        }
+
+        // Ray against an oriented box (the slab method in the box's frame). If the hit is nearer than nearest, stores it there and returns true.
+        // A ray that starts inside the box hits it at distance 0.
+        static bool RayHitsBox(in BodyStateRecord pose, float3 size, float3 origin, float3 direction, ref float nearest)
+        {
+            quaternion inverse = math.conjugate(new quaternion(pose.rotation));
+            float3 o = math.rotate(inverse, origin - pose.position.xyz);
+            float3 d = math.rotate(inverse, direction);
+            float3 halfSize = size * 0.5f;
+
+            float near = float.NegativeInfinity;
+            float far = float.PositiveInfinity;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                if (math.abs(d[axis]) < 1e-8f)
+                {
+                    if (math.abs(o[axis]) > halfSize[axis])
+                        return false; // parallel to the slab and outside it
+                    continue;
+                }
+                float t1 = (-halfSize[axis] - o[axis]) / d[axis];
+                float t2 = (halfSize[axis] - o[axis]) / d[axis];
+                near = Mathf.Max(near, Mathf.Min(t1, t2));
+                far = Mathf.Min(far, Mathf.Max(t1, t2));
+                if (near > far)
+                    return false;
+            }
+
+            if (far < 0f)
+                return false; // the box is behind the ray
+            float t = Mathf.Max(near, 0f);
+            if (t >= nearest)
+                return false;
+            nearest = t;
+            return true;
+        }
+
         void RemoveShot(int index)
         {
             bodies.Remove(shots[index].handle);
@@ -664,20 +778,44 @@ namespace McKrill.Avbd.Samples
             GUILayout.BeginArea(new Rect(margin, margin, width, Screen.height / scale - 2f * margin));
             GUILayout.BeginVertical(GUI.skin.box);
 
-            GUILayout.Label("Shot", boldLabel);
-            GUILayout.Label("Speed: " + shotSpeed.ToString("0") + " m/s");
-            shotSpeed = GUILayout.HorizontalSlider(shotSpeed, 5f, 80f);
+            // What a left click does. The button only asks: the mode changes in Update, so the controls below never change in the middle of an event.
+            if (GUILayout.Button(clickMode == ClickMode.Shoot ? "Left click: shoot boxes   (switch to explosions)" : "Left click: explosions   (switch to shooting boxes)"))
+                requestToggleMode = true;
+            GUILayout.Space(4f);
 
-            GUILayout.Label("Size: " + shotSize.ToString("0.00") + " m");
-            shotSize = GUILayout.HorizontalSlider(shotSize, 0.2f, 2f);
+            if (clickMode == ClickMode.Shoot)
+            {
+                GUILayout.Label("Shot", boldLabel);
+                GUILayout.Label("Speed: " + shotSpeed.ToString("0") + " m/s");
+                shotSpeed = GUILayout.HorizontalSlider(shotSpeed, 5f, 80f);
 
-            // Mass on a log scale: 0.1 to 200.
-            GUILayout.Label("Mass: " + shotMass.ToString(shotMass < 10f ? "0.0" : "0") + " kg   (density " + (shotMass / (shotSize * shotSize * shotSize)).ToString("0.#") + ")");
-            float logMass = GUILayout.HorizontalSlider(Mathf.Log10(shotMass), -1f, Mathf.Log10(200f));
-            shotMass = Mathf.Clamp(Mathf.Pow(10f, logMass), 0.1f, 200f);
+                GUILayout.Label("Size: " + shotSize.ToString("0.00") + " m");
+                shotSize = GUILayout.HorizontalSlider(shotSize, 0.2f, 2f);
 
-            if (tunnelRisk)
-                GUILayout.Label("A shot moves farther than its size per step: it may pass through thin boxes.");
+                // Mass on a log scale: 0.1 to 200.
+                GUILayout.Label("Mass: " + shotMass.ToString(shotMass < 10f ? "0.0" : "0") + " kg   (density " + (shotMass / (shotSize * shotSize * shotSize)).ToString("0.#") + ")");
+                float logMass = GUILayout.HorizontalSlider(Mathf.Log10(shotMass), -1f, Mathf.Log10(200f));
+                shotMass = Mathf.Clamp(Mathf.Pow(10f, logMass), 0.1f, 200f);
+
+                if (tunnelRisk)
+                    GUILayout.Label("A shot moves farther than its size per step: it may pass through thin boxes.");
+            }
+            else
+            {
+                GUILayout.Label("Explosion", boldLabel);
+                GUILayout.Label("Radius: " + explosionRadius.ToString("0.0") + " m");
+                explosionRadius = GUILayout.HorizontalSlider(explosionRadius, 1f, 50f);
+
+                // Force on a log scale: 0.1 to 1000 N s. A block (0.25 kg by default) at the center gets force / mass.
+                float blockMass = blockDensity * blockSize.x * blockSize.y * blockSize.z;
+                GUILayout.Label("Force: " + explosionForce.ToString(explosionForce < 10f ? "0.0" : "0") + " N s   (" + (explosionForce / blockMass).ToString("0") + " m/s for a block at the center)");
+                explosionForce = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(explosionForce), -1f, 3f)), 0.1f, 1000f);
+
+                GUILayout.Label("Depth: " + explosionDepth.ToString("0.0") + " m   (behind the surface the camera ray hits)");
+                explosionDepth = GUILayout.HorizontalSlider(explosionDepth, 0f, 20f);
+
+                GUILayout.Label(explosionStatus);
+            }
 
             GUILayout.Space(4f);
             GUILayout.Label("Solver", boldLabel);
@@ -735,7 +873,7 @@ namespace McKrill.Avbd.Samples
                 GUILayout.Label("running slower than real time");
 
             GUILayout.Space(4f);
-            GUILayout.Label("Left click: shoot   V: volley   Space: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
+            GUILayout.Label("Left click: shoot or explode (the mode button)   V: volley\nSpace: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
 
             GUILayout.EndVertical();
             Rect used = GUILayoutUtility.GetLastRect();
@@ -770,7 +908,10 @@ namespace McKrill.Avbd.Samples
 
             if (e.type == EventType.MouseDown && e.button == 0)
             {
-                requestShoot = true;
+                if (clickMode == ClickMode.Explode)
+                    requestExplode = true;
+                else
+                    requestShoot = true;
                 e.Use();
             }
             else if (controlCamera && e.type == EventType.MouseDrag && e.button == 1)

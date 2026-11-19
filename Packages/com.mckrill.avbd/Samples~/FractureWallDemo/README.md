@@ -1,6 +1,6 @@
 # GPU Fracture Wall Demo
 
-A brick wall (75 x 75 blocks by default, in ten walls) on the GPU solver. The blocks are held together by joints that break under load, or that can bend and then break (plastic joints). Click to shoot a box from the camera into the wall.
+A brick wall (75 x 75 blocks by default, in ten walls) on the GPU solver. The blocks are held together by joints that break under load, or that can bend and then break (plastic joints). Click to shoot a box from the camera into the wall, or switch the click to explosions.
 
 The controls are the same as in the *GPU Pyramid Demo*, and the panel has the wall's properties on top of the shot's.
 
@@ -17,7 +17,7 @@ The project needs a render pipeline that draws a `Universal Render Pipeline/Lit`
 
 | Input | Action |
 | --- | --- |
-| Left click (outside the panel) | Shoot a box in the direction the camera looks |
+| Left click (outside the panel) | Shoot a box in the direction the camera looks, or, in explosion mode, set off an explosion where the camera ray hits |
 | Right drag | Look around |
 | `W` `A` `S` `D`, `Q` `E` | Move, down and up. `Shift` is three times faster |
 | Mouse wheel | Move forward and back |
@@ -27,10 +27,14 @@ The project needs a render pipeline that draws a `Universal Render Pipeline/Lit`
 
 ## The panel
 
-The shot's speed, size and mass, the solver's iterations and the buttons are as in the pyramid demo. The wall's settings take effect on **Reset**, because the package cannot change a joint after it was added.
+The click mode button, the shot's speed, size and mass (or the explosion's radius, force and depth), the solver's iterations and the buttons are as in the pyramid demo. The wall's settings take effect on **Reset**, because the package cannot change a joint after it was added.
 
 | Control | What it does |
 | --- | --- |
+| Click mode button | Switches the left click between shooting boxes and explosions. In explosion mode the panel stops showing the shot's Speed, Size and Mass and shows the explosion's Radius, Force and Depth instead (the shot's values are kept) |
+| Radius | 1 to 50 m. A block whose center is farther from the explosion than this is not touched |
+| Force | 0.1 to 1000 N s (log scale): the impulse at the center of the explosion. A body's velocity changes by this times a falloff `(1 - r/radius)^2` divided by its mass. The label shows the speed a default block (0.25 kg) at the center would get |
+| Depth | 0 to 20 m: how far behind the surface the camera ray hits the explosion goes off, along the ray. 0 is on the surface |
 | C, R, W | Columns (15 to 75), rows (15 to 75) and walls (1 to 10), three sliders on one row; the defaults are 75, 75 and 10. The total block count is shown under them |
 | Block density | 0.1 to 10 (log scale). A block is 1 x 0.5 x 0.5 m, so density 1 is 0.25 kg. Does not apply to the bottom row, which is immobile |
 | Fire volley | Fires 15 shots at once from a grid of 5 by 3 in front of the first wall (x = -30 to 30 m, y = 6, 19 and 32 m, 10 m away, at the default wall size; a smaller wall gets a smaller grid), along +z, with the panel's shot speed, size and mass. It is the volley of the performance tests `Scenario1` to `Scenario4` (`Tests/Performance/FractureWallScene.cs`): with a 2 m or a 1 m shot size and *Plastic yield* off or on, the demo shows the scenario the test times |
@@ -43,6 +47,12 @@ The shot's speed, size and mass, the solver's iterations and the buttons are as 
 | Bend break, Bend limit | A plastic joint that has yielded breaks once it is bent more than the limit (1 to 180 degrees) from where it started |
 
 The panel also shows how many joints have broken, out of all. Plastic yield, the yield threshold and the bend limit are greyed out until *Plastic yield* is on. Like the other joint settings they take effect on **Reset**.
+
+## Explosions
+
+In explosion mode a left click casts a ray from the center of the camera. The demo reads the poses back and tests the ray against the ground, the blocks and the shots (oriented boxes, on the CPU, once per click). The explosion goes off at the nearest hit plus *Depth* meters along the ray. If the ray hits nothing, nothing happens and the panel says so.
+
+The physics is `AvbdSolver.Explode`: a radial impulse applied in the next step's predict stage, so the joints and contacts resist it in the same step. The push falls off to zero at the radius, is radial (no upward bias and no shock shell), and has a small off-center angular kick, hashed from the body's slot, that makes the blocks tumble. The immobile bottom row and the ground do not move. The explosion has no visual or audio effect. While the simulation is paused, the explosion waits for the next step (**Step** or **Space**). At most 16 explosions are applied per step.
 
 ## The wall
 

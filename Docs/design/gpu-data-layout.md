@@ -302,6 +302,23 @@ The adaptive weight w is the fraction of gravity the body actually accelerated b
 
 Statics keep their stale inertial target because no stage reads it for a static body.
 
+#### Explosions
+
+`AvbdSolver.Explode(center, radius, impulse)` queues a one-shot radial impulse (at most 16 per step, `AvbdSolver.MaxExplosionsPerStep`; `Explode` returns false when the queue is full). The next step's stage P applies the queue before it computes the inertial target, so contacts and joints resist the blast within the same step. A step with an empty queue runs the plain `Predict` kernel; one with explosions runs the `PredictExplosions` kernel, a variant of the same code compiled with `AVBD_EXPLOSIONS` (`AvbdExplosions.hlsl`), so the plain steps carry no explosion code and are bit-identical to before. The queue is uploaded as `ExplosionRecord` (32 B: center and radius, impulse, seed).
+
+For each solved body (not free, not kinematic, mass above 0) and each explosion, with `r` the distance from the body's center to the explosion's center and `R` its radius:
+
+| Part | Value |
+| --- | --- |
+| Reach | nothing happens if `r >= R` |
+| Linear | `dv = impulse (1 - r/R)^2 / mass` along `(x - c) / r`. At `r <= 1e-4` the direction is a hashed one. There is no upward bias and no shock shell: the direction is purely radial |
+| Angular | a small off-center kick. The impulse acts at an offset `random[-1,1)^3 * 0.25 * 0.5 * |size|` from the center of mass; `L = cross(offset, impulse)` and `dw = Rot (Rot^T L / principal moments)` |
+| Warm start | `dv` is added to the previous velocity as well, so the adaptive warm start does not read the blast as an acceleration |
+
+The random offset is a PCG hash of `(slot, seed)` with 23-bit integers scaled by powers of two, so the GPU and the oracle agree bit for bit on it, and the solver hands out a new seed for each explosion. Two runs that issue the same explosions in the same order give the same result.
+
+The oracle is `CpuExplosionMath` (called by `CpuPredict.Run`). `PredictTests` checks the arithmetic (impulse over mass, falloff, no upward bias, spin, a body at the center, static and kinematic bodies, an empty queue) and the GPU kernel against the oracle on random bodies, and that an explosion is one-shot.
+
 The oracle is `CpuPredict`. With zero iterations the reference solver runs exactly this phase, so `PredictTests` compares the oracle against `ReferenceSolver` directly, and then the GPU kernel against the oracle.
 
 ### Stage V: primal update
