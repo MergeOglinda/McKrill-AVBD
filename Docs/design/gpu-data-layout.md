@@ -304,7 +304,7 @@ Statics keep their stale inertial target because no stage reads it for a static 
 
 #### Explosions
 
-`AvbdSolver.Explode(center, radius, impulse)` queues a one-shot radial impulse (at most 16 per step, `AvbdSolver.MaxExplosionsPerStep`; `Explode` returns false when the queue is full). The next step's stage P applies the queue before it computes the inertial target, so contacts and joints resist the blast within the same step. A step with an empty queue runs the plain `Predict` kernel; one with explosions runs the `PredictExplosions` kernel, a variant of the same code compiled with `AVBD_EXPLOSIONS` (`AvbdExplosions.hlsl`), so the plain steps carry no explosion code and are bit-identical to before. The queue is uploaded as `ExplosionRecord` (32 B: center and radius, impulse, seed).
+`AvbdSolver.Explode(center, radius, impulse)` queues a one-shot radial impulse (at most 16 per step, `AvbdSolver.MaxExplosionsPerStep`; `Explode` returns false when the queue is full). The next step's stage P applies the queue before it computes the inertial target, so contacts and joints resist the blast within the same step. A step with an empty queue runs the plain `Predict` kernel; one with explosions runs the `PredictExplosions` kernel, a variant of the same code compiled with `AVBD_EXPLOSIONS` (`AvbdExplosions.hlsl`), so the plain steps carry no explosion code and are bit-identical to before. The queue is uploaded as `ExplosionRecord` (48 B, only `float4` and `uint4` members like every record: center and radius, impulse, seed).
 
 For each solved body (not free, not kinematic, mass above 0) and each explosion, with `r` the distance from the body's center to the explosion's center and `R` its radius:
 

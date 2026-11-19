@@ -48,7 +48,7 @@ bool ApplyExplosions(uint slot, float mass, float4 rotation, float3 position, in
         falloff *= falloff;
 
         // Away from the center. A body exactly at the center has no direction: it gets a hashed one.
-        float3 random = AvbdExplosionRandom(slot, e.seed);
+        float3 random = AvbdExplosionRandom(slot, e.ident.x);
         float3 direction;
         if (dist > 1e-4)
         {
@@ -56,12 +56,12 @@ bool ApplyExplosions(uint slot, float mass, float4 rotation, float3 position, in
         }
         else
         {
-            float3 pick = AvbdExplosionRandom(slot, e.seed ^ 0x85EBCA6Bu);
+            float3 pick = AvbdExplosionRandom(slot, e.ident.x ^ 0x85EBCA6Bu);
             float pickLength = length(pick);
             direction = pickLength > 1e-6 ? pick / pickLength : float3(1.0, 0.0, 0.0);
         }
 
-        float3 impulse = direction * (e.impulse * falloff);
+        float3 impulse = direction * (e.impulse.x * falloff);
         float3 dv = impulse / mass;
         linearVel += dv;
         prevLinearVel += dv;
