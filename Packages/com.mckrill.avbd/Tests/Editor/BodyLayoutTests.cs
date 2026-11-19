@@ -500,6 +500,9 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(AvbdBroadphase.StaticCellFlag, d["AVBD_BP_STATIC_FLAG"]);
             Assert.AreEqual(AvbdBroadphase.LargeCellFlag, d["AVBD_BP_LARGE_FLAG"]);
             Assert.AreEqual(AvbdBroadphase.CoarseCellFlag, d["AVBD_BP_COARSE_FLAG"]);
+            Assert.AreEqual(AvbdBroadphase.SphereCellFlag, d["AVBD_BP_SPHERE_FLAG"]);
+            Assert.AreEqual(AvbdBroadphase.PairSphereA, d["AVBD_PAIR_SPHERE_A"]);
+            Assert.AreEqual(AvbdBroadphase.PairSphereB, d["AVBD_PAIR_SPHERE_B"]);
             StringAssert.Contains("AVBD_BP_CELL_MARGIN " + AvbdBroadphase.CellMargin.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture),
                 ReadInclude("AvbdBroadphaseParams.hlsl"));
 

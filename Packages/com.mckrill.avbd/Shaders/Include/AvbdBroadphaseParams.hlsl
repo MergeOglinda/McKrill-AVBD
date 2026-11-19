@@ -42,6 +42,7 @@
 #define AVBD_BP_STATIC_FLAG 0x80000000u // a static (or kinematic) body
 #define AVBD_BP_LARGE_FLAG  0x00000002u // a large body (in the large list, not in the grid)
 #define AVBD_BP_COARSE_FLAG 0x00000001u // a body of the coarse level
+#define AVBD_BP_SPHERE_FLAG 0x00000004u // a sphere body: the candidate loop reads the shape kind from the word it reads anyway, not from _BodyMeta
 
 // The grid is a hash table of AVBD_BP_SCAN_GROUP-aligned size, counted into per-cell lists (counting sort) and scanned in blocks of this many cells.
 #define AVBD_BP_SCAN_GROUP 1024
@@ -59,7 +60,11 @@
 // 16 B. One candidate pair. Body A is the body with the higher slot, like the reference solver's pair loop.
 struct PairRecord
 {
-    uint4 pair; // x = body A, y = body B, z = AVBD_PAIR_*, w unused (zero)
+    uint4 pair; // x = body A, y = body B, z = AVBD_PAIR_*, w = AVBD_PAIR_SPHERE_* bits (zero for two boxes)
 };
+
+// Bits of PairRecord.pair.w: the shape kind of the two bodies, so that the narrowphase picks its collision function without reading _BodyMeta.
+#define AVBD_PAIR_SPHERE_A 1u // body A is a sphere
+#define AVBD_PAIR_SPHERE_B 2u // body B is a sphere
 
 #endif // MCKRILL_AVBD_BROADPHASE_PARAMS_INCLUDED

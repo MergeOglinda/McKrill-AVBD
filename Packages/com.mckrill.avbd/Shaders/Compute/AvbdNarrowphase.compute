@@ -184,7 +184,8 @@ void NpAllocate(uint3 id : SV_DispatchThreadID)
         return;
     uint index = _Bin == 0u ? item : _DynamicPairCapacity + item; // index in _Pairs
 
-    uint2 bodies = _Pairs[index].pair.xy;
+    uint4 pairWord = _Pairs[index].pair;
+    uint2 bodies = pairWord.xy;
 
     // Does the pair have a slot already?
     uint entry = HashPair(bodies.x, bodies.y);
@@ -205,8 +206,11 @@ void NpAllocate(uint3 id : SV_DispatchThreadID)
     {
         BodyStateRecord stateA = _BodyState[bodies.x];
         BodyStateRecord stateB = _BodyState[bodies.y];
-        if (AvbdCollideShapes(AvbdBodyKind(_BodyMeta[bodies.x].ident.x), stateA.startPosition.xyz, stateA.startRotation, _BodyShape[bodies.x].sizeFriction.xyz,
-                              AvbdBodyKind(_BodyMeta[bodies.y].ident.x), stateB.startPosition.xyz, stateB.startRotation, _BodyShape[bodies.y].sizeFriction.xyz) == 0)
+        // The shape kinds come with the pair (AVBD_PAIR_SPHERE_*), so that a box pair reads nothing from _BodyMeta here.
+        uint kindA = (pairWord.w & AVBD_PAIR_SPHERE_A) != 0u ? AVBD_KIND_SPHERE : AVBD_KIND_BOX;
+        uint kindB = (pairWord.w & AVBD_PAIR_SPHERE_B) != 0u ? AVBD_KIND_SPHERE : AVBD_KIND_BOX;
+        if (AvbdCollideShapes(kindA, stateA.startPosition.xyz, stateA.startRotation, _BodyShape[bodies.x].sizeFriction.xyz,
+                              kindB, stateB.startPosition.xyz, stateB.startRotation, _BodyShape[bodies.y].sizeFriction.xyz) == 0)
             return;
     }
 

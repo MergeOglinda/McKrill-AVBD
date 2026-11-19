@@ -20,11 +20,13 @@ namespace McKrill.Avbd
     [StructLayout(LayoutKind.Sequential)]
     internal struct PairRecord
     {
-        /// <summary>x = body A (the higher slot), y = body B (the lower slot), z = <see cref="PairKind"/>, w unused (zero).</summary>
+        /// <summary>x = body A (the higher slot), y = body B (the lower slot), z = <see cref="PairKind"/>, w = <see cref="AvbdBroadphase.PairSphereA"/> and <see cref="AvbdBroadphase.PairSphereB"/> bits (zero for two boxes).</summary>
         public uint4 pair;
 
         public uint BodyA => pair.x;
         public uint BodyB => pair.y;
         public PairKind Kind => (PairKind)pair.z;
+        public bool BodyAIsSphere => (pair.w & AvbdBroadphase.PairSphereA) != 0u;
+        public bool BodyBIsSphere => (pair.w & AvbdBroadphase.PairSphereB) != 0u;
     }
 }
