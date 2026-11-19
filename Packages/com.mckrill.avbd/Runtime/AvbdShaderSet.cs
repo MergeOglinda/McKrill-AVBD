@@ -23,6 +23,7 @@ namespace McKrill.Avbd
         [SerializeField] ComputeShader coloring;
         [SerializeField] ComputeShader broadphase;
         [SerializeField] ComputeShader lists;
+        [SerializeField] ComputeShader raycast;
         [SerializeField] Shader instancedBoxes;
 
         /// <summary>Trivial kernel that writes a known pattern into a buffer. Proves the toolchain.</summary>
@@ -54,6 +55,9 @@ namespace McKrill.Avbd
 
         /// <summary>Stage G: per-body constraint lists (CSR), built from the constraint records and the manifold pool.</summary>
         public ComputeShader Lists => lists;
+
+        /// <summary>Ray against the boxes of every body (<see cref="AvbdRaycaster"/>).</summary>
+        public ComputeShader Raycast => raycast;
 
         /// <summary>
         /// Draw shader for boxes read straight from the body state buffer, one instance per box (<c>Shaders/Rendering/AvbdInstancedBoxes.shader</c>).

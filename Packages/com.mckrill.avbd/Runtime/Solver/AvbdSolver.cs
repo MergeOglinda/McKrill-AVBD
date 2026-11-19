@@ -1,3 +1,4 @@
+using Unity.Mathematics;
 using UnityEngine;
 
 namespace McKrill.Avbd
@@ -18,6 +19,7 @@ namespace McKrill.Avbd
         bool ownsConstraints;
         AvbdBroadphase broadphase;
         readonly int predictKernel;
+        readonly int predictExplosionsKernel;
         readonly int primalKernel;
         readonly int initKernel;
         readonly int dualKernel;
@@ -53,6 +55,17 @@ namespace McKrill.Avbd
         static readonly int DynamicPairCapacityId = Shader.PropertyToID("_DynamicPairCapacity");
         static readonly int StaticPairCapacityId = Shader.PropertyToID("_StaticPairCapacity");
         static readonly int DirtySlotsId = Shader.PropertyToID("_DirtySlots");
+        static readonly int ExplosionsId = Shader.PropertyToID("_Explosions");
+        static readonly int ExplosionCountId = Shader.PropertyToID("_ExplosionCount");
+
+        /// <summary>Most explosions one <see cref="Step"/> applies (<see cref="Explode"/> returns false for more). Mirrors AVBD_MAX_EXPLOSIONS in AvbdExplosions.hlsl.</summary>
+        public const int MaxExplosionsPerStep = 16;
+
+        // Explosions queued for the next step, and the buffer they are uploaded to (made at the first explosion).
+        readonly ExplosionRecord[] pendingExplosions = new ExplosionRecord[MaxExplosionsPerStep];
+        int pendingExplosionCount;
+        uint explosionSeed;
+        GraphicsBuffer explosionBuffer;
 
         /// <param name="constraints">Joints and springs, or null for a solver of free bodies only.</param>
         public AvbdSolver(AvbdBodyBuffers bodies, AvbdSolverSettings settings, AvbdShaderSet shaderSet = null, AvbdConstraintBuffers constraints = null)
@@ -69,6 +82,7 @@ namespace McKrill.Avbd
                 throw new System.InvalidOperationException("The AvbdShaderSet has no predict shader.");
 
             predictKernel = shaders.Predict.FindKernel("Predict");
+            predictExplosionsKernel = shaders.Predict.FindKernel("PredictExplosions");
 
             if (shaders.Primal == null)
                 throw new System.InvalidOperationException("The AvbdShaderSet has no primal shader.");
@@ -154,6 +168,40 @@ namespace McKrill.Avbd
             DispatchVelocity();
         }
 
+        /// <summary>
+        /// Queues an explosion for the next <see cref="Step"/>: a one-shot radial impulse. In that step's predict stage every solved body (not
+        /// static, not kinematic) whose center of mass is closer than <paramref name="radius"/> to <paramref name="center"/> has its velocity changed by
+        /// <c>impulse * (1 - distance / radius)^2 / mass</c> along the line from the center, so a light body flies faster than a heavy one and
+        /// nothing is moved at the edge. The impulse acts a little off the center of mass (a quarter of the body's radius, in a direction hashed from the
+        /// slot and the explosion), so a body is also given a small spin. There is no upward bias and no shock wave: every body in range is hit in the same step.
+        /// The constraints and contacts solve the step like any other, so a jointed structure is loaded through its joints.
+        /// </summary>
+        /// <param name="center">World position of the explosion.</param>
+        /// <param name="radius">Reach in meters; above zero.</param>
+        /// <param name="impulse">Impulse in N s that a body at the center would receive. May be negative (an implosion).</param>
+        /// <returns>False if <see cref="MaxExplosionsPerStep"/> explosions are already queued for the next step; the explosion is dropped.</returns>
+        /// <exception cref="System.ArgumentException">A value is not finite, or the radius is not above zero.</exception>
+        public bool Explode(float3 center, float radius, float impulse)
+        {
+            if (!math.all(math.isfinite(center)) || !float.IsFinite(radius) || !float.IsFinite(impulse))
+                throw new System.ArgumentException("An explosion needs finite values.");
+            if (!(radius > 0f))
+                throw new System.ArgumentException("The radius of an explosion must be above zero.", nameof(radius));
+            if (pendingExplosionCount >= MaxExplosionsPerStep)
+                return false;
+
+            pendingExplosions[pendingExplosionCount++] = new ExplosionRecord
+            {
+                centerRadius = new float4(center, radius),
+                impulse = impulse,
+                seed = explosionSeed++,
+            };
+            return true;
+        }
+
+        /// <summary>Number of explosions queued for the next <see cref="Step"/>.</summary>
+        public int PendingExplosionCount => pendingExplosionCount;
+
         /// <summary>True if <see cref="Step"/> runs the broadphase (stage B).</summary>
         public bool BroadphaseEnabled => broadphase != null;
 
@@ -190,19 +238,35 @@ namespace McKrill.Avbd
         {
             broadphase?.Dispose();
             broadphase = null;
+            explosionBuffer?.Release();
+            explosionBuffer = null;
+            pendingExplosionCount = 0;
             if (ownsConstraints)
                 constraints.Dispose();
             constraints = null;
             ownsConstraints = false;
         }
 
-        // Stage P over every slot that has ever been used.
+        // Stage P over every slot that has ever been used. With explosions queued it runs the variant that applies them first, and the queue is emptied.
         internal void DispatchPredict()
         {
             ComputeShader shader = shaders.Predict;
             SolverUniforms.Bind(shader, settings);
-            bodies.BindTo(shader, predictKernel);
-            AvbdDispatch.Linear(shader, predictKernel, bodies.HighWaterMark);
+
+            int kernel = predictKernel;
+            if (pendingExplosionCount > 0)
+            {
+                kernel = predictExplosionsKernel;
+                if (explosionBuffer == null)
+                    explosionBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, MaxExplosionsPerStep, Unity.Collections.LowLevel.Unsafe.UnsafeUtility.SizeOf<ExplosionRecord>());
+                explosionBuffer.SetData(pendingExplosions, 0, 0, pendingExplosionCount);
+                shader.SetBuffer(kernel, ExplosionsId, explosionBuffer);
+                shader.SetInt(ExplosionCountId, pendingExplosionCount);
+                pendingExplosionCount = 0;
+            }
+
+            bodies.BindTo(shader, kernel);
+            AvbdDispatch.Linear(shader, kernel, bodies.HighWaterMark);
         }
 
         // Stage U over every slot that has ever been used. Reads the pose and the start-of-step pose, writes the Motion record.

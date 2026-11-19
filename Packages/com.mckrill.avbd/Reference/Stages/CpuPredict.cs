@@ -8,7 +8,8 @@ namespace McKrill.Avbd.Reference
     /// </summary>
     internal static class CpuPredict
     {
-        public static void Run(CpuBodyArrays bodies, in AvbdSolverSettings settings, int count)
+        /// <param name="explosions">The explosions queued for the step (<see cref="AvbdSolver.Explode"/>), or null for none.</param>
+        public static void Run(CpuBodyArrays bodies, in AvbdSolverSettings settings, int count, CpuExplosion[] explosions = null, int explosionCount = 0)
         {
             float dt = settings.dt;
             float3 gravity = settings.gravity;
@@ -24,6 +25,20 @@ namespace McKrill.Avbd.Reference
                 BodyStateRecord s = bodies.State[slot];
                 BodyMotionRecord v = bodies.Motion[slot];
                 float3 position = s.position.xyz;
+                if (explosions != null && explosionCount > 0)
+                {
+                    float3 explodedLinear = v.linearVel.xyz;
+                    float3 explodedPrev = v.prevLinearVel.xyz;
+                    float3 explodedAngular = v.angularVel.xyz;
+                    if (CpuExplosionMath.Apply((uint)slot, bodies.Mass[slot].momentMass.w, bodies.Mass[slot].momentMass.xyz, bodies.Shape[slot].sizeFriction.xyz,
+                            new quaternion(s.rotation), position, explosions, explosionCount, ref explodedLinear, ref explodedPrev, ref explodedAngular))
+                    {
+                        v.linearVel = new float4(explodedLinear, 0f);
+                        v.prevLinearVel = new float4(explodedPrev, 0f);
+                        v.angularVel = new float4(explodedAngular, 0f);
+                        bodies.Motion[slot] = v;
+                    }
+                }
                 float3 linearVel = v.linearVel.xyz;
                 float3 angularVel = v.angularVel.xyz;
 
