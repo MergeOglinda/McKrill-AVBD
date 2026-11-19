@@ -233,16 +233,25 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
     float friction = pair.normalFriction.w;
 
     uint first = manifold * AVBD_MAX_CONTACTS;
+
+    // A sphere contact takes its lever arms at the rotation of the start of the step (three-avbd): a rolling sphere turns about 0.1 rad per step,
+    // and a lever arm that turned with it would put a false separation into the normal row. The angular displacement is still measured from the start.
+    // Decided once per manifold, before the loop (a sphere pair has one point, which carries the key; a box pair has none with this key), so that the
+    // start rotations are dead after this and cost a box manifold neither registers nor a select per point and iteration.
+    float4 leverRotA = rotA;
+    float4 leverRotB = rotB;
+    if (ContactPointKey(_ContactPoints[first]) == AVBD_SPHERE_FEATURE)
+    {
+        leverRotA = stateA.startRotation;
+        leverRotB = stateB.startRotation;
+    }
+
     for (uint k = 0; k < count; k++)
     {
         ContactPointRecord p = _ContactPoints[first + k];
         float3 penalty = ContactPointPenalty(p);
-        // A sphere contact takes its lever arms at the rotation of the start of the step (three-avbd): a rolling sphere turns about 0.1 rad per step,
-        // and a lever arm that turned with it would put a false separation into the normal row. The angular displacement is still measured from the start.
-        bool sphere = ContactPointKey(p) == AVBD_SPHERE_FEATURE;
         AvbdContactEval e = AvbdEvaluateContactInBasis(
-            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz,
-            sphere ? stateA.startRotation : rotA, sphere ? stateB.startRotation : rotB,
+            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, leverRotA, leverRotB,
             dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
         AvbdContactStamp s = AvbdStampContact(e, penalty, isA);
 
