@@ -7,7 +7,7 @@ The numbers come from the "##performancetestresult2:{...}" JSON lines that the P
 (the same lines also appear in the suite's own output, so the script reads the test cases only). Tests are matched by their full name.
 Python 3 standard library only.
 
-Columns: test, group, unit, kind, baseline/candidate status, then for the median, average, min, max, standard deviation and sample count the value in
+Columns: test, group, unit, kind, baseline/candidate status, then for the median, average, sum, min, max, standard deviation and sample count the value in
 each run, and delta_median / delta_median_pct / delta_avg_pct (candidate minus baseline, in the baseline's unit), and a verdict.
 Verdict: 'better' or 'worse' when the median moved by more than --threshold percent (the direction follows the group's IncreaseIsBetter flag), 'same'
 otherwise. A group that is a plain count (unit Undefined: bodies, joints, manifold slots, ...) is 'same' or 'changed'. A test or group that is in only one
@@ -66,7 +66,7 @@ def num(v):
 def compare(base_tests, cand_tests, threshold):
     header = ["test", "group", "unit", "kind", "baseline_status", "candidate_status",
               "baseline_median", "candidate_median", "delta_median", "delta_median_pct",
-              "baseline_avg", "candidate_avg", "delta_avg_pct",
+              "baseline_avg", "candidate_avg", "delta_avg_pct", "baseline_sum", "candidate_sum",
               "baseline_min", "candidate_min", "baseline_max", "candidate_max",
               "baseline_stddev", "candidate_stddev", "baseline_samples", "candidate_samples", "verdict"]
     rows = []
@@ -93,10 +93,10 @@ def compare(base_tests, cand_tests, threshold):
             else:
                 factor = 1.0
             if gb:
-                row.update(baseline_median=gb["Median"], baseline_avg=gb["Average"], baseline_min=gb["Min"], baseline_max=gb["Max"],
+                row.update(baseline_median=gb["Median"], baseline_avg=gb["Average"], baseline_sum=gb["Sum"], baseline_min=gb["Min"], baseline_max=gb["Max"],
                            baseline_stddev=gb["StandardDeviation"], baseline_samples=len(gb["Samples"]))
             if gc:
-                row.update(candidate_median=gc["Median"] * factor, candidate_avg=gc["Average"] * factor, candidate_min=gc["Min"] * factor,
+                row.update(candidate_median=gc["Median"] * factor, candidate_avg=gc["Average"] * factor, candidate_sum=gc["Sum"] * factor, candidate_min=gc["Min"] * factor,
                            candidate_max=gc["Max"] * factor, candidate_stddev=gc["StandardDeviation"] * factor,
                            candidate_samples=len(gc["Samples"]))
             if gb and gc:

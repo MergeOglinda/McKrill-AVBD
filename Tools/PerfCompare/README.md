@@ -8,7 +8,7 @@ python3 Tools/PerfCompare/compare_perf.py baseline.xml candidate.xml -o comparis
 
 Both inputs are the NUnit XML result files that Unity's Test Runner exports (*Export results*). The script reads the `##performancetestresult2:` JSON lines in the output of each test case and matches tests by full name. Python 3, standard library only.
 
-Per row: the median, average, min, max, standard deviation and number of samples of both runs, the change of the median (absolute and in percent of the baseline) and of the average, and a verdict:
+Per row: the median, average, sum, min, max, standard deviation and number of samples of both runs, the change of the median (absolute and in percent of the baseline) and of the average, and a verdict:
 
 - `better` / `worse`: the median moved by more than `--threshold` percent (default 5). The direction follows the group's `IncreaseIsBetter` flag, so for the time groups a lower median is `better`.
 - `same`: within the threshold.
