@@ -211,8 +211,8 @@ namespace McKrill.Avbd
             pendingExplosions[pendingExplosionCount++] = new ExplosionRecord
             {
                 centerRadius = new float4(center, radius),
-                impulse = new float4(impulse, 0f, 0f, 0f),
-                ident = new uint4(explosionSeed++, 0u, 0u, 0u),
+                impulse = impulse,
+                seed = explosionSeed++,
             };
             return true;
         }

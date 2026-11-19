@@ -231,9 +231,9 @@ namespace McKrill.Avbd.Tests
         [Test]
         public void ExplosionRecord_HasTheDocumentedSize_AndMatchesTheHlslStruct()
         {
-            Assert.AreEqual(48, UnsafeUtility.SizeOf<ExplosionRecord>());
+            Assert.AreEqual(32, UnsafeUtility.SizeOf<ExplosionRecord>());
             Assert.AreEqual((uint)AvbdSolver.MaxExplosionsPerStep, ReadDefines("AvbdExplosions.hlsl")["AVBD_MAX_EXPLOSIONS"]);
-            AssertStructMatches(ReadInclude("AvbdExplosions.hlsl"), "ExplosionRecord", typeof(ExplosionRecord));
+            AssertStructMatches(ReadInclude("AvbdExplosions.hlsl"), "ExplosionRecord", typeof(ExplosionRecord), allowScalars: true);
         }
 
         [Test]
@@ -501,7 +501,9 @@ namespace McKrill.Avbd.Tests
             AssertStructMatches(ReadInclude("AvbdBroadphaseParams.hlsl"), "PairRecord", typeof(PairRecord));
         }
 
-        static void AssertStructMatches(string hlslSource, string hlslName, Type csharpType)
+        // allowScalars is for the exception to rule P1 (see the layout rules): a record with float, uint and float2 members that fill whole 16 B rows. Every other record
+        // must be made of float4 and uint4 only.
+        static void AssertStructMatches(string hlslSource, string hlslName, Type csharpType, bool allowScalars = false)
         {
             Match match = Regex.Match(hlslSource, @"struct\s+" + hlslName + @"\s*\{([^}]*)\}");
             Assert.IsTrue(match.Success, "struct " + hlslName + " not found in HLSL");
@@ -514,7 +516,9 @@ namespace McKrill.Avbd.Tests
                     continue;
                 Match member = Regex.Match(line, @"^(\w+)\s+(\w+)\s*;$");
                 Assert.IsTrue(member.Success, hlslName + ": cannot parse member '" + line + "'");
-                Assert.IsTrue(member.Groups[1].Value == "float4" || member.Groups[1].Value == "uint4",
+                bool vectorWord = member.Groups[1].Value == "float4" || member.Groups[1].Value == "uint4";
+                bool scalar = member.Groups[1].Value == "float" || member.Groups[1].Value == "uint" || member.Groups[1].Value == "float2";
+                Assert.IsTrue(vectorWord || (allowScalars && scalar),
                     hlslName + "." + member.Groups[2].Value + " is " + member.Groups[1].Value + " (rule P1 allows only float4 and uint4)");
                 hlslMembers.Add(member.Groups[1].Value + " " + member.Groups[2].Value);
             }
@@ -522,7 +526,8 @@ namespace McKrill.Avbd.Tests
             var csharpMembers = new List<string>();
             foreach (FieldInfo field in csharpType.GetFields(BindingFlags.Public | BindingFlags.Instance))
             {
-                string type = field.FieldType == typeof(float4) ? "float4" : field.FieldType == typeof(uint4) ? "uint4" : field.FieldType.Name;
+                string type = field.FieldType == typeof(float4) ? "float4" : field.FieldType == typeof(uint4) ? "uint4"
+                    : allowScalars && field.FieldType == typeof(float) ? "float" : allowScalars && field.FieldType == typeof(uint) ? "uint" : field.FieldType.Name;
                 csharpMembers.Add(type + " " + field.Name);
             }
 
