@@ -461,7 +461,7 @@ namespace McKrill.Avbd.Tests
         }
 
         // The oracle for a converted scene: a record array with room for the contacts of all its bodies.
-        static CpuContacts Oracle(SceneArrays arrays, out ConstraintRecord[] records)
+        internal static CpuContacts Oracle(SceneArrays arrays, out ConstraintRecord[] records)
         {
             records = new ConstraintRecord[CpuContacts.RecordCapacity(arrays.constraintCount, arrays.bodyCount)];
             Array.Copy(arrays.constraints, records, arrays.constraintCount);
@@ -537,7 +537,7 @@ namespace McKrill.Avbd.Tests
         }
 
         // Records of the same contact: identity exactly, values within a tolerance relative to max(1, |value|).
-        static void AssertRecordNear(ConstraintRecord expected, ConstraintRecord actual, float tol, string what)
+        internal static void AssertRecordNear(ConstraintRecord expected, ConstraintRecord actual, float tol, string what)
         {
             Assert.AreEqual(expected.ident, actual.ident, what + " ident");
             AssertNear(expected.anchorA, actual.anchorA, tol, what + " anchorA");
@@ -548,19 +548,19 @@ namespace McKrill.Avbd.Tests
             AssertNear(expected.lambdaLin, actual.lambdaLin, tol, what + " lambda");
         }
 
-        static void RequireCompute()
+        internal static void RequireCompute()
         {
             if (!SystemInfo.supportsComputeShaders)
                 Assert.Ignore("Compute shaders are not supported on this device.");
         }
 
-        static void AssertNear(float3 expected, float3 actual, float tol, string what)
+        internal static void AssertNear(float3 expected, float3 actual, float tol, string what)
         {
             for (int k = 0; k < 3; k++)
                 Assert.AreEqual(expected[k], actual[k], tol * math.max(1f, math.abs(expected[k])), what + "[" + k + "]");
         }
 
-        static void AssertNear(float4 expected, float4 actual, float tol, string what)
+        internal static void AssertNear(float4 expected, float4 actual, float tol, string what)
         {
             for (int k = 0; k < 4; k++)
                 Assert.AreEqual(expected[k], actual[k], tol * math.max(1f, math.abs(expected[k])), what + "[" + k + "]");

@@ -74,6 +74,28 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void Cast_HitsASphereAtItsSurface_NotAtTheCubeAroundIt()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(16))
+            using (var raycaster = new AvbdRaycaster(buffers))
+            {
+                buffers.Spawn(BodyDescriptor.Sphere(1f, 1f, new float3(0f, 0f, 5f)));      // surface at z = 4
+                buffers.Spawn(BodyDescriptor.Sphere(1f, 1f, new float3(0f, 0f, -5f)));     // behind the origin
+                buffers.Spawn(BodyDescriptor.Sphere(0.5f, 0f, new float3(3f, 0f, 2f)));    // beside the ray
+
+                Assert.AreEqual(4f, Cast(buffers, raycaster, new float3(0f), new float3(0f, 0f, 1f), Max), 1e-4f, "head on: the near pole");
+                // A ray at 0.9 m from the axis of the first sphere passes through its cube (half-size 1) but hits the sphere only at
+                // z = 5 - sqrt(1 - 0.81): the cube would give 4.
+                Assert.AreEqual(5f - math.sqrt(1f - 0.81f), Cast(buffers, raycaster, new float3(0.9f, 0f, 0f), new float3(0f, 0f, 1f), Max), 1e-4f, "near the rim");
+                // At 0.9 m on both axes (1.27 m from the axis) the ray passes through the corner of the cube and misses the sphere.
+                Assert.IsTrue(float.IsNaN(Cast(buffers, raycaster, new float3(0.9f, 0.9f, 0f), new float3(0f, 0f, 1f), 4.9f)), "through the corner of the cube");
+                // The ray of the third sphere: it is static, and the ray that starts inside it hits it at 0.
+                Assert.AreEqual(0f, Cast(buffers, raycaster, new float3(3.1f, 0f, 2f), new float3(1f, 0f, 0f), Max), 0f, "from inside");
+            }
+        }
+
+        [Test]
         public void Cast_RejectsBadRays()
         {
             RequireCompute();

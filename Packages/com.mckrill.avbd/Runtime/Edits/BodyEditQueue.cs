@@ -149,7 +149,10 @@ namespace McKrill.Avbd
             return true;
         }
 
-        /// <summary>Changes the box size and recomputes mass and inertia from the density. Density 0 makes the body static.</summary>
+        /// <summary>
+        /// Changes the box size and recomputes mass and inertia from the density. Density 0 makes the body static. For a box body only: a sphere is resized
+        /// with <see cref="SetRadius"/> (the kind of a body is not known here, and a box formula on a sphere would give it the wrong inertia).
+        /// </summary>
         public bool SetShape(BodyHandle handle, float3 size, float density)
         {
             RequireSize(size);
@@ -160,6 +163,22 @@ namespace McKrill.Avbd
             Pending p = Touch(handle.Slot);
             p.command.sizeFriction = new float4(size, p.command.sizeFriction.w);
             p.command.momentMass = BoxMassProperties.Compute(size, density);
+            Mark(p, EditFields.Shape);
+            return true;
+        }
+
+        /// <summary>Changes the radius of a sphere body and recomputes mass and inertia from the density. Density 0 makes the body static. For a sphere body only.</summary>
+        public bool SetRadius(BodyHandle handle, float radius, float density)
+        {
+            if (!(radius > 0f) || !math.isfinite(radius))
+                throw new ArgumentException("radius must be finite and positive.", nameof(radius));
+            RequireNonNegative(density, nameof(density));
+            if (!allocator.IsAlive(handle))
+                return false;
+
+            Pending p = Touch(handle.Slot);
+            p.command.sizeFriction = new float4(new float3(radius * 2f), p.command.sizeFriction.w);
+            p.command.momentMass = SphereMassProperties.Compute(radius, density);
             Mark(p, EditFields.Shape);
             return true;
         }
@@ -265,6 +284,8 @@ namespace McKrill.Avbd
         {
             float4 q = NormalizeRotation(d.rotation);
             BodyFlags flags = d.kinematic ? BodyFlags.Kinematic : BodyFlags.None;
+            // A sphere keeps its diameter in all three components of the size.
+            float3 size = d.sphere ? new float3(d.size.x) : d.size;
             return new EditCommand
             {
                 header = new uint4((uint)EditKind.Spawn, (uint)slot, (uint)EditFields.All, 0u),
@@ -272,9 +293,9 @@ namespace McKrill.Avbd
                 rotation = q,
                 linearVel = new float4(d.linearVelocity, 0f),
                 angularVel = new float4(d.angularVelocity, 0f),
-                momentMass = BoxMassProperties.Compute(d.size, d.density),
-                sizeFriction = new float4(d.size, d.friction),
-                meta = new uint4(BodyFlagLayout.Pack(flags, ShapeKind.Box), d.groupMask, d.appearanceId, 0u),
+                momentMass = d.sphere ? SphereMassProperties.Compute(d.size.x * 0.5f, d.density) : BoxMassProperties.Compute(size, d.density),
+                sizeFriction = new float4(size, d.friction),
+                meta = new uint4(BodyFlagLayout.Pack(flags, d.sphere ? ShapeKind.Sphere : ShapeKind.Box), d.groupMask, d.appearanceId, 0u),
             };
         }
 
@@ -291,7 +312,10 @@ namespace McKrill.Avbd
             RequireFinite(d.linearVelocity, nameof(d.linearVelocity));
             RequireFinite(d.angularVelocity, nameof(d.angularVelocity));
             NormalizeRotation(d.rotation);
-            RequireSize(d.size);
+            if (d.sphere)
+                RequireSize(new float3(d.size.x)); // the diameter
+            else
+                RequireSize(d.size);
             RequireNonNegative(d.density, nameof(d.density));
             RequireNonNegative(d.friction, nameof(d.friction));
             RequireAppearance(d.appearanceId);

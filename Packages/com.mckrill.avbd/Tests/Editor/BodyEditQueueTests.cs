@@ -72,6 +72,69 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void SpawnSphere_EncodesTheDiameterTheKindAndTheMassOfASolidSphere()
+        {
+            var queue = new BodyEditQueue(8);
+            BodyDescriptor d = BodyDescriptor.Sphere(0.5f, 2f, new float3(1f, 2f, 3f));
+            d.friction = 0.25f;
+
+            BodyHandle handle = queue.Spawn(d);
+            EditCommand c = Drain(queue)[0];
+
+            Assert.IsTrue(handle.IsValid);
+            AssertEqual(new float4(1f, 1f, 1f, 0.25f), c.sizeFriction, "the diameter in x, y and z, then the friction");
+            Assert.AreEqual(BodyFlagLayout.Pack(BodyFlags.None, ShapeKind.Sphere), c.meta.x);
+
+            // Volume 4/3 pi r^3 = 0.5236, density 2: mass 1.0472; inertia 2/5 m r^2 about every axis.
+            float mass = 4f / 3f * math.PI * 0.125f * 2f;
+            Assert.AreEqual(mass, c.momentMass.w, 1e-5f);
+            float inertia = 0.4f * mass * 0.25f;
+            Assert.AreEqual(inertia, c.momentMass.x, 1e-5f);
+            Assert.AreEqual(inertia, c.momentMass.y, 1e-5f);
+            Assert.AreEqual(inertia, c.momentMass.z, 1e-5f);
+        }
+
+        [Test]
+        public void SpawnSphere_UsesOnlyTheXOfTheSizeAndRejectsABadRadius()
+        {
+            var queue = new BodyEditQueue(8);
+            BodyDescriptor d = BodyDescriptor.Sphere(1f, 1f, float3.zero);
+            d.size = new float3(2f, -5f, 0f); // y and z are not used for a sphere
+            queue.Spawn(d);
+            AssertEqual(new float4(2f, 2f, 2f, 0.5f), Drain(queue)[0].sizeFriction, "size");
+
+            Assert.Throws<ArgumentException>(() => queue.Spawn(BodyDescriptor.Sphere(0f, 1f, float3.zero)));
+            Assert.Throws<ArgumentException>(() => queue.Spawn(BodyDescriptor.Sphere(-1f, 1f, float3.zero)));
+            Assert.Throws<ArgumentException>(() => queue.Spawn(BodyDescriptor.Sphere(float.NaN, 1f, float3.zero)));
+            Assert.Throws<ArgumentException>(() => queue.Spawn(BodyDescriptor.Sphere(1f, -1f, float3.zero)));
+        }
+
+        [Test]
+        public void SpawnSphere_WithZeroDensity_IsStatic()
+        {
+            var queue = new BodyEditQueue(4);
+            queue.Spawn(BodyDescriptor.Sphere(1f, 0f, float3.zero));
+            Assert.AreEqual(0f, Drain(queue)[0].momentMass.w);
+        }
+
+        [Test]
+        public void SetRadius_ComputesTheMassOfASphereFromTheDensity()
+        {
+            var queue = new BodyEditQueue(4);
+            BodyHandle h = queue.Spawn(BodyDescriptor.Sphere(1f, 1f, float3.zero));
+            Drain(queue);
+
+            Assert.IsTrue(queue.SetRadius(h, 2f, 0.5f));
+            EditCommand c = Drain(queue)[0];
+
+            Assert.AreEqual(EditFields.Shape, c.Fields);
+            AssertEqual(new float4(4f, 4f, 4f, 0f), new float4(c.sizeFriction.xyz, 0f), "the new diameter");
+            AssertEqual(SphereMassProperties.Compute(2f, 0.5f), c.momentMass, "mass properties");
+            Assert.Throws<ArgumentException>(() => queue.SetRadius(h, 0f, 1f));
+            Assert.Throws<ArgumentException>(() => queue.SetRadius(h, 1f, -1f));
+        }
+
+        [Test]
         public void Spawn_NormalizesTheRotation()
         {
             var queue = new BodyEditQueue(2);

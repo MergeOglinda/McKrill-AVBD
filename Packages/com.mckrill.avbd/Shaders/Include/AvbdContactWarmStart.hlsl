@@ -17,7 +17,8 @@ static float3 g_oldPenalty[AVBD_BOX_MAX_CONTACTS];
 static float3 g_oldLambda[AVBD_BOX_MAX_CONTACTS];
 static bool   g_oldStick[AVBD_BOX_MAX_CONTACTS];
 
-// Result, for the g_contactCount contacts. g_contactRA and g_contactRB are updated in place (an old anchor is kept if the old contact stuck).
+// Result, for the g_contactCount contacts. g_contactRA and g_contactRB are updated in place (an old anchor is kept if the old contact stuck, except
+// for a sphere contact).
 static float3 g_contactC0[AVBD_BOX_MAX_CONTACTS];
 static float3 g_contactPenalty[AVBD_BOX_MAX_CONTACTS];
 static float3 g_contactLambda[AVBD_BOX_MAX_CONTACTS];
@@ -48,7 +49,8 @@ void AvbdInitContacts(float alpha, float gamma, float penaltyMin, float penaltyM
                 penalty = g_oldPenalty[j];
                 lambda = g_oldLambda[j];
                 stick = g_oldStick[j];
-                if (g_oldStick[j])
+                // Not for a sphere: its contact point moves over both surfaces as it rolls, and anchors kept from the last step would turn away with it.
+                if (g_oldStick[j] && g_contactKey[i] != AVBD_SPHERE_FEATURE)
                 {
                     g_contactRA[i] = g_oldRA[j];
                     g_contactRB[i] = g_oldRB[j];

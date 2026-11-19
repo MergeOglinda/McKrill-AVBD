@@ -1,7 +1,7 @@
 // Stage B: broadphase. Finds the pairs of bodies whose bounding spheres overlap, with a two-level counting-sort grid like three-avbd's, and drops
 // the ones whose boxes are visibly apart.
 //
-// A body's bounding sphere is centered on its position and has the radius |size| / 2 (half the box diagonal), which is what the
+// A body's bounding sphere is centered on its position and has the radius |size| / 2 (half the box diagonal; for a sphere body its radius), which is what the
 // reference solver's broadphase uses: two bodies are a pair when |dp|^2 <= (rA + rB)^2 and no constraint joins them.
 // The bounding spheres of boxes overlap far more often than the boxes do (a long bar and its neighbor, a ground slab under everything), and
 // every such candidate costs a manifold lookup and a full collision test in the narrow phase, again every step. So a candidate that passes
@@ -109,9 +109,24 @@ uint Classify(uint slot)
     return CLASS_STATIC;
 }
 
+bool IsSphere(uint slot)
+{
+    return AvbdBodyKind(_BodyMeta[slot].ident.x) == AVBD_KIND_SPHERE;
+}
+
+// The radius of the bounding sphere: half the diagonal of a box, the radius of a sphere (half of its diameter, which is in size.x). The kind is an
+// argument so that the candidate loop can take it from the grid word (AVBD_BP_SPHERE_FLAG) instead of reading _BodyMeta for every candidate.
+float RadiusOf(uint slot, bool sphere)
+{
+    float3 size = _BodyShape[slot].sizeFriction.xyz;
+    if (sphere)
+        return size.x * 0.5;
+    return length(size * 0.5);
+}
+
 float Radius(uint slot)
 {
-    return length(_BodyShape[slot].sizeFriction.xyz * 0.5);
+    return RadiusOf(slot, IsSphere(slot));
 }
 
 // The radius bin of a radius: AVBD_BP_BINS_PER_OCTAVE bins per doubling, centered on 1 m.
@@ -205,15 +220,18 @@ struct BpBox
     float3 aabb;
 };
 
-BpBox MakeBpBox(uint slot)
+BpBox MakeBpBox(uint slot, bool sphere)
 {
     BodyStateRecord state = _BodyState[slot];
     BpBox box;
     box.center = state.position.xyz;
     box.halfSize = _BodyShape[slot].sizeFriction.xyz * 0.5;
-    box.axis0 = AvbdQuatRotate(state.rotation, float3(1.0, 0.0, 0.0));
-    box.axis1 = AvbdQuatRotate(state.rotation, float3(0.0, 1.0, 0.0));
-    box.axis2 = AvbdQuatRotate(state.rotation, float3(0.0, 0.0, 1.0));
+    // A sphere is tested as the cube around it, along the world axes (its rotation changes nothing): its bounding box and its "face axes" are then
+    // exact for the world axes and a little too wide for the others, so a sphere is never rejected wrongly.
+    float4 rotation = sphere ? float4(0.0, 0.0, 0.0, 1.0) : state.rotation;
+    box.axis0 = AvbdQuatRotate(rotation, float3(1.0, 0.0, 0.0));
+    box.axis1 = AvbdQuatRotate(rotation, float3(0.0, 1.0, 0.0));
+    box.axis2 = AvbdQuatRotate(rotation, float3(0.0, 0.0, 1.0));
     box.aabb = abs(box.axis0) * box.halfSize.x + abs(box.axis1) * box.halfSize.y + abs(box.axis2) * box.halfSize.z;
     return box;
 }
@@ -243,7 +261,7 @@ bool BoxesSeparated(BpBox a, BpBox b)
         || AxisSeparates(a, b, d, b.axis0) || AxisSeparates(a, b, d, b.axis1) || AxisSeparates(a, b, d, b.axis2);
 }
 
-void Emit(uint bodyA, uint bodyB, uint kind)
+void Emit(uint bodyA, uint bodyB, uint kind, uint shapeBits)
 {
     uint counterWord = kind == AVBD_PAIR_DYNAMIC_DYNAMIC ? AVBD_BP_DYNAMIC_PAIRS : AVBD_BP_STATIC_PAIRS;
     uint capacity = kind == AVBD_PAIR_DYNAMIC_DYNAMIC ? _DynamicPairCapacity : _StaticPairCapacity;
@@ -254,7 +272,7 @@ void Emit(uint bodyA, uint bodyB, uint kind)
     if (index < capacity)
     {
         PairRecord record;
-        record.pair = uint4(bodyA, bodyB, kind, 0u);
+        record.pair = uint4(bodyA, bodyB, kind, shapeBits);
         _Pairs[binStart + index] = record;
     }
 }
@@ -397,7 +415,7 @@ void BpCount(uint3 id : SV_DispatchThreadID)
         return; // a body at a non-finite position makes no pairs
 
     BpGrid grid = LoadGrid();
-    uint flags = kind == CLASS_STATIC ? AVBD_BP_STATIC_FLAG : 0u;
+    uint flags = (kind == CLASS_STATIC ? AVBD_BP_STATIC_FLAG : 0u) | (IsSphere(slot) ? AVBD_BP_SPHERE_FLAG : 0u);
     uint bin = RadiusBin(radius);
     if (bin > grid.smallBin)
     {
@@ -493,6 +511,7 @@ struct BpProbe
     bool solved;
     float3 position;
     float radius;
+    bool sphere;
     BpBox box;
 };
 
@@ -502,8 +521,9 @@ BpProbe MakeProbe(uint slot, bool solved)
     probe.slot = slot;
     probe.solved = solved;
     probe.position = _BodyState[slot].position.xyz;
-    probe.radius = Radius(slot);
-    probe.box = MakeBpBox(slot); // once per body, not once per candidate
+    probe.sphere = IsSphere(slot);
+    probe.radius = RadiusOf(slot, probe.sphere);
+    probe.box = MakeBpBox(slot, probe.sphere); // once per body, not once per candidate
     return probe;
 }
 
@@ -511,18 +531,25 @@ BpProbe MakeProbe(uint slot, bool solved)
 // tests are only evaluated for a pair whose spheres overlap, whether or not && short-circuits, and the lists only for a pair whose boxes touch.
 void TestPair(BpProbe probe, uint other)
 {
-    bool otherStatic = (_BodyCell[other].w & AVBD_BP_STATIC_FLAG) != 0u;
+    uint otherWord = _BodyCell[other].w;
+    bool otherStatic = (otherWord & AVBD_BP_STATIC_FLAG) != 0u;
     if (!probe.solved && otherStatic)
         return; // two static bodies make no pair
 
-    if (SpheresOverlap(probe.position, probe.radius, _BodyState[other].position.xyz, Radius(other)))
+    bool otherSphere = (otherWord & AVBD_BP_SPHERE_FLAG) != 0u; // from the grid word: no _BodyMeta read per candidate
+    if (SpheresOverlap(probe.position, probe.radius, _BodyState[other].position.xyz, RadiusOf(other, otherSphere)))
     {
-        if (!BoxesSeparated(probe.box, MakeBpBox(other)))
+        if (!BoxesSeparated(probe.box, MakeBpBox(other, otherSphere)))
         {
             // The list of the solved body of the pair has the joints and springs that exclude it.
             bool excluded = probe.solved ? Constrained(probe.slot, other) : Constrained(other, probe.slot);
             if (!excluded)
-                Emit(max(probe.slot, other), min(probe.slot, other), (probe.solved && !otherStatic) ? AVBD_PAIR_DYNAMIC_DYNAMIC : AVBD_PAIR_DYNAMIC_STATIC);
+            {
+                // Body A of the pair is the higher slot.
+                bool probeIsA = probe.slot > other;
+                uint shapeBits = ((probeIsA ? probe.sphere : otherSphere) ? AVBD_PAIR_SPHERE_A : 0u) | ((probeIsA ? otherSphere : probe.sphere) ? AVBD_PAIR_SPHERE_B : 0u);
+                Emit(max(probe.slot, other), min(probe.slot, other), (probe.solved && !otherStatic) ? AVBD_PAIR_DYNAMIC_DYNAMIC : AVBD_PAIR_DYNAMIC_STATIC, shapeBits);
+            }
         }
     }
 }

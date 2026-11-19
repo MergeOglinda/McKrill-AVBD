@@ -449,7 +449,7 @@ Not part of this stage: removing the last readback, and temporal coherence. The 
 
 `AvbdBroadphase.compute` finds the pairs of bodies whose bounding spheres overlap and whose boxes are not visibly apart (below). It is the producer of the pair list. The narrowphase (stage N) will be its only consumer; today it still tests all pairs itself (section 13), see the relation below. The sphere is centered on the body position and has the radius `|size| / 2` (half the box diagonal), like the reference solver: two bodies are a pair when `|dp|^2 <= (rA + rB)^2` and no joint or spring joins them. A body at a non-finite position makes no pairs.
 
-**Pair record.** `PairRecord`, 16 B, `uint4`: x = body A, y = body B, z = pair kind, w = 0. Body A is the body with the higher slot (the reference's pair loop makes the newer body body A). Slots, not handles.
+**Pair record.** `PairRecord`, 16 B, `uint4`: x = body A, y = body B, z = pair kind, w = shape bits (`AVBD_PAIR_SPHERE_A` = 1, `AVBD_PAIR_SPHERE_B` = 2: that body is a sphere; 0 for two boxes). Body A is the body with the higher slot (the reference's pair loop makes the newer body body A). Slots, not handles.
 
 **Pair kinds (the bins).** The pair list is one buffer with two bins, each with its own capacity and counter:
 
@@ -667,7 +667,7 @@ None of the stage V, D, U, C or G code or tests has been compiled or run: there 
 
 ## 13. Contacts (stage N)
 
-Box-box contacts for the pairs the broadphase (stage B) finds. The cost is proportional to the number of candidate pairs and touching pairs, not to the square of the number of bodies. Manifolds live in a pool of slots (below); the number of slots is a constructor argument (`contactCapacity`) and the only limit on how many bodies can collide is the memory of the contact records: 1.3 kB per slot.
+Contacts of boxes and spheres (box-box, sphere-box, sphere-sphere) for the pairs the broadphase (stage B) finds. The cost is proportional to the number of candidate pairs and touching pairs, not to the square of the number of bodies. Manifolds live in a pool of slots (below); the number of slots is a constructor argument (`contactCapacity`) and the only limit on how many bodies can collide is the memory of the contact records: 1.3 kB per slot.
 
 The first version of this stage tested every pair of bodies and stored each pair's manifold at a place fixed by its two slots. The CPU oracle (`CpuContacts`) still does that, and the GPU must produce the same manifolds: the oracle is the all-pairs semantics, and the pool is a storage change that must not change them.
 
@@ -708,6 +708,18 @@ Slots are pushed only by `NpRetire` and `Narrowphase` and popped only by `NpAllo
 
 **Indirect dispatch.** The host used to size these dispatches from the capacities: every slot of the pool, every entry of both bins and, for the dual update, eight records per slot, which for a big pool was millions of threads that almost all returned at once, every iteration. Now no count is on the CPU at all: the kernels run over the slots that have been in use and the pairs that were found, through `DispatchIndirect` with arguments the GPU wrote. A count of more than 65,535 groups is laid out in rows of that many groups, like the coloring's (`AvbdIndirect.hlsl`, mirrored by `AvbdIndirect.GroupsFor`); a thread compares its item with the counts again because the last group overshoots. The arguments buffer is created as `IndirectArguments | Raw` and written through a `RWByteAddressBuffer`. The dispatches are still in the same order as before, so nothing about the results changes: a slot above the high-water mark has never been used and would have returned at once.
 
+### Spheres
+
+A body is a box or a sphere; the kind is in the high bits of `_BodyMeta[slot].ident.x` (`BodyFlagLayout.Pack(flags, ShapeKind)`, HLSL `AvbdBodyKind`) and cannot change after the spawn. A sphere stores its **diameter in all three components** of the shape's size (`BodyDescriptor.Sphere(radius, density, position)`), so code that reads the size as a box sees a cube around the sphere; its radius is `size.x / 2`. Mass and inertia come from `SphereMassProperties` (`m = 4/3 pi r^3 rho`, `I = 2/5 m r^2` on all axes). `SetShape` is for boxes; `SetRadius(handle, radius, density)` changes a sphere.
+
+**Narrow phase** (`AvbdSphereCollision.hlsl`, a port of three-avbd's `sphereSphere` and `sphereBox`, dispatched per pair by `AvbdCollideShapes` in `AvbdNarrowphase.compute`; the CPU twin is `CpuSphereCollision`). A pair has at most one contact, and none when the distance between the surfaces is above zero (no margin, like three-avbd). Sphere-sphere: the normal is the unit vector between the centers. Sphere-box: the closest point of the box to the sphere's center in the box's frame; if the center is inside the box the contact is on the face of least penetration. The normal points from B to A as for boxes, so a sphere that is A gets the normal from the box to the sphere and a sphere that is B the opposite. The contact has the feature key `AVBD_SPHERE_FEATURE` (`3 << 24`; box keys use 0 to 2 in the top byte), the constraint value of the normal row is `-depth + margin` as for boxes.
+
+**Rolling.** The contact point of a rolling sphere moves over its surface, so a stuck contact would hold the wrong anchors: a sphere contact **keeps no stick anchors** when the manifold is merged (`AvbdContactWarmStart.hlsl`, `CpuContacts`), the anchors always come from the new narrow phase. Following three-avbd, the lever arms of a sphere contact in the primal and the dual update use the rotation of the **start of the step** instead of the current one (the angular displacement is still measured from the start). This is three-avbd's rule for rolling spheres; it has not been tuned or measured here. The choice is made once per manifold, before the point loop, from the key of point 0 (a sphere pair has one point, a box pair none with the sphere key): a first version selected per point inside the loop, which kept both bodies' start rotations live through the loop of every box manifold and added a select per point and iteration in the primal kernel.
+
+**Ray cast.** `AvbdRaycast.compute` (the explosion ray of the demos) intersects a sphere as a sphere (nearest root of the ray equation, 0 from inside), not as the cube around it; the kind comes from the meta word it already reads for the free flag.
+
+**Broadphase.** The bounding radius of a sphere is its radius. The box rejection treats a sphere as the cube around it along the world axes (its rotation is ignored): conservative, as a rejection must only be one that the narrow phase would also make. `CpuBroadphase` mirrors this. **The shape kind is not read from `_BodyMeta` in the hot loops**: `BpCount` sets `AVBD_BP_SPHERE_FLAG` (4) in the grid word (`_BodyCell.w`), which the candidate loop reads anyway for the static flag, so `TestPair` gets the radius and the box of a candidate from that word; the pair record carries the kinds of its two bodies (`pair.w`), so `NpAllocate` picks its collision function without touching `_BodyMeta` (a first version read the meta record of every candidate and of both bodies of every new pair, which cost time in box-only scenes; not measured since).
+
 ### Step order
 
 `ApplyEdits`, `Rebuild` if needed, B, P, `PrepareContacts` (dirty bits), N (`NpClearTable`, `NpPlan`, `NpRetire`, `NpAllocate` twice, `NpPlan`, `Narrowphase`), `RefreshContactTopology`, `ConstraintInit` (joints and springs), then per iteration the primal sweep per color, `Dual`, `DualContact` (indirect); then U.
@@ -724,7 +736,7 @@ Stage D marks a joint that fractured with the `Broken` flag. Stage G reads the f
 - The high-water mark never falls, so after a burst of contacts (a pile that later spreads out) the dispatches keep the burst's size. They are no bigger than the capacity, which is what they were before. Resetting the mark would need a pass that finds the highest slot in use.
 - A manifold that exists is kept even if a joint or spring is added between its bodies later. A pair that the broadphase does not list is not created.
 - No ignore-collision pairs yet (the reference's `IgnoreCollision`). Pairs joined by a joint or spring are excluded.
-- Only box-box. Contacts of one pair are limited to eight (the reference's limit).
+- Shapes are boxes and spheres (below). Contacts of one pair are limited to eight (the reference's limit; a sphere pair has one). No convex hulls.
 - The lists are rebuilt on the GPU every step and the coloring is persistent (kept colors, a fixed number of rounds, extra rounds and `ColorForce` for the rest, tuned from a readback that arrives late), so a step with contacts has no wait for the GPU in the solver; a `Rebuild()` still waits. The sweep is dispatched indirectly, `ColorCount` times (the cap).
 - After the first step the summation order of a body's contacts may differ from the reference's (the reference appends new manifolds to the lists); the results differ by rounding only.
 
