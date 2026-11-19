@@ -2,13 +2,41 @@ using Unity.Mathematics;
 
 namespace McKrill.Avbd.Reference
 {
-    /// <summary>One explosion for <see cref="CpuPredict"/>: what <see cref="AvbdSolver.Explode"/> queues, with the seed the solver gave it.</summary>
+    /// <summary>One explosion for <see cref="CpuPredict"/>: what <see cref="AvbdSolver.Explode(in ExplosionDescriptor)"/> queues, with the seed the solver gave it.</summary>
     internal struct CpuExplosion
     {
         public float3 center;
         public float radius;
         public float impulse;
         public uint seed;
+
+        /// <summary>0 = sphere (the default), 1 = box (<see cref="ExplosionRegion"/>).</summary>
+        public uint shape;
+        public float3 halfExtents;
+        public quaternion boxRotation;
+
+        /// <summary>The filter on the bodies' group masks. A default struct has an empty include mask and hits nothing; <see cref="Sphere"/> and <see cref="From"/> set it.</summary>
+        public uint includeMask;
+        public uint excludeMask;
+
+        /// <summary>A sphere that hits every body in reach.</summary>
+        public static CpuExplosion Sphere(float3 center, float radius, float impulse, uint seed = 0u) => new CpuExplosion
+        {
+            center = center, radius = radius, impulse = impulse, seed = seed,
+            halfExtents = new float3(1f), boxRotation = quaternion.identity, includeMask = 0xFFFFFFFFu,
+        };
+
+        /// <summary>What the solver queues for a descriptor, from the same record the shader reads (so the normalized rotation is the same).</summary>
+        public static CpuExplosion From(in ExplosionDescriptor descriptor, uint seed)
+        {
+            ExplosionRecord r = descriptor.ToRecord(seed);
+            return new CpuExplosion
+            {
+                center = r.centerRadius.xyz, radius = r.centerRadius.w, impulse = r.halfExtentsImpulse.w, seed = r.ident.x,
+                shape = r.ident.y, halfExtents = r.halfExtentsImpulse.xyz, boxRotation = new quaternion(r.boxRotation),
+                includeMask = r.ident.z, excludeMask = r.ident.w,
+            };
+        }
     }
 
     /// <summary>
@@ -17,6 +45,9 @@ namespace McKrill.Avbd.Reference
     /// </summary>
     internal static class CpuExplosionMath
     {
+        /// <summary>Mirrors AVBD_EXPLOSION_BOX.</summary>
+        public const uint BoxShape = 1u;
+
         /// <summary>Mirrors AVBD_EXPLOSION_KICK.</summary>
         public const float Kick = 0.25f;
 
@@ -47,20 +78,35 @@ namespace McKrill.Avbd.Reference
         /// Mirrors ApplyExplosions: changes the velocities of the body (linear, previous linear and angular) for every explosion that reaches it.
         /// Returns true if one did.
         /// </summary>
-        public static bool Apply(uint slot, float mass, float3 moments, float3 size, quaternion rotation, float3 position,
+        public static bool Apply(uint slot, float mass, uint groupMask, float3 moments, float3 size, quaternion rotation, float3 position,
             CpuExplosion[] explosions, int count, ref float3 linearVel, ref float3 prevLinearVel, ref float3 angularVel)
         {
             bool hit = false;
             for (int i = 0; i < count; i++)
             {
                 CpuExplosion e = explosions[i];
-                float3 d = position - e.center;
-                float distanceSq = math.dot(d, d);
-                if (!(distanceSq < e.radius * e.radius))
+
+                if ((groupMask & e.includeMask) == 0u || (groupMask & e.excludeMask) != 0u)
                     continue;
 
+                float3 d = position - e.center;
+                float distanceSq = math.dot(d, d);
                 float dist = math.sqrt(distanceSq);
-                float falloff = 1f - dist / e.radius;
+                float u;
+                if (e.shape == BoxShape)
+                {
+                    float3 inBox = math.abs(AvbdQuat.Rotate(AvbdQuat.Conjugate(e.boxRotation), d)) / e.halfExtents;
+                    u = math.max(inBox.x, math.max(inBox.y, inBox.z));
+                    if (!(u < 1f))
+                        continue;
+                }
+                else
+                {
+                    if (!(distanceSq < e.radius * e.radius))
+                        continue;
+                    u = dist / e.radius;
+                }
+                float falloff = 1f - u;
                 falloff *= falloff;
 
                 float3 random = Random(slot, e.seed);

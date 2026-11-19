@@ -183,19 +183,22 @@ namespace McKrill.Avbd
         /// <exception cref="System.ArgumentException">A value is not finite, or the radius is not above zero.</exception>
         public bool Explode(float3 center, float radius, float impulse)
         {
-            if (!math.all(math.isfinite(center)) || !float.IsFinite(radius) || !float.IsFinite(impulse))
-                throw new System.ArgumentException("An explosion needs finite values.");
-            if (!(radius > 0f))
-                throw new System.ArgumentException("The radius of an explosion must be above zero.", nameof(radius));
+            return Explode(ExplosionDescriptor.Sphere(center, radius, impulse));
+        }
+
+        /// <summary>
+        /// Queues an explosion like <see cref="Explode(float3, float, float)"/>, with a region (a sphere or an oriented box) and a filter on the group
+        /// masks of the bodies. See <see cref="ExplosionDescriptor"/>.
+        /// </summary>
+        /// <returns>False if <see cref="MaxExplosionsPerStep"/> explosions are already queued for the next step; the explosion is dropped.</returns>
+        /// <exception cref="System.ArgumentException">A value is not finite, the radius or a half extent is not above zero, or the rotation is zero.</exception>
+        public bool Explode(in ExplosionDescriptor explosion)
+        {
+            explosion.Validate();
             if (pendingExplosionCount >= MaxExplosionsPerStep)
                 return false;
 
-            pendingExplosions[pendingExplosionCount++] = new ExplosionRecord
-            {
-                centerRadius = new float4(center, radius),
-                impulse = impulse,
-                seed = explosionSeed++,
-            };
+            pendingExplosions[pendingExplosionCount++] = explosion.ToRecord(explosionSeed++);
             return true;
         }
 

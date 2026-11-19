@@ -27,7 +27,7 @@ uint _ExplosionCount;                              // explosions in this step: [
 // Applies every explosion to the body: its velocity changes by the impulse divided by its mass, away from the center, and the impulse acting
 // a little off the center of mass spins it. prevLinearVel changes with the velocity, so that the adaptive warm start does not take the blast for an
 // acceleration. Static and kinematic bodies never get here.
-bool ApplyExplosions(uint slot, float mass, float4 rotation, float3 position, inout BodyMotionRecord v)
+bool ApplyExplosions(uint slot, float mass, uint groupMask, float4 rotation, float3 position, inout BodyMotionRecord v)
 {
     float3 linearVel = v.linearVel.xyz;
     float3 prevLinearVel = v.prevLinearVel.xyz;
@@ -37,18 +37,36 @@ bool ApplyExplosions(uint slot, float mass, float4 rotation, float3 position, in
     for (uint i = 0u; i < _ExplosionCount; i++)
     {
         ExplosionRecord e = _Explosions[i];
-        float3 d = position - e.centerRadius.xyz;
-        float radius = e.centerRadius.w;
-        float distanceSq = dot(d, d);
-        if (!(distanceSq < radius * radius))
+
+        // The filter: the body's group mask must share a bit with the include mask and none with the exclude mask.
+        if ((groupMask & e.ident.z) == 0u || (groupMask & e.ident.w) != 0u)
             continue;
 
+        // The region: u is how far the body is toward the edge of it, 0 at the center and below 1 inside. A sphere measures it in the distance from the
+        // center over the radius, a box in the oriented box's own axes over its half sizes, taking the largest.
+        float3 d = position - e.centerRadius.xyz;
+        float distanceSq = dot(d, d);
         float dist = sqrt(distanceSq);
-        float falloff = 1.0 - dist / radius;
+        float u;
+        if (e.ident.y == AVBD_EXPLOSION_BOX)
+        {
+            float3 inBox = abs(AvbdQuatRotate(AvbdQuatConjugate(e.boxRotation), d)) / e.halfExtentsImpulse.xyz;
+            u = max(inBox.x, max(inBox.y, inBox.z));
+            if (!(u < 1.0))
+                continue;
+        }
+        else
+        {
+            float radius = e.centerRadius.w;
+            if (!(distanceSq < radius * radius))
+                continue;
+            u = dist / radius;
+        }
+        float falloff = 1.0 - u;
         falloff *= falloff;
 
         // Away from the center. A body exactly at the center has no direction: it gets a hashed one.
-        float3 random = AvbdExplosionRandom(slot, e.seed);
+        float3 random = AvbdExplosionRandom(slot, e.ident.x);
         float3 direction;
         if (dist > 1e-4)
         {
@@ -56,12 +74,12 @@ bool ApplyExplosions(uint slot, float mass, float4 rotation, float3 position, in
         }
         else
         {
-            float3 pick = AvbdExplosionRandom(slot, e.seed ^ 0x85EBCA6Bu);
+            float3 pick = AvbdExplosionRandom(slot, e.ident.x ^ 0x85EBCA6Bu);
             float pickLength = length(pick);
             direction = pickLength > 1e-6 ? pick / pickLength : float3(1.0, 0.0, 0.0);
         }
 
-        float3 impulse = direction * (e.impulse * falloff);
+        float3 impulse = direction * (e.halfExtentsImpulse.w * falloff);
         float3 dv = impulse / mass;
         linearVel += dv;
         prevLinearVel += dv;
@@ -112,7 +130,7 @@ void PredictSlot(uint slot)
     BodyMotionRecord v = _BodyMotion[slot];
     float3 position = s.position.xyz;
 #ifdef AVBD_EXPLOSIONS
-    if (ApplyExplosions(slot, mass, s.rotation, position, v))
+    if (ApplyExplosions(slot, mass, _BodyMeta[slot].ident.y, s.rotation, position, v))
         _BodyMotion[slot] = v;
 #endif
     float3 linearVel = v.linearVel.xyz;

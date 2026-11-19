@@ -231,8 +231,11 @@ namespace McKrill.Avbd.Tests
         [Test]
         public void ExplosionRecord_HasTheDocumentedSize_AndMatchesTheHlslStruct()
         {
-            Assert.AreEqual(32, UnsafeUtility.SizeOf<ExplosionRecord>());
-            Assert.AreEqual((uint)AvbdSolver.MaxExplosionsPerStep, ReadDefines("AvbdExplosions.hlsl")["AVBD_MAX_EXPLOSIONS"]);
+            Assert.AreEqual(64, UnsafeUtility.SizeOf<ExplosionRecord>());
+            Dictionary<string, uint> d = ReadDefines("AvbdExplosions.hlsl");
+            Assert.AreEqual((uint)AvbdSolver.MaxExplosionsPerStep, d["AVBD_MAX_EXPLOSIONS"]);
+            Assert.AreEqual((uint)ExplosionRegion.Sphere, d["AVBD_EXPLOSION_SPHERE"]);
+            Assert.AreEqual((uint)ExplosionRegion.Box, d["AVBD_EXPLOSION_BOX"]);
             AssertStructMatches(ReadInclude("AvbdExplosions.hlsl"), "ExplosionRecord", typeof(ExplosionRecord));
         }
 
