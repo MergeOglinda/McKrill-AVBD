@@ -1,4 +1,4 @@
-// Ray against every body's box, on the GPU. The nearest hit distance is kept as the bits of a float in a one-element uint buffer: for floats
+// Ray against every body's shape (a box, or a sphere), on the GPU. The nearest hit distance is kept as the bits of a float in a one-element uint buffer: for floats
 // from 0 up the bits sort like the values, so InterlockedMin finds the nearest hit without a sort. Used by AvbdRaycaster.
 
 #pragma kernel Clear
@@ -33,8 +33,27 @@ void Cast(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    if (_BodyMeta[slot].ident.x & AVBD_BODY_FLAG_FREE)
+    uint flagsWord = _BodyMeta[slot].ident.x;
+    if (flagsWord & AVBD_BODY_FLAG_FREE)
         return;
+
+    if (AvbdBodyKind(flagsWord) == AVBD_KIND_SPHERE)
+    {
+        // A sphere (its diameter is in size.x): the nearest root of |o + t d - c|^2 = r^2 with t >= 0, where d is a unit vector.
+        float3 oc = _RayOrigin.xyz - _BodyState[slot].position.xyz;
+        float radius = _BodyShape[slot].sizeFriction.x * 0.5;
+        float b = dot(oc, _RayDirection.xyz);
+        float c = dot(oc, oc) - radius * radius;
+        if (c > 0.0 && b > 0.0)
+            return; // outside the sphere and the ray points away from it
+        float discriminant = b * b - c;
+        if (discriminant < 0.0)
+            return; // misses
+        float tSphere = max(-b - sqrt(discriminant), 0.0); // a ray that starts inside the sphere hits it at 0
+        if (tSphere < _RayOrigin.w)
+            InterlockedMin(_RayHit[0], asuint(tSphere));
+        return;
+    }
 
     // The ray in the box's frame, where the box is axis-aligned and centered at the origin: the slab method.
     BodyStateRecord s = _BodyState[slot];
