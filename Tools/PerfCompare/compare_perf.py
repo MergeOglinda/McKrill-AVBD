@@ -9,7 +9,7 @@ Python 3 standard library only.
 
 Columns: test, group, unit, kind, baseline/candidate status, then for the median, average, sum, min, max, standard deviation and sample count the value in
 each run, and delta_median / delta_median_pct / delta_avg_pct (candidate minus baseline, in the baseline's unit), and a verdict.
-On the console, every time group whose median moved by more than the threshold is listed, and so is every time group with more than one sample whose
+On the console (the groups "Build scene" and "Step, first" are left out there, not in the CSV), every time group whose median moved by more than the threshold is listed, and so is every time group with more than one sample whose
 sum (baseline_sum to candidate_sum) moved by more than the threshold, with the difference in the group's unit; the sum depends on the number of samples, so a different
 count is shown next to it.
 
@@ -24,6 +24,9 @@ import sys
 import xml.etree.ElementTree as ET
 
 MARKER = "##performancetestresult2:"
+
+# Groups that are not listed on the console (they are still in the CSV): the one-off measurements of the build and of the first step.
+CONSOLE_SKIPPED_GROUPS = ("Build scene", "Step, first")
 
 # SampleUnit of the Performance Testing API: (name, family, size in the family's base unit).
 UNITS = {
@@ -154,7 +157,7 @@ def main():
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
     print("%d rows written to %s (%s)" % (len(rows), args.output, ", ".join("%s: %d" % kv for kv in sorted(counts.items()))))
     for r in rows:
-        if r["kind"] != "time":
+        if r["kind"] != "time" or r["group"] in CONSOLE_SKIPPED_GROUPS:
             continue
         name = "%s / %s" % (r["test"].split(".")[-1], r["group"])
         if r["verdict"] in ("better", "worse"):
