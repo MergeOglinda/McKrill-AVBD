@@ -242,6 +242,27 @@ int main(int argc, char **argv)
         checkSphereBox(i, true, true);
         checkSphereBox(i, false, true);
     }
+    // Ties between faces of equal depth: the lower axis wins (x, then y, then z), as in the CPU twin (CpuSphereCollision). Random cases never tie.
+    struct Tie { double px, py, pz; double nx, ny, nz; };
+    const Tie ties[] = {
+        {0.0, 0.0, 0.0, 1, 0, 0},        // the center of a cube: all three depths equal
+        {0.5, -0.5, -0.5, 1, 0, 0},      // all three equal, away from the center
+        {0.9, -0.9, 0.0, 1, 0, 0},       // x and y tie, z is deeper
+        {0.0, 0.5, 0.5, 0, 1, 0},        // y and z tie below x
+        {0.2, -0.9, -0.9, 0, -1, 0},     // y and z tie below x, on the negative side
+        {0.9, 0.5, -0.95, 0, 0, -1},     // z is the least deep
+    };
+    for (const Tie &t : ties)
+    {
+        const V half = {1.0, 1.0, 1.0};
+        hlsl::float4 identity(0.0f, 0.0f, 0.0f, 1.0f);
+        int n = hlsl::AvbdCollideSphereBox(true, toH(V{t.px, t.py, t.pz}), identity, hlsl::float3(0.2f, 0.2f, 0.2f),
+                                           hlsl::float3(0.0f, 0.0f, 0.0f), identity, toH(V{half.x * 2, half.y * 2, half.z * 2}));
+        V normal = fromH(hlsl::g_normalBA);
+        cases++;
+        if (n != 1 || std::fabs(normal.x - t.nx) > 1e-6 || std::fabs(normal.y - t.ny) > 1e-6 || std::fabs(normal.z - t.nz) > 1e-6)
+            fail("tie", -1, normal.x, t.nx);
+    }
     std::printf("cases %ld, contacts %ld (centers inside a box %ld), failures %ld\n", cases, contacts, inside, failures);
     if (failures != 0)
     {
