@@ -40,6 +40,11 @@
       "path": "Samples~/FractureWallDemo"
     },
     {
+      "displayName": "GPU Fracture Wall Sphere Demo",
+      "description": "The fracture wall made of spheres instead of bricks: 225 or more spheres in a hexagonal packing, on an immobile bottom row, held together by joints that fracture, on the GPU solver. Shoot cubes at it and set the joints' stiffness, the fracture threshold and the spheres' density in the panel.",
+      "path": "Samples~/FractureWallSphereDemo"
+    },
+    {
       "displayName": "GPU Brick Ring Demo",
       "description": "The 110 440-brick ring of the performance test: 40 courses of bricks in running bond, hit by a cube, on the GPU solver. Shoot boxes at it, resize it, and switch the order the bodies are stored in.",
       "path": "Samples~/BrickRingDemo"

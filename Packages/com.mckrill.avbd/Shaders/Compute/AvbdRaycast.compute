@@ -1,4 +1,4 @@
-// Ray against every body's box, on the GPU. The nearest hit distance is kept as the bits of a float in a uint buffer: for floats
+// Ray against every body's shape (a box, or a sphere), on the GPU. The nearest hit distance is kept as the bits of a float in a uint buffer: for floats
 // from 0 up the bits sort like the values, so InterlockedMin finds the nearest hit without a sort. Then the body that was hit is found, and the hit
 // point and the ray direction in its frame. Used by AvbdRaycaster.
 
@@ -42,7 +42,7 @@ void Clear(uint3 id : SV_DispatchThreadID)
         _RayHit[i] = 0u;
 }
 
-// The ray against the box of a body, in the box's frame, where the box is axis-aligned and centered at the origin: the slab method. On a hit, t is the
+// The ray against the shape of a body (a box, or a sphere), in the body's frame; for a box, where the box is axis-aligned and centered at the origin: the slab method. On a hit, t is the
 // distance along the ray (0 if it starts inside the box), localHit the hit point and localDirection the unit direction, both in the box's frame.
 bool RayBox(uint slot, out float t, out float3 localHit, out float3 localDirection)
 {
@@ -58,6 +58,26 @@ bool RayBox(uint slot, out float t, out float3 localHit, out float3 localDirecti
     float3 o = AvbdQuatRotate(inverse, _RayOrigin.xyz - s.position.xyz);
     float3 d = AvbdQuatRotate(inverse, _RayDirection.xyz);
     float3 halfSize = _BodyShape[slot].sizeFriction.xyz * 0.5;
+
+    if (AvbdBodyKind(_BodyFlags[slot]) == AVBD_KIND_SPHERE)
+    {
+        // A sphere (its diameter is in size.x), in its own frame, where it is centered at the origin: the nearest root of |o + t d|^2 = r^2 with t >= 0,
+        // d a unit vector. Its rotation changes nothing about the hit, the frame is only the one the caller wants the point in.
+        float radius = halfSize.x;
+        float b = dot(o, d);
+        float c = dot(o, o) - radius * radius;
+        if (c > 0.0 && b > 0.0)
+            return false; // outside the sphere and the ray points away from it
+        float discriminant = b * b - c;
+        if (discriminant < 0.0)
+            return false; // misses
+        t = max(-b - sqrt(discriminant), 0.0); // a ray that starts inside the sphere hits it at 0
+        if (!(t < _RayOrigin.w))
+            return false;
+        localHit = o + d * t;
+        localDirection = d;
+        return true;
+    }
 
     float tNear = -1e30;
     float tFar = 1e30;
