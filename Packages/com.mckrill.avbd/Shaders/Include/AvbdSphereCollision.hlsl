@@ -70,9 +70,10 @@ int AvbdCollideSphereBox(bool sphereIsA, float3 posA, float4 rotA, float3 sizeA,
         if (depth.z < depth[k])
             k = 2;
         float s = p[k] >= 0.0 ? 1.0 : -1.0;
-        nLocal = float3(0.0, 0.0, 0.0);
-        nLocal[k] = s;
-        onBoxLocal[k] = s * boxHalf[k];
+        // No dynamic index on the left of an assignment: a vector component is not addressable on every backend (DX12 refuses it).
+        float3 axis = float3(k == 0 ? 1.0 : 0.0, k == 1 ? 1.0 : 0.0, k == 2 ? 1.0 : 0.0);
+        nLocal = axis * s;
+        onBoxLocal = onBoxLocal * (float3(1.0, 1.0, 1.0) - axis) + axis * (s * boxHalf[k]);
     }
 
     float3 n = AvbdQuatRotate(boxRotation, nLocal);        // from the box toward the sphere
