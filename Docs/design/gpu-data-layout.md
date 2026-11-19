@@ -486,7 +486,7 @@ Not part of this stage: removing the last readback, and temporal coherence. The 
 
 `AvbdBroadphase.compute` finds the pairs of bodies whose bounding spheres overlap and whose boxes are not visibly apart (below). It is the producer of the pair list. The narrowphase (stage N) will be its only consumer; today it still tests all pairs itself (section 13), see the relation below. The sphere is centered on the body position and has the radius `|size| / 2` (half the box diagonal), like the reference solver: two bodies are a pair when `|dp|^2 <= (rA + rB)^2` and no joint or spring joins them. A body at a non-finite position makes no pairs.
 
-**Pair record.** `PairRecord`, 16 B, `uint4`: x = body A, y = body B, z = pair kind, w = 0. Body A is the body with the higher slot (the reference's pair loop makes the newer body body A). Slots, not handles.
+**Pair record.** `PairRecord`, 16 B, `uint4`: x = body A, y = body B, z = pair kind, w = shape bits (`AVBD_PAIR_SPHERE_A` = 1, `AVBD_PAIR_SPHERE_B` = 2: that body is a sphere; 0 for two boxes). Body A is the body with the higher slot (the reference's pair loop makes the newer body body A). Slots, not handles.
 
 **Pair kinds (the bins).** The pair list is one buffer with two bins, each with its own capacity and counter:
 
@@ -761,7 +761,7 @@ A body is a box or a sphere; the kind is in the high bits of `_BodyMeta[slot].id
 
 **Rolling.** The contact point of a rolling sphere moves over its surface, so a stuck contact would hold the wrong anchors: a sphere contact **keeps no stick anchors** when the manifold is merged (`AvbdContactWarmStart.hlsl`, `CpuContacts`), the anchors always come from the new narrow phase. Following three-avbd, the lever arms of a sphere contact in the primal and the dual update use the rotation of the **start of the step** instead of the current one (the angular displacement is still measured from the start). This is three-avbd's rule for rolling spheres; it has not been tuned or measured here.
 
-**Broadphase.** The bounding radius of a sphere is its radius. The box rejection treats a sphere as the cube around it along the world axes (its rotation is ignored): conservative, as a rejection must only be one that the narrow phase would also make. `CpuBroadphase` mirrors this.
+**Broadphase.** The bounding radius of a sphere is its radius. The box rejection treats a sphere as the cube around it along the world axes (its rotation is ignored): conservative, as a rejection must only be one that the narrow phase would also make. `CpuBroadphase` mirrors this. **The shape kind is not read from `_BodyMeta` in the hot loops**: `BpCount` sets `AVBD_BP_SPHERE_FLAG` (4) in the grid word (`_BodyCell.w`), which the candidate loop reads anyway for the static flag, so `TestPair` gets the radius and the box of a candidate from that word; the pair record carries the kinds of its two bodies (`pair.w`), so `NpAllocate` picks its collision function without touching `_BodyMeta` (a first version read the meta record of every candidate and of both bodies of every new pair, which cost time in box-only scenes; not measured since).
 
 ### Step order
 

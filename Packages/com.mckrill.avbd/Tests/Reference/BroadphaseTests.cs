@@ -314,7 +314,7 @@ namespace McKrill.Avbd.Tests
                 foreach (PairRecord pair in pairs)
                 {
                     Assert.Greater(pair.BodyA, pair.BodyB, "body A is the higher slot");
-                    Assert.AreEqual(0u, pair.pair.w);
+                    Assert.AreEqual(0u, pair.pair.w, "no sphere bits: these scenes have boxes only");
                     bool solvedA = CpuBroadphase.Classify(state, (int)pair.BodyA) == CpuBroadphase.BodyClass.Solved;
                     bool solvedB = CpuBroadphase.Classify(state, (int)pair.BodyB) == CpuBroadphase.BodyClass.Solved;
                     Assert.AreEqual(solvedA && solvedB ? PairKind.DynamicDynamic : PairKind.DynamicStatic, pair.Kind, "kind of " + CpuBroadphase.Describe(CpuBroadphase.Key(pair)));

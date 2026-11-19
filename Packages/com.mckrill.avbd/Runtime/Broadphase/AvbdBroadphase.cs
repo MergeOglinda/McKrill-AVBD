@@ -65,10 +65,15 @@ namespace McKrill.Avbd
         /// <summary>Mirrors AVBD_BP_SEPARATION_PAD: meters of gap (world bounding boxes, face axes) above which a candidate pair is dropped.</summary>
         public const float SeparationPad = 0.001f;
 
-        /// <summary>Mirrors AVBD_BP_STATIC_FLAG, AVBD_BP_LARGE_FLAG and AVBD_BP_COARSE_FLAG: the bits of the grid word of a body (<c>_BodyCell.w</c>).</summary>
+        /// <summary>Mirrors AVBD_BP_STATIC_FLAG, AVBD_BP_LARGE_FLAG, AVBD_BP_COARSE_FLAG and AVBD_BP_SPHERE_FLAG: the bits of the grid word of a body (<c>_BodyCell.w</c>).</summary>
         public const uint StaticCellFlag = 0x80000000u;
         public const uint LargeCellFlag = 2u;
         public const uint CoarseCellFlag = 1u;
+        public const uint SphereCellFlag = 4u;
+
+        /// <summary>Mirrors AVBD_PAIR_SPHERE_A and AVBD_PAIR_SPHERE_B: the bits of <c>PairRecord.pair.w</c>, set when body A (B) of the pair is a sphere.</summary>
+        public const uint PairSphereA = 1u;
+        public const uint PairSphereB = 2u;
 
         /// <summary>Bytes of one <see cref="PairRecord"/>.</summary>
         public const int PairStride = 16;

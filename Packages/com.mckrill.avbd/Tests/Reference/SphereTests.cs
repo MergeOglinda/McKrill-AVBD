@@ -251,6 +251,39 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void Gpu_Broadphase_PairsCarryTheShapeKindsOfTheirBodies()
+        {
+            // The narrow phase takes the shape kinds from the pair (PairRecord.pair.w), not from the body meta: a wrong bit would collide a sphere as a box.
+            ContactTests.RequireCompute();
+            List<BodyDescriptor> bodies = MixedScene();
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, ContactSlots))
+            {
+                foreach (BodyDescriptor d in bodies)
+                    buffers.Spawn(d);
+                buffers.ApplyEdits();
+                var gpu = new AvbdSolver(buffers, AvbdSolverSettings.Default, null, constraints);
+                constraints.Rebuild();
+
+                gpu.DispatchBroadphase();
+                PairRecord[] pairs = gpu.Broadphase.ReadPairs();
+
+                int withSphere = 0;
+                foreach (PairRecord pair in pairs)
+                {
+                    string what = "pair (" + pair.BodyA + ", " + pair.BodyB + ")";
+                    Assert.AreEqual(bodies[(int)pair.BodyA].sphere, pair.BodyAIsSphere, what + ": body A");
+                    Assert.AreEqual(bodies[(int)pair.BodyB].sphere, pair.BodyBIsSphere, what + ": body B");
+                    if (pair.BodyAIsSphere || pair.BodyBIsSphere)
+                        withSphere++;
+                }
+                Assert.Greater(withSphere, 5, "the scene must have candidate pairs with spheres, or nothing was tested");
+                Assert.Less(withSphere, pairs.Length, "and pairs without a sphere, to see that the bits are not set for boxes");
+            }
+        }
+
+        [Test]
         public void Gpu_Step_MatchesTheOracle_OnSpheresAndBoxes()
         {
             ContactTests.RequireCompute();
