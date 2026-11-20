@@ -36,7 +36,7 @@ Works with the Input Manager and with the Input System package, because input is
 - **Joints and springs** are drawn as lines with a cyan dot at each joint anchor (cyan lines are joints, orange lines are springs). A joint that fractures disappears.
 - The panel shows body, manifold and contact counts, the number of colors, the smoothed time of one `Step()`, and
   *solve failures* if the 6x6 system ever lost positive definiteness (it should stay at zero).
-- If the solver cannot keep up with 60 Hz, the demo caps the steps per frame and shows *running slower than real time*.
+- The demo runs 2 steps per frame, always, whatever the frame time (the time step is fixed), so the simulation advances 2 steps per frame and its speed follows the frame rate.
 
 ## Things worth trying
 
