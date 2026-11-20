@@ -106,6 +106,16 @@ namespace McKrill.Avbd.Samples
         [Tooltip("Meters behind the surface that the camera ray hits, along the ray, where the explosion goes off: 0 on the surface, more to go inside.")]
         [SerializeField, Range(0f, 20f)] float explosionDepth = 1f;
 
+        [Header("Grab")]
+        [Tooltip("Meters around the point the camera ray hits: every body whose box is this close to the point is grabbed (the nearest block alone for a small radius, a group of blocks for a large one).")]
+        [SerializeField, Range(0.1f, 10f)] float grabRadius = 1.5f;
+        [Tooltip("Stiffness in N/m of the spring that pulls the grabbed blocks (as one group, by their centroid) to the point at the center of the screen: each block gets this times how far the centroid is from that point, in newtons. It grows with the distance of the blocks from the center of the screen (see Offset gain).")]
+        [SerializeField, Range(10f, 2000f)] float grabForce = 100f;
+        [Tooltip("Damping ratio of the velocity of each grabbed block. 0 is a spring that swings, 1 is critical damping.")]
+        [SerializeField, Range(0f, 3f)] float grabDamping = 1f;
+        [Tooltip("How much the force grows with the distance of the grabbed blocks from the center of the screen, per meter: the stiffness is Force times (1 + gain times the distance in meters of the blocks from the line of sight through the held point). 0 is a constant stiffness.")]
+        [SerializeField, Range(0f, 5f)] float grabOffsetGain = 0.5f;
+
         [Header("View")]
         [Tooltip("Fly camera: right drag to look, W A S D to move, Q and E for down and up, Shift for faster, mouse wheel to dolly.")]
         [SerializeField] bool controlCamera = true;
@@ -128,9 +138,15 @@ namespace McKrill.Avbd.Samples
         // What a left click does.
         enum ClickMode
         {
-            Shoot,
             Explode,
+            Shoot,
+            Grab,
         }
+
+        // Every body the demo spawns is in DemoGroup. The group mask of a new body has all bits set, which would put it in every group, so the bodies get
+        // this one bit and the grab (a spring force field, see Grab below) labels the bodies it holds with GrabGroup and nothing else.
+        const uint DemoGroup = 1u;
+        const uint GrabGroup = 2u;
 
         AvbdBodyBuffers bodies;
         AvbdConstraintBuffers constraints;
@@ -168,7 +184,8 @@ namespace McKrill.Avbd.Samples
         // Requests made from OnGUI, applied in Update so the IMGUI control count never changes between Layout and Repaint.
         bool requestShoot;
         bool requestExplode;
-        bool requestToggleMode;
+        int requestMode = -1; // a ClickMode to switch to, or -1
+        bool requestGrabStart;
         bool requestVolley;
         bool requestReset;
         bool requestClearShots;
@@ -179,6 +196,18 @@ namespace McKrill.Avbd.Samples
         AvbdRaycaster raycaster;       // the ray of an explosion, cast on the GPU
         int simulationVersion;         // counts the simulations built, so that the answer of a ray cast of an old one is dropped
         const float RayMaxDistance = 10000f;
+
+        // Grab: hold the left mouse button in Grab mode. The ray of the click is cast on the GPU like the one of an explosion; when the hit is back, the
+        // bodies within the radius of the hit get the group mask bit GrabGroup (AvbdGroupLabeler, on the GPU) and a spring force field for GrabGroup pulls their
+        // centroid to a point in front of the camera, at the distance the ray hit. The blocks move together and keep their arrangement; the joints between
+        // them and the rest of the wall stretch and break. Letting go removes the field and the labels.
+        AvbdGroupLabeler labeler;
+        bool grabHeld;                 // the button is down (set in OnGUI)
+        bool grabActive;               // the bodies are labelled and the field exists
+        int grabToken;                 // changes at every start and end, so that the answer of a ray cast of a grab that is over is dropped
+        float grabDistance;            // meters from the camera to the point that is held
+        ForceFieldHandle grabField;
+        string grabStatus = "";
 
         Rect panelScreenRect;
         GUIStyle boldLabel;
@@ -234,7 +263,10 @@ namespace McKrill.Avbd.Samples
         void OnApplicationFocus(bool focus)
         {
             if (!focus)
+            {
                 held.Clear(); // a key released while the window had no focus never sends its KeyUp
+                grabHeld = false; // nor does the button
+            }
         }
 
         void Update()
@@ -250,14 +282,25 @@ namespace McKrill.Avbd.Samples
                 requestReset = false;
                 requestShoot = false;
                 requestExplode = false;
+                requestGrabStart = false;
                 requestVolley = false;
                 requestClearShots = false;
             }
-            if (requestToggleMode)
+            if (requestMode >= 0)
             {
-                clickMode = clickMode == ClickMode.Shoot ? ClickMode.Explode : ClickMode.Shoot;
-                requestToggleMode = false;
+                if ((ClickMode)requestMode != ClickMode.Grab)
+                    EndGrab();
+                clickMode = (ClickMode)requestMode;
+                requestMode = -1;
             }
+            if (requestGrabStart)
+            {
+                if (grabHeld && clickMode == ClickMode.Grab)
+                    StartGrab();
+                requestGrabStart = false;
+            }
+            if (!grabHeld)
+                EndGrab();
             if (requestClearShots)
             {
                 ClearShots();
@@ -280,6 +323,7 @@ namespace McKrill.Avbd.Samples
             }
 
             MoveCamera();
+            UpdateGrab();
             tunnelRisk = shotSpeed * solver.Settings.dt > shotSize;
 
             // The settings take effect at the next step.
@@ -359,6 +403,7 @@ namespace McKrill.Avbd.Samples
             constraints = new AvbdConstraintBuffers(bodies, jointCapacity, null, manifoldSlots, plasticJoints ? jointCapacity : 0);
             solver = new AvbdSolver(bodies, settings, null, constraints);
             raycaster = new AvbdRaycaster(bodies);
+            labeler = new AvbdGroupLabeler(bodies);
             simulationVersion++;
 
             // The ground and every block go in one batch (the ground is element 0, then the blocks wall by wall, row by row, column by column), so that
@@ -373,7 +418,7 @@ namespace McKrill.Avbd.Samples
 
             // Ground: a static slab whose top face is the plane y = 0.
             var ground = new float3(GroundHalfExtent * 2f, 1f, GroundHalfExtent * 2f);
-            descriptors.Add(BodyDescriptor.Box(ground, 0f, new float3(0f, -0.5f, 0f)));
+            descriptors.Add(DemoBox(ground, 0f, new float3(0f, -0.5f, 0f)));
             instanceSizes.Add(ground);
             instanceColors.Add(new Color(0.30f, 0.33f, 0.36f));
 
@@ -393,7 +438,7 @@ namespace McKrill.Avbd.Samples
                         var position = new float3((c + 0.5f * (r & 1) - centerColumn) * stepX, y, z);
                         positions[w * perWall + r * columns + c] = position;
                         // The bottom row is immobile: a body without mass is static.
-                        descriptors.Add(BodyDescriptor.Box(size, r == 0 ? 0f : blockDensity, position));
+                        descriptors.Add(DemoBox(size, r == 0 ? 0f : blockDensity, position));
                         instanceSizes.Add(size);
                         instanceColors.Add(color);
                     }
@@ -477,8 +522,24 @@ namespace McKrill.Avbd.Samples
             boxMaterial.SetBuffer("_Instances", instanceBuffer);
         }
 
+        // A box of the demo: in DemoGroup only.
+        static BodyDescriptor DemoBox(float3 size, float density, float3 position)
+        {
+            BodyDescriptor d = BodyDescriptor.Box(size, density, position);
+            d.groupMask = DemoGroup;
+            return d;
+        }
+
         void DestroySimulation()
         {
+            // The solver and the buffers go with their fields and labels: nothing to remove one by one.
+            grabActive = false;
+            grabHeld = false;
+            grabToken++;
+            grabField = ForceFieldHandle.Invalid;
+            grabStatus = "";
+            if (labeler != null) labeler.Dispose();
+            labeler = null;
             shots.Clear();
             staticInstances.Clear();
             if (instanceBuffer != null) instanceBuffer.Release();
@@ -508,7 +569,7 @@ namespace McKrill.Avbd.Samples
             float size = shotSize;
 
             // Start just in front of the camera, clear of the near plane, and fly the way the camera looks.
-            BodyDescriptor descriptor = BodyDescriptor.Box(new float3(size), shotMass / (size * size * size), (float3)t.position + direction * (size + 0.6f));
+            BodyDescriptor descriptor = DemoBox(new float3(size), shotMass / (size * size * size), (float3)t.position + direction * (size + 0.6f));
             descriptor.rotation = t.rotation;
             descriptor.linearVelocity = direction * shotSpeed;
 
@@ -540,7 +601,7 @@ namespace McKrill.Avbd.Samples
             {
                 float x = VolleyX[i % VolleyX.Length] * (columns / 75f);
                 float y = VolleyY[i / VolleyX.Length] * (rows / 75f);
-                BodyDescriptor descriptor = BodyDescriptor.Box(new float3(size), density, new float3(x, y, VolleyZ));
+                BodyDescriptor descriptor = DemoBox(new float3(size), density, new float3(x, y, VolleyZ));
                 descriptor.linearVelocity = new float3(0f, 0f, shotSpeed);
                 BodyHandle handle = bodies.Spawn(descriptor);
                 if (!handle.IsValid)
@@ -584,6 +645,91 @@ namespace McKrill.Avbd.Samples
                         + distance.ToString("0.0") + " m to the surface" + (paused ? " (waits for the next step)" : "")
                     : "Not queued: too many explosions for one step.";
             });
+        }
+
+        // Where the camera is and which way it looks: the pose of this frame (the camera object gets it in LateUpdate).
+        void GetCameraRay(out float3 origin, out float3 direction)
+        {
+            if (controlCamera || cam == null)
+            {
+                origin = camPosition;
+                direction = Quaternion.Euler(pitch, yaw, 0f) * Vector3.forward;
+            }
+            else
+            {
+                origin = cam.transform.position;
+                direction = cam.transform.forward;
+            }
+        }
+
+        // The spring of the grab: the held point is on the line of sight at grabDistance, and the stiffness grows with how far the grabbed blocks are from that line,
+        // that is, from the center of the screen (the field does it on the GPU, from the centroid of the blocks).
+        ForceFieldDescriptor GrabSpring(float3 origin, float3 direction)
+        {
+            float3 forward = math.normalizesafe(direction);
+            return ForceFieldDescriptor.Spring(GrabGroup, origin + forward * grabDistance, grabForce, grabDamping, forward, grabOffsetGain);
+        }
+
+        void StartGrab()
+        {
+            if (cam == null || grabActive)
+                return;
+
+            GetCameraRay(out float3 origin, out float3 direction);
+            float radius = grabRadius;
+            int version = simulationVersion;
+            int token = ++grabToken;
+
+            grabStatus = "Casting the ray...";
+            raycaster.Cast(origin, direction, RayMaxDistance, (hit, distance) =>
+            {
+                if (token != grabToken || version != simulationVersion || solver == null || !grabHeld || clickMode != ClickMode.Grab)
+                    return; // the button was released, the mode changed or the simulation was rebuilt while the ray was on its way
+                if (!hit)
+                {
+                    grabStatus = "Nothing to grab: the ray from the camera hit nothing.";
+                    return;
+                }
+
+                float3 point = origin + math.normalizesafe(direction) * distance;
+                labeler.Label(point, radius, GrabGroup, 0u);
+
+                grabDistance = distance;
+                ForceFieldHandle field = solver.AddForceField(GrabSpring(origin, direction));
+                if (!field.IsValid)
+                {
+                    labeler.ClearAll(GrabGroup);
+                    grabStatus = "Not grabbed: no force field left.";
+                    return;
+                }
+                grabField = field;
+                grabActive = true;
+                grabStatus = "";
+            });
+        }
+
+        // Every frame while a grab is held: the target is the point the camera looks at, at the distance of the grab, and the sliders of the panel apply.
+        void UpdateGrab()
+        {
+            if (!grabActive || solver == null)
+                return;
+
+            GetCameraRay(out float3 origin, out float3 direction);
+            solver.UpdateForceField(grabField, GrabSpring(origin, direction));
+        }
+
+        void EndGrab()
+        {
+            if (!grabActive)
+                return;
+            grabToken++;
+            grabActive = false;
+            if (solver != null)
+                solver.RemoveForceField(grabField);
+            grabField = ForceFieldHandle.Invalid;
+            if (labeler != null)
+                labeler.ClearAll(GrabGroup);
+            grabStatus = "Released.";
         }
 
         void RemoveShot(int index)
@@ -710,6 +856,9 @@ namespace McKrill.Avbd.Samples
             Event e = Event.current;
             if (e.type == EventType.Repaint)
                 DrawCrosshair();
+            // The release of the button ends a grab wherever it happens, also over the panel, where a control may use the event (rawType is the original).
+            if (e.rawType == EventType.MouseUp && e.button == 0)
+                grabHeld = false;
 
             DrawPanel();
             HandleInput(e);
@@ -738,9 +887,15 @@ namespace McKrill.Avbd.Samples
             GUILayout.BeginArea(new Rect(margin, margin, width, Screen.height / scale - 2f * margin));
             GUILayout.BeginVertical(GUI.skin.box);
 
-            // What a left click does. The button only asks: the mode changes in Update, so the controls below never change in the middle of an event.
-            if (GUILayout.Button(clickMode == ClickMode.Shoot ? "Left click: shoot boxes   (switch to explosions)" : "Left click: explosions   (switch to shooting boxes)"))
-                requestToggleMode = true;
+            // What a left click does. The buttons only ask: the mode changes in Update, so the controls below never change in the middle of an event.
+            GUILayout.Label("Left click:", boldLabel);
+            GUILayout.BeginHorizontal();
+            for (int i = 0; i < ClickModeNames.Length; i++)
+            {
+                if (GUILayout.Toggle(clickMode == (ClickMode)i, ClickModeNames[i], GUI.skin.button) && clickMode != (ClickMode)i)
+                    requestMode = i;
+            }
+            GUILayout.EndHorizontal();
 
             if (clickMode == ClickMode.Shoot)
             {
@@ -758,7 +913,7 @@ namespace McKrill.Avbd.Samples
                 if (tunnelRisk)
                     GUILayout.Label("A shot moves farther than its size per step: it may pass through thin boxes.");
             }
-            else
+            else if (clickMode == ClickMode.Explode)
             {
                 GUILayout.Label("Radius: " + explosionRadius.ToString("0.0") + " m");
                 explosionRadius = GUILayout.HorizontalSlider(explosionRadius, 1f, 50f);
@@ -772,6 +927,23 @@ namespace McKrill.Avbd.Samples
                 explosionDepth = GUILayout.HorizontalSlider(explosionDepth, 0f, 20f);
 
                 GUILayout.Label(explosionStatus);
+            }
+            else
+            {
+                GUILayout.Label("Radius: " + grabRadius.ToString("0.0") + " m   (blocks around the point the ray hits)");
+                grabRadius = GUILayout.HorizontalSlider(grabRadius, 0.1f, 10f);
+
+                // Stiffness on a log scale: 10 to 2000 N/m. Each block gets this times the distance of the group from the held point, in newtons.
+                GUILayout.Label("Force: " + grabForce.ToString("0") + " N/m   (a pull of this many N per meter the blocks are from the held point)");
+                grabForce = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(grabForce), 1f, Mathf.Log10(2000f))), 10f, 2000f);
+
+                GUILayout.Label("Damping ratio: " + grabDamping.ToString("0.00") + "   (0 swings, 1 is critical)");
+                grabDamping = GUILayout.HorizontalSlider(grabDamping, 0f, 3f);
+
+                GUILayout.Label("Offset gain: " + grabOffsetGain.ToString("0.00") + " per m   (the force grows with the distance of the blocks from the center of the screen)");
+                grabOffsetGain = GUILayout.HorizontalSlider(grabOffsetGain, 0f, 5f);
+
+                GUILayout.Label(grabActive ? "Holding at " + grabDistance.ToString("0.0") + " m from the camera" : grabStatus);
             }
 
             GUILayout.Space(4f);
@@ -829,7 +1001,7 @@ namespace McKrill.Avbd.Samples
                 GUILayout.Label("running slower than real time");
 
             GUILayout.Space(4f);
-            GUILayout.Label("Left click: shoot or explode (the mode button)   V: volley\nSpace: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
+            GUILayout.Label("Left click: explosion, shot, or hold to grab (the mode buttons)   V: volley\nSpace: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
 
             GUILayout.EndVertical();
             Rect used = GUILayoutUtility.GetLastRect();
@@ -865,9 +1037,18 @@ namespace McKrill.Avbd.Samples
             if (e.type == EventType.MouseDown && e.button == 0)
             {
                 if (clickMode == ClickMode.Explode)
+                {
                     requestExplode = true;
-                else
+                }
+                else if (clickMode == ClickMode.Shoot)
+                {
                     requestShoot = true;
+                }
+                else
+                {
+                    grabHeld = true;
+                    requestGrabStart = true;
+                }
                 e.Use();
             }
             else if (controlCamera && e.type == EventType.MouseDrag && e.button == 1)
@@ -884,6 +1065,8 @@ namespace McKrill.Avbd.Samples
         }
 
         // ---- helpers -----------------------------------------------------------------------------------
+
+        static readonly string[] ClickModeNames = { "Explosion", "Shot", "Grab" };
 
         static readonly Color ShotColor = new Color(1f, 0.25f, 0.15f);
     }

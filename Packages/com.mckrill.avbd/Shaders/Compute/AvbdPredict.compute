@@ -1,11 +1,21 @@
 // Stage P: predict. For every dynamic body, computes the inertial target and the adaptively warm-started pose.
 // Mirrored by Reference/Stages/CpuPredict.cs, which the tests compare against.
 //
-// Two kernels: Predict, and PredictExplosions, which first applies the explosions queued for this step (AvbdSolver.Explode) to the velocities.
-// The explosion code and its buffers only exist in the second one, so a step without explosions runs exactly the code it ran before them.
+// Four kernels, so that a step only runs the code it needs:
+//   Predict                  plain.
+//   PredictExplosions        first applies the explosions queued for this step (AvbdSolver.Explode) to the velocities.
+//   PredictForces            adds the acceleration of the force fields (AvbdSolver.AddForceField) to the inertial target.
+//   PredictForcesExplosions  both: the explosions first, and the force fields see the velocity they left.
+//   ForceFieldClear, ForceFieldAccumulate   before a predict with spring fields: the centroid of the group of each spring (see AvbdForceFields.hlsl).
+// The code and the buffers of the explosions and of the force fields only exist in the kernels that use them, so a step without either runs exactly
+// the code it ran before them.
 
 #pragma kernel Predict
 #pragma kernel PredictExplosions AVBD_EXPLOSIONS
+#pragma kernel PredictForces AVBD_FORCES
+#pragma kernel PredictForcesExplosions AVBD_FORCES AVBD_EXPLOSIONS
+#pragma kernel ForceFieldClear AVBD_FORCES
+#pragma kernel ForceFieldAccumulate AVBD_FORCES
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
@@ -89,6 +99,109 @@ bool ApplyExplosions(uint slot, float mass, float4 rotation, float3 position, in
 StructuredBuffer<BodyMotionRecord>     _BodyMotion;
 #endif
 
+#ifdef AVBD_FORCES
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdForceFields.hlsl"
+
+StructuredBuffer<ForceFieldRecord>     _ForceFields;
+uint _ForceFieldCount;                             // slots of the table to look at: [0, _ForceFieldCount); empty ones have kind 0
+RWStructuredBuffer<uint> _ForceFieldAccum;         // 4 words per field: for a spring, the sum of the offsets of its group (x, y, z, as ints) and the number of bodies (w)
+
+// The acceleration that the force fields give a body, in m/s^2: the sum over the fields whose mask shares a bit with the body's group mask.
+// linearVel is the velocity at the start of the step (explosions included), gravity the gravity of the solver, dt its time step.
+float3 ForceFieldAcceleration(uint groupMask, float mass, float4 rotation, float3 linearVel, float3 gravity, float dt)
+{
+    float3 acceleration = float3(0.0, 0.0, 0.0);
+    for (uint i = 0u; i < _ForceFieldCount; i++)
+    {
+        ForceFieldRecord f = _ForceFields[i];
+        uint kind = f.ident.x;
+        if (kind == AVBD_FORCE_NONE || (groupMask & f.ident.y) == 0u)
+            continue;
+
+        if (kind == AVBD_FORCE_CONSTANT)
+        {
+            float3 force = f.value.xyz;
+            if (f.ident.z & AVBD_FORCE_FLAG_BODY_SPACE)
+                force = AvbdQuatRotate(rotation, force);
+            acceleration += force / mass;
+        }
+        else if (kind == AVBD_FORCE_GRAVITY_SCALE)
+        {
+            // Gravity is already in the step: the field adds what makes it scale times as strong.
+            acceleration += gravity * (f.coefficients.x - 1.0);
+        }
+        else if (kind == AVBD_FORCE_SPRING)
+        {
+            // A damped spring that pulls the group, as a whole, toward the target: every body of the group gets the force k (target - centroid of the group),
+            // so the group moves as one and keeps its shape, instead of every body being drawn to the same point. The damping acts on the velocity of
+            // each body, with the damping ratio zeta: c = 2 zeta sqrt(k m).
+            uint members = _ForceFieldAccum[i * 4u + 3u];
+            if (members == 0u)
+                continue;
+            float3 offsetSum = float3((float)asint(_ForceFieldAccum[i * 4u]), (float)asint(_ForceFieldAccum[i * 4u + 1u]), (float)asint(_ForceFieldAccum[i * 4u + 2u]));
+            float3 toTarget = -offsetSum / ((float)AVBD_FORCE_FIXED_POINT * (float)members);
+
+            // A spring with a line (a grab: the line of sight through the target) is stiffer the farther the centroid is from the line: k (1 + gain d).
+            float stiffness = f.coefficients.x;
+            if (dot(f.axis.xyz, f.axis.xyz) > 0.0)
+            {
+                float3 fromTarget = -toTarget;
+                float3 across = fromTarget - dot(fromTarget, f.axis.xyz) * f.axis.xyz;
+                stiffness *= 1.0 + f.coefficients.z * length(across);
+            }
+
+            // Explicit integration: the spring never carries the group farther than the target in one step, the damping never reverses a velocity.
+            float3 springAcceleration = stiffness * toTarget / mass;
+            float springLimit = length(toTarget) / (dt * dt);
+            float springLength = length(springAcceleration);
+            if (springLength > springLimit)
+                springAcceleration *= springLimit / springLength;
+
+            float3 dampingAcceleration = -2.0 * f.coefficients.y * sqrt(stiffness / mass) * linearVel;
+            float dampingLimit = length(linearVel) / dt;
+            float dampingLength = length(dampingAcceleration);
+            if (dampingLength > dampingLimit)
+                dampingAcceleration *= dampingLimit / dampingLength;
+
+            acceleration += springAcceleration + dampingAcceleration;
+        }
+        else
+        {
+            // Drag and wing: forces on a body moving through air. They depend on the velocity relative to the air.
+            float3 relative = linearVel - f.value.xyz;
+            float speedSq = dot(relative, relative);
+            float speed = sqrt(speedSq);
+            if (!(speed > 1e-6))
+                continue;
+            float3 direction = relative / speed;
+
+            float3 force;
+            if (kind == AVBD_FORCE_DRAG)
+            {
+                force = -(f.coefficients.x + f.coefficients.y * speed) * relative;
+            }
+            else
+            {
+                // A flat plate: the force on it is normal to it, proportional to the part of the flow that hits it (the sine of the angle of attack),
+                // plus a friction drag along the flow. Lift is the part of the normal force across the flow, and its drag falls out of the same term.
+                float3 wingNormal = AvbdQuatRotate(rotation, f.axis.xyz);
+                float pressure = f.coefficients.z * speedSq;
+                force = -pressure * (f.coefficients.x * dot(direction, wingNormal) * wingNormal + f.coefficients.y * direction);
+            }
+
+            // Explicit integration: never let one field change the relative velocity by more than all of it in one step.
+            float3 fieldAcceleration = force / mass;
+            float limit = speed / dt;
+            float fieldLength = length(fieldAcceleration);
+            if (fieldLength > limit)
+                fieldAcceleration *= limit / fieldLength;
+            acceleration += fieldAcceleration;
+        }
+    }
+    return acceleration;
+}
+#endif
+
 uint _Base;
 uint _Count; // slots to process: [0, _Count)
 
@@ -118,9 +231,14 @@ void PredictSlot(uint slot)
     float3 linearVel = v.linearVel.xyz;
     float3 angularVel = v.angularVel.xyz;
 
-    // Inertial target (Eq. 2).
+    // Inertial target (Eq. 2). The force fields add their acceleration to gravity. The warm start below does not include them: the body accelerates
+    // by what the fields give it, and the adaptive weight reads that from the last step's velocity change (a body that hangs in the air on lift
+    // has no acceleration, so no gravity in the warm start).
     float3 inertialPos = position + linearVel * dt;
     inertialPos += gravity * (dt * dt);
+#ifdef AVBD_FORCES
+    inertialPos += ForceFieldAcceleration(_BodyMeta[slot].ident.y, mass, s.rotation, linearVel, gravity, dt) * (dt * dt);
+#endif
     float4 predictedRot = AvbdIntegrateAngular(s.rotation, angularVel * dt);
 
     BodyInertialRecord inertial;
@@ -156,3 +274,59 @@ void PredictExplosions(uint3 id : SV_DispatchThreadID)
 {
     PredictSlot(_Base + id.x);
 }
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void PredictForces(uint3 id : SV_DispatchThreadID)
+{
+    PredictSlot(_Base + id.x);
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void PredictForcesExplosions(uint3 id : SV_DispatchThreadID)
+{
+    PredictSlot(_Base + id.x);
+}
+
+#ifdef AVBD_FORCES
+// Before the predict kernel, when a spring field exists: zero the sums...
+[numthreads(AVBD_MAX_FORCE_FIELDS, 1, 1)]
+void ForceFieldClear(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)AVBD_MAX_FORCE_FIELDS)
+        return;
+    _ForceFieldAccum[id.x * 4u] = 0u;
+    _ForceFieldAccum[id.x * 4u + 1u] = 0u;
+    _ForceFieldAccum[id.x * 4u + 2u] = 0u;
+    _ForceFieldAccum[id.x * 4u + 3u] = 0u;
+}
+
+// ...and sum, for each spring field, the offsets from its target of the bodies of its group: the bodies the predict kernel moves, the same ones it
+// applies the field to.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ForceFieldAccumulate(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
+        return;
+    if (!(_BodyMass[slot].momentMass.w > 0.0))
+        return;
+
+    uint groupMask = _BodyMeta[slot].ident.y;
+    float3 position = _BodyState[slot].position.xyz;
+    for (uint i = 0u; i < _ForceFieldCount; i++)
+    {
+        ForceFieldRecord f = _ForceFields[i];
+        if (f.ident.x != AVBD_FORCE_SPRING || (groupMask & f.ident.y) == 0u)
+            continue;
+
+        int3 offset = (int3)floor((position - f.value.xyz) * (float)AVBD_FORCE_FIXED_POINT + 0.5);
+        InterlockedAdd(_ForceFieldAccum[i * 4u], asuint(offset.x));
+        InterlockedAdd(_ForceFieldAccum[i * 4u + 1u], asuint(offset.y));
+        InterlockedAdd(_ForceFieldAccum[i * 4u + 2u], asuint(offset.z));
+        InterlockedAdd(_ForceFieldAccum[i * 4u + 3u], 1u);
+    }
+}
+#endif

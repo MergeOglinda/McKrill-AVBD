@@ -1,0 +1,40 @@
+// Changes the group mask of every body near a point, on the GPU, so the CPU never reads the bodies. Used by AvbdGroupLabeler.
+// A body is near the point if the distance from the point to its box (0 inside the box) is at most the radius. The new mask is
+// (mask | set) & ~clear. Free slots are left alone.
+
+#pragma kernel Label
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
+
+StructuredBuffer<BodyStateRecord>   _BodyState;
+StructuredBuffer<BodyShapeRecord>   _BodyShape;
+RWStructuredBuffer<BodyMetaRecord>  _BodyMeta;
+
+float4 _LabelCenter; // xyz: the point, w: the radius
+uint4  _LabelBits;   // x: bits to set, y: bits to clear
+
+uint _Base;
+uint _Count; // slots to process: [0, _Count)
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Label(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    BodyMetaRecord meta = _BodyMeta[slot];
+    if (meta.ident.x & AVBD_BODY_FLAG_FREE)
+        return;
+
+    // The point in the box's frame, where the box is axis-aligned and centered at the origin: the distance to it is the length of what sticks out.
+    BodyStateRecord s = _BodyState[slot];
+    float3 local = AvbdQuatRotate(AvbdQuatConjugate(s.rotation), _LabelCenter.xyz - s.position.xyz);
+    float3 outside = max(abs(local) - _BodyShape[slot].sizeFriction.xyz * 0.5, 0.0);
+    if (dot(outside, outside) > _LabelCenter.w * _LabelCenter.w)
+        return;
+
+    _BodyMeta[slot].ident.y = (meta.ident.y | _LabelBits.x) & ~_LabelBits.y;
+}

@@ -9,10 +9,14 @@ namespace McKrill.Avbd.Reference
     internal static class CpuPredict
     {
         /// <param name="explosions">The explosions queued for the step (<see cref="AvbdSolver.Explode"/>), or null for none.</param>
-        public static void Run(CpuBodyArrays bodies, in AvbdSolverSettings settings, int count, CpuExplosion[] explosions = null, int explosionCount = 0)
+        /// <param name="forceFields">The table of force fields (<see cref="AvbdSolver.AddForceField"/>), or null for none; looked at in [0, forceFieldSlots).</param>
+        public static void Run(CpuBodyArrays bodies, in AvbdSolverSettings settings, int count, CpuExplosion[] explosions = null, int explosionCount = 0,
+            ForceFieldRecord[] forceFields = null, int forceFieldSlots = 0)
         {
             float dt = settings.dt;
             float3 gravity = settings.gravity;
+            // The centroids of the springs, over the poses at the start of the step (the kernel ForceFieldAccumulate runs before the predict kernel).
+            int[] springSums = forceFields != null && forceFieldSlots > 0 ? CpuForceFieldMath.SpringSums(bodies, count, forceFields, forceFieldSlots) : null;
 
             for (int slot = 0; slot < count; slot++)
             {
@@ -44,6 +48,11 @@ namespace McKrill.Avbd.Reference
 
                 float3 inertialPos = position + linearVel * dt;
                 inertialPos += gravity * (dt * dt);
+                if (forceFields != null && forceFieldSlots > 0)
+                {
+                    inertialPos += CpuForceFieldMath.Acceleration(bodies.Meta[slot].ident.y, bodies.Mass[slot].momentMass.w, new quaternion(s.rotation),
+                        linearVel, gravity, dt, forceFields, forceFieldSlots, springSums) * (dt * dt);
+                }
                 float4 predictedRot = AvbdQuat.IntegrateAngular(new quaternion(s.rotation), angularVel * dt).value;
 
                 bodies.Inertial[slot] = new BodyInertialRecord { position = new float4(inertialPos, 0f), rotation = predictedRot };

@@ -1,6 +1,6 @@
 # GPU Fracture Wall Demo
 
-A brick wall (75 x 75 blocks by default, in ten walls) on the GPU solver. The blocks are held together by joints that break under load, or that can bend and then break (plastic joints). Click to shoot a box from the camera into the wall, or switch the click to explosions.
+A brick wall (75 x 75 blocks by default, in ten walls) on the GPU solver. The blocks are held together by joints that break under load, or that can bend and then break (plastic joints). Click to shoot a box from the camera into the wall, switch the click to explosions, or to Grab to pull blocks around.
 
 The controls are the same as in the *GPU Pyramid Demo*, and the panel has the wall's properties on top of the shot's.
 
@@ -17,7 +17,7 @@ The project needs a render pipeline that draws a `Universal Render Pipeline/Lit`
 
 | Input | Action |
 | --- | --- |
-| Left click (outside the panel) | Shoot a box in the direction the camera looks, or, in explosion mode, set off an explosion where the camera ray hits |
+| Left click (outside the panel) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits; in grab mode, hold the button to grab the blocks around the point the ray hits and drag them (see Grab) |
 | Right drag | Look around |
 | `W` `A` `S` `D`, `Q` `E` | Move, down and up. `Shift` is three times faster |
 | Mouse wheel | Move forward and back |
@@ -31,7 +31,7 @@ The click mode button, the shot's speed, size and mass (or the explosion's radiu
 
 | Control | What it does |
 | --- | --- |
-| Click mode button | Switches the left click between shooting boxes and explosions. In explosion mode the panel stops showing the shot's Speed, Size and Mass and shows the explosion's Radius, Force and Depth instead (the shot's values are kept) |
+| Explosion, Shot and Grab buttons | Switch what the left click does. The panel shows the Speed, Size and Mass of the shot, the Radius, Force and Depth of the explosion, or the Radius and Force of the grab, for the mode that is on (the other values are kept) |
 | Radius | 1 to 50 m. A block whose center is farther from the explosion than this is not touched |
 | Force | 0.1 to 1000 N s (log scale): the impulse at the center of the explosion. A body's velocity changes by this times a falloff `(1 - r/radius)^2` divided by its mass. The label shows the speed a default block (0.25 kg) at the center would get |
 | Depth | 0 to 20 m: how far behind the surface the camera ray hits the explosion goes off, along the ray. 0 is on the surface |
@@ -53,6 +53,21 @@ The panel also shows how many joints have broken, out of all. Plastic yield, the
 In explosion mode a left click casts a ray from the center of the camera. The ray is cast on the GPU (`AvbdRaycaster`), against the ground, the blocks and the shots where they are, so the CPU never reads the poses; only the distance of the nearest hit comes back, a few frames after the click. The explosion goes off at the nearest hit plus *Depth* meters along the ray. If the ray hits nothing, nothing happens and the panel says so.
 
 The physics is `AvbdSolver.Explode`: a radial impulse applied in the next step's predict stage, so the joints and contacts resist it in the same step. The push falls off to zero at the radius, is radial (no upward bias and no shock shell), and has a small off-center angular kick, hashed from the body's slot, that makes the blocks tumble. The immobile bottom row and the ground do not move. The explosion has no visual or audio effect. While the simulation is paused, the explosion waits for the next step (**Step** or **Space**). At most 16 explosions are applied per step.
+
+## Grab
+
+In grab mode, holding the left button casts a ray from the center of the camera, on the GPU, like an explosion. When the hit is back (a few frames), every body whose box is within *Radius* (0.1 to 10 m) of the hit point is labelled, on the GPU (`AvbdGroupLabeler`: it sets bit 2 of the group mask), and a spring force field (`ForceFieldDescriptor.Spring`) for that bit pulls the centroid of the labelled blocks to a point in front of the camera, at the distance the ray hit. Move or turn the camera to drag them. Every block gets the same force, so the group moves as one and keeps its arrangement, while the joints between it and the rest of the wall stretch and break. Letting go, switching the mode and Reset remove the field and the labels. A small radius grabs one block; a large one a whole patch. The immobile bottom row cannot be moved.
+
+The panel has four sliders for the grab:
+
+| Control | What it does |
+| --- | --- |
+| Radius | 0.1 to 10 m. Bodies whose box is this close to the hit point are grabbed. It applies when the button goes down |
+| Force | 10 to 2000 N/m (log scale): the stiffness of the spring. Each block gets this times the distance in meters of the centroid of the group from the held point, in newtons, and a group of n blocks is pulled with n times that |
+| Damping ratio | 0 to 3. 0 lets the blocks swing around the held point, 1 is critical damping |
+| Offset gain | 0 to 5 per m. The force grows the farther the blocks are from the center of the screen: the stiffness is Force times (1 + gain times the distance in meters of the centroid from the line of sight through the held point). At 0 it is constant |
+
+The force and the damping can be changed while holding. The hit point is on a surface and the centroid of the grabbed blocks is not, so a grab pulls a little at the start. While the simulation is paused nothing moves.
 
 ## The wall
 
