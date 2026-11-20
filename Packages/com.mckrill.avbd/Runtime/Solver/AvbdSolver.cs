@@ -22,6 +22,8 @@ namespace McKrill.Avbd
         readonly int predictExplosionsKernel;
         readonly int predictForcesKernel;
         readonly int predictForcesExplosionsKernel;
+        readonly int forceFieldClearKernel;
+        readonly int forceFieldAccumulateKernel;
         readonly int primalKernel;
         readonly int initKernel;
         readonly int dualKernel;
@@ -61,6 +63,7 @@ namespace McKrill.Avbd
         static readonly int ExplosionCountId = Shader.PropertyToID("_ExplosionCount");
         static readonly int ForceFieldsId = Shader.PropertyToID("_ForceFields");
         static readonly int ForceFieldCountId = Shader.PropertyToID("_ForceFieldCount");
+        static readonly int ForceFieldAccumId = Shader.PropertyToID("_ForceFieldAccum");
 
         /// <summary>Most explosions one <see cref="Step"/> applies (<see cref="Explode"/> returns false for more). Mirrors AVBD_MAX_EXPLOSIONS in AvbdExplosions.hlsl.</summary>
         public const int MaxExplosionsPerStep = 16;
@@ -82,6 +85,8 @@ namespace McKrill.Avbd
         int forceFieldSlots;     // one past the last slot in use: what the shader loops over
         bool forceFieldsDirty;
         GraphicsBuffer forceFieldBuffer;
+        GraphicsBuffer forceFieldAccumBuffer; // 4 words per field: the centroid sums of the spring fields (made with the first force field)
+        int springCount;                      // spring fields in use
 
         /// <param name="constraints">Joints and springs, or null for a solver of free bodies only.</param>
         public AvbdSolver(AvbdBodyBuffers bodies, AvbdSolverSettings settings, AvbdShaderSet shaderSet = null, AvbdConstraintBuffers constraints = null)
@@ -101,6 +106,8 @@ namespace McKrill.Avbd
             predictExplosionsKernel = shaders.Predict.FindKernel("PredictExplosions");
             predictForcesKernel = shaders.Predict.FindKernel("PredictForces");
             predictForcesExplosionsKernel = shaders.Predict.FindKernel("PredictForcesExplosions");
+            forceFieldClearKernel = shaders.Predict.FindKernel("ForceFieldClear");
+            forceFieldAccumulateKernel = shaders.Predict.FindKernel("ForceFieldAccumulate");
 
             if (shaders.Primal == null)
                 throw new System.InvalidOperationException("The AvbdShaderSet has no primal shader.");
@@ -239,6 +246,8 @@ namespace McKrill.Avbd
                 forceFieldGenerations[slot]++;
                 forceFieldRecords[slot] = field.ToRecord();
                 forceFieldCount++;
+                if (field.kind == ForceKind.Spring)
+                    springCount++;
                 forceFieldSlots = System.Math.Max(forceFieldSlots, slot + 1);
                 forceFieldsDirty = true;
                 return new ForceFieldHandle(slot, forceFieldGenerations[slot]);
@@ -268,6 +277,8 @@ namespace McKrill.Avbd
                 return false;
 
             int slot = handle.Slot;
+            if (forceFieldRecords[slot].ident.x == (uint)ForceKind.Spring)
+                springCount--;
             forceFieldUsed[slot] = false;
             forceFieldRecords[slot] = default;
             forceFieldCount--;
@@ -330,6 +341,8 @@ namespace McKrill.Avbd
             pendingExplosionCount = 0;
             forceFieldBuffer?.Release();
             forceFieldBuffer = null;
+            forceFieldAccumBuffer?.Release();
+            forceFieldAccumBuffer = null;
             if (ownsConstraints)
                 constraints.Dispose();
             constraints = null;
@@ -361,6 +374,24 @@ namespace McKrill.Avbd
                 }
                 shader.SetBuffer(kernel, ForceFieldsId, forceFieldBuffer);
                 shader.SetInt(ForceFieldCountId, forceFieldSlots);
+
+                // The kernel declares the sums of the springs even when no spring exists, so the buffer is always bound (256 bytes).
+                if (forceFieldAccumBuffer == null)
+                    forceFieldAccumBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, MaxForceFields * 4, sizeof(uint));
+                shader.SetBuffer(kernel, ForceFieldAccumId, forceFieldAccumBuffer);
+
+                if (springCount > 0)
+                {
+                    // The spring fields pull the centroid of their group: sum it first, over the poses at the start of the step.
+                    shader.SetBuffer(forceFieldClearKernel, ForceFieldAccumId, forceFieldAccumBuffer);
+                    shader.Dispatch(forceFieldClearKernel, 1, 1, 1);
+
+                    shader.SetBuffer(forceFieldAccumulateKernel, ForceFieldsId, forceFieldBuffer);
+                    shader.SetInt(ForceFieldCountId, forceFieldSlots);
+                    shader.SetBuffer(forceFieldAccumulateKernel, ForceFieldAccumId, forceFieldAccumBuffer);
+                    bodies.BindTo(shader, forceFieldAccumulateKernel);
+                    AvbdDispatch.Linear(shader, forceFieldAccumulateKernel, bodies.HighWaterMark);
+                }
             }
 
             if (blasts)

@@ -264,7 +264,170 @@ namespace McKrill.Avbd.Tests
             }
         }
 
+        [Test]
+        public void Spring_PullsTheCentroidOfTheGroup_AndEveryBodyOfItGetsTheSameForce()
+        {
+            AvbdSolverSettings settings = Settings(float3.zero);
+            BodyDescriptor[] scene =
+            {
+                Box(new float3(0f, 0f, 0f), 1f, Wings),
+                Box(new float3(2f, 0f, 0f), 1f, Wings),
+                Box(new float3(4f, 0f, 0f), 1f, Wings),     // the centroid of the three is (2, 0, 0)
+                Box(new float3(100f, 0f, 0f), 1f, Body),    // another group: not in the centroid, not pulled
+                Static(new float3(50f, 0f, 0f), Wings),     // static: not in the centroid, not moved
+            };
+            CpuBodyArrays plain = Scene(scene);
+            CpuBodyArrays pulled = Scene(scene);
+            CpuPredict.Run(plain, settings, 5);
+            CpuPredict.Run(pulled, settings, 5, null, 0, Table(ForceFieldDescriptor.Spring(Wings, new float3(2f, 6f, 0f), 100f, 0f)), 1);
+
+            // The centroid is 6 m below the target: every body of the group gets 100 N/m * 6 m = 600 N up, whatever its own position.
+            float push = 600f * settings.dt * settings.dt;
+            for (int slot = 0; slot < 3; slot++)
+            {
+                AssertNear(plain.Inertial[slot].position.xyz + new float3(0f, push, 0f), pulled.Inertial[slot].position.xyz, 1e-5f, "slot " + slot);
+            }
+            Assert.AreEqual(plain.Inertial[3].position, pulled.Inertial[3].position, "another group");
+            Assert.AreEqual(plain.Inertial[4].position, pulled.Inertial[4].position, "static");
+        }
+
+        [Test]
+        public void Spring_ForceIsPerBody_NeverCarriesTheGroupPastTheTarget_AndDampsTheVelocity()
+        {
+            AvbdSolverSettings settings = Settings(float3.zero);
+            float dt = settings.dt;
+
+            // A very stiff spring: the explicit step is limited to the distance to the target (6 m), not 1e7 * 6 / m * dt^2.
+            CpuBodyArrays stiffPlain = Scene(Box(new float3(0f), 1f, Wings));
+            CpuBodyArrays stiff = Scene(Box(new float3(0f), 1f, Wings));
+            CpuPredict.Run(stiffPlain, settings, 1);
+            CpuPredict.Run(stiff, settings, 1, null, 0, Table(ForceFieldDescriptor.Spring(Wings, new float3(0f, 6f, 0f), 1e7f, 0f)), 1);
+            Assert.AreEqual(6f, stiff.Inertial[0].position.y - stiffPlain.Inertial[0].position.y, 1e-3f, "it arrives at the target and not past it");
+
+            // A body already at the target with a velocity: only the damping acts, 2 zeta sqrt(k / m) v = 2 * 10 * v for k = 100, m = 1 and zeta = 1.
+            BodyDescriptor moving = Box(new float3(0f), 1f, Wings);
+            moving.linearVelocity = new float3(0f, 0f, 3f);
+            CpuBodyArrays dampedPlain = Scene(moving);
+            CpuBodyArrays damped = Scene(moving);
+            CpuPredict.Run(dampedPlain, settings, 1);
+            CpuPredict.Run(damped, settings, 1, null, 0, Table(ForceFieldDescriptor.Spring(Wings, new float3(0f), 100f, 1f)), 1);
+            Assert.AreEqual(-60f * dt * dt, damped.Inertial[0].position.z - dampedPlain.Inertial[0].position.z, 1e-5f);
+
+            // A heavy damping ratio stops the body in the step and does not turn it around.
+            CpuBodyArrays stopped = Scene(moving);
+            CpuPredict.Run(stopped, settings, 1, null, 0, Table(ForceFieldDescriptor.Spring(Wings, new float3(0f), 1e6f, 5f)), 1);
+            Assert.AreEqual(0f, stopped.Inertial[0].position.z, 1e-5f, "v dt - v dt = 0");
+        }
+
+        [Test]
+        public void Spring_OfAnEmptyGroup_DoesNothing()
+        {
+            AvbdSolverSettings settings = Settings(float3.zero);
+            CpuBodyArrays plain = Scene(Box(new float3(0f), 1f, Body));
+            CpuBodyArrays bodies = Scene(Box(new float3(0f), 1f, Body));
+            CpuPredict.Run(plain, settings, 1);
+            CpuPredict.Run(bodies, settings, 1, null, 0, Table(ForceFieldDescriptor.Spring(Wings, new float3(0f, 6f, 0f), 100f)), 1);
+            Assert.AreEqual(plain.Inertial[0].position, bodies.Inertial[0].position);
+        }
+
         // ---- the GPU against the oracle ---------------------------------------------------------------------
+
+        [Test]
+        public void Gpu_Springs_MatchTheOracle_AlsoNextToOtherFields_AndAfterAnUpdate()
+        {
+            RequireCompute();
+            var rng = new System.Random(77);
+
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            var oracle = new CpuBodyArrays(Capacity);
+            var applied = new List<EditCommand>();
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            {
+                for (int i = 0; i < 90; i++)
+                {
+                    BodyDescriptor d = BodyDescriptor.Box(new float3(F(rng, 0.3f, 2f), F(rng, 0.3f, 2f), F(rng, 0.3f, 2f)),
+                        i % 9 == 0 ? 0f : F(rng, 0.2f, 2f), V(rng, 12f));
+                    d.rotation = quaternion.EulerXYZ(F(rng, 0f, 6f), F(rng, 0f, 6f), F(rng, 0f, 6f));
+                    d.linearVelocity = V(rng, 10f);
+                    d.kinematic = i % 13 == 0;
+                    d.groupMask = (uint)rng.Next(0, 8); // three groups; some bodies are in none, some in several
+                    buffers.Spawn(d);
+                }
+                buffers.ApplyEdits(applied);
+                oracle.Apply(applied);
+
+                var table = new ForceFieldRecord[AvbdSolver.MaxForceFields];
+                using (var solver = new AvbdSolver(buffers, settings))
+                {
+                    ForceFieldDescriptor[] fields =
+                    {
+                        ForceFieldDescriptor.Spring(1u, new float3(3f, 8f, -2f), 150f, 1f),
+                        ForceFieldDescriptor.Force(2u, new float3(5f, 0f, 1f)),
+                        ForceFieldDescriptor.Spring(6u, new float3(-4f, 1f, 5f), 40f, 0.3f), // overlaps the groups of the others
+                    };
+                    var added = new List<ForceFieldHandle>();
+                    foreach (ForceFieldDescriptor f in fields)
+                    {
+                        added.Add(solver.AddForceField(f));
+                        Assert.IsTrue(added[added.Count - 1].IsValid);
+                        table[added.Count - 1] = f.ToRecord();
+                    }
+
+                    // Move the target of the first spring, as a hand that drags a group does, before the first predict.
+                    ForceFieldDescriptor moved = ForceFieldDescriptor.Spring(1u, new float3(0f, 12f, 0f), 150f, 1f);
+                    Assert.IsTrue(solver.UpdateForceField(added[0], moved));
+                    table[0] = moved.ToRecord();
+
+                    CpuPredict.Run(oracle, settings, buffers.HighWaterMark, null, 0, table, 3);
+                    solver.DispatchPredict();
+                }
+
+                var state = new BodyStateRecord[Capacity];
+                var inertial = new BodyInertialRecord[Capacity];
+                buffers.State.GetData(state);
+                buffers.Inertial.GetData(inertial);
+                for (int slot = 0; slot < Capacity; slot++)
+                {
+                    string what = "slot " + slot;
+                    AssertNear(oracle.Inertial[slot].position, inertial[slot].position, 1e-4f, what + " inertial position");
+                    AssertNear(oracle.State[slot].position, state[slot].position, 1e-4f, what + " position");
+                }
+            }
+        }
+
+        [Test]
+        public void Gpu_ASpringThatIsRemoved_NoLongerActs_AndOneWithoutBodiesDoesNothing()
+        {
+            RequireCompute();
+            Func<int, float> run = mode => // 0: spring on the group, 1: spring removed again, 2: spring on a group without bodies
+            {
+                using (var buffers = new AvbdBodyBuffers(16))
+                {
+                    var settings = Settings(float3.zero);
+                    using (var solver = new AvbdSolver(buffers, settings))
+                    {
+                        BodyDescriptor a = BodyDescriptor.Box(new float3(1f), 1f, new float3(0f));
+                        a.groupMask = Wings;
+                        BodyHandle ha = buffers.Spawn(a);
+                        buffers.ApplyEdits();
+
+                        ForceFieldHandle spring = solver.AddForceField(ForceFieldDescriptor.Spring(mode == 2 ? Body : Wings, new float3(0f, 6f, 0f), 100f, 0f));
+                        if (mode == 1)
+                            Assert.IsTrue(solver.RemoveForceField(spring));
+                        solver.DispatchPredict();
+
+                        var inertial = new BodyInertialRecord[16];
+                        buffers.Inertial.GetData(inertial);
+                        return inertial[ha.Slot].position.y;
+                    }
+                }
+            };
+
+            Assert.AreEqual(600f / 3600f, run(0), 1e-5f, "600 N for 1 kg over dt^2 = 1/3600");
+            Assert.AreEqual(0f, run(1), 1e-6f);
+            Assert.AreEqual(0f, run(2), 1e-6f);
+        }
 
         [Test]
         public void Gpu_ForceFields_MatchTheOracle_OnRandomBodies_AlsoWithExplosionsInTheSameStep()
@@ -474,6 +637,9 @@ namespace McKrill.Avbd.Tests
                 Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Wing(1u, new float3(0f, 1f, 0f), 0f)), "no area");
                 Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Wing(1u, new float3(0f, 1f, 0f), 1f, -1f)), "negative slope");
                 Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Wing(1u, new float3(0f, 1f, 0f), 1f, 4f, 0f, 0f)), "no air");
+                Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Spring(1u, new float3(0f, float.NaN, 0f), 10f)), "target");
+                Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Spring(1u, float3.zero, -10f)), "negative stiffness");
+                Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Spring(1u, float3.zero, 10f, -1f)), "negative damping");
                 Assert.AreEqual(0, solver.ForceFieldCount, "nothing was added");
 
                 ForceFieldHandle h = solver.AddForceField(ForceFieldDescriptor.GravityScale(1u, 0.5f));

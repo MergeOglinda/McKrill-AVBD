@@ -12,13 +12,47 @@ namespace McKrill.Avbd.Reference
         const uint Constant = 1u;
         const uint GravityScale = 2u;
         const uint Drag = 3u;
+        const uint Spring = 5u;
         const uint BodySpace = 1u;
+        const float FixedPoint = 1024f; // AVBD_FORCE_FIXED_POINT
+
+        /// <summary>
+        /// What ForceFieldClear and ForceFieldAccumulate compute: 4 ints per field, for each spring the sum of the offsets (position - target) of the bodies of its
+        /// group in 1/1024 m, and their number. Run before the bodies are predicted.
+        /// </summary>
+        public static int[] SpringSums(CpuBodyArrays bodies, int count, ForceFieldRecord[] fields, int slots)
+        {
+            var sums = new int[fields.Length * 4];
+            for (int slot = 0; slot < count; slot++)
+            {
+                if ((bodies.Meta[slot].ident.x & ((uint)BodyFlags.Free | (uint)BodyFlags.Kinematic)) != 0u)
+                    continue;
+                if (!(bodies.Mass[slot].momentMass.w > 0f))
+                    continue;
+
+                uint groupMask = bodies.Meta[slot].ident.y;
+                float3 position = bodies.State[slot].position.xyz;
+                for (int i = 0; i < slots; i++)
+                {
+                    if (fields[i].ident.x != Spring || (groupMask & fields[i].ident.y) == 0u)
+                        continue;
+                    int3 offset = (int3)math.floor((position - fields[i].value.xyz) * FixedPoint + 0.5f);
+                    sums[i * 4] += offset.x;
+                    sums[i * 4 + 1] += offset.y;
+                    sums[i * 4 + 2] += offset.z;
+                    sums[i * 4 + 3]++;
+                }
+            }
+            return sums;
+        }
 
         /// <summary>
         /// The acceleration the fields give a body, in m/s^2.
         /// </summary>
         /// <param name="fields">The table (<see cref="AvbdSolver.AddForceField"/>), looked at in [0, slots); empty slots have kind 0.</param>
-        public static float3 Acceleration(uint groupMask, float mass, quaternion rotation, float3 linearVel, float3 gravity, float dt, ForceFieldRecord[] fields, int slots)
+        /// <param name="springSums">The result of <see cref="SpringSums"/>; may be null if there is no spring field.</param>
+        public static float3 Acceleration(uint groupMask, float mass, quaternion rotation, float3 linearVel, float3 gravity, float dt, ForceFieldRecord[] fields, int slots,
+            int[] springSums = null)
         {
             float3 acceleration = float3.zero;
             for (int i = 0; i < slots; i++)
@@ -38,6 +72,28 @@ namespace McKrill.Avbd.Reference
                 else if (kind == GravityScale)
                 {
                     acceleration += gravity * (f.coefficients.x - 1f);
+                }
+                else if (kind == Spring)
+                {
+                    int members = springSums[i * 4 + 3];
+                    if (members == 0)
+                        continue;
+                    float3 offsetSum = new float3(springSums[i * 4], springSums[i * 4 + 1], springSums[i * 4 + 2]);
+                    float3 toTarget = -offsetSum / (FixedPoint * members);
+
+                    float3 springAcceleration = f.coefficients.x * toTarget / mass;
+                    float springLimit = math.length(toTarget) / (dt * dt);
+                    float springLength = math.length(springAcceleration);
+                    if (springLength > springLimit)
+                        springAcceleration *= springLimit / springLength;
+
+                    float3 dampingAcceleration = -2f * f.coefficients.y * math.sqrt(f.coefficients.x / mass) * linearVel;
+                    float dampingLimit = math.length(linearVel) / dt;
+                    float dampingLength = math.length(dampingAcceleration);
+                    if (dampingLength > dampingLimit)
+                        dampingAcceleration *= dampingLimit / dampingLength;
+
+                    acceleration += springAcceleration + dampingAcceleration;
                 }
                 else
                 {
