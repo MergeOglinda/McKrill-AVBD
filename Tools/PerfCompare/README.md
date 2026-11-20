@@ -18,3 +18,19 @@ Per row: the median, average, sum, min, max, standard deviation and number of sa
 The console lists the time groups (except `Build scene` and `Step, first`, which are only in the CSV) whose median moved by more than the threshold, and, on separate `sum` lines, those with more than one sample (in both runs) whose sum of the samples moved by more than the threshold (with the difference in the group's unit). The sum depends on the number of samples, so the console shows the sample counts when they differ.
 
 Units that differ between the runs are converted to the baseline's unit. A group with a single sample (`Build scene`, `Step, first`) is noisy; look at the sampled groups first.
+
+## Several runs per side: `multi_compare_perf.py`
+
+```
+python3 Tools/PerfCompare/multi_compare_perf.py baseline_folder candidate_folder -o comparison.csv [--threshold 5]
+```
+
+The same comparison, but each side is a **folder** with the result files (`*.xml`, not searched recursively) of several runs of the suite. For every test and sample group, each field (median, average, sum, min, max, standard deviation) is the **median over the runs** of that field, and the sample count is the median count (the lower one for an even number of runs, so it stays whole). The CSV columns, the verdicts, the threshold and the console output are those of `compare_perf.py`, applied to those medians, so one noisy run does not move a result. A folder with one file gives the same CSV as `compare_perf.py`; a single file path is accepted in place of a folder.
+
+- The console starts with the number of runs on each side.
+- A test or group that some runs of a folder lack is aggregated over the runs that have it, with a warning on stderr.
+- `baseline_status` / `candidate_status` hold the test's status in the runs; if the runs disagree they list all of them (`Failed/Passed`).
+- A file that is not a performance result (no test cases or no `##performancetestresult2:` lines) stops the script and is named in the message.
+- It imports `compare_perf.py` from the same folder, so keep the two together.
+
+Tests of both: `python3 -I Tools/PerfCompare/test_multi_compare_perf.py` (synthetic result files).
