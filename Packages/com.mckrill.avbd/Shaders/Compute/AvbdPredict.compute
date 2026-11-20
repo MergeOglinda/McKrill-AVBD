@@ -141,14 +141,23 @@ float3 ForceFieldAcceleration(uint groupMask, float mass, float4 rotation, float
             float3 offsetSum = float3((float)asint(_ForceFieldAccum[i * 4u]), (float)asint(_ForceFieldAccum[i * 4u + 1u]), (float)asint(_ForceFieldAccum[i * 4u + 2u]));
             float3 toTarget = -offsetSum / ((float)AVBD_FORCE_FIXED_POINT * (float)members);
 
+            // A spring with a line (a grab: the line of sight through the target) is stiffer the farther the centroid is from the line: k (1 + gain d).
+            float stiffness = f.coefficients.x;
+            if (dot(f.axis.xyz, f.axis.xyz) > 0.0)
+            {
+                float3 fromTarget = -toTarget;
+                float3 across = fromTarget - dot(fromTarget, f.axis.xyz) * f.axis.xyz;
+                stiffness *= 1.0 + f.coefficients.z * length(across);
+            }
+
             // Explicit integration: the spring never carries the group farther than the target in one step, the damping never reverses a velocity.
-            float3 springAcceleration = f.coefficients.x * toTarget / mass;
+            float3 springAcceleration = stiffness * toTarget / mass;
             float springLimit = length(toTarget) / (dt * dt);
             float springLength = length(springAcceleration);
             if (springLength > springLimit)
                 springAcceleration *= springLimit / springLength;
 
-            float3 dampingAcceleration = -2.0 * f.coefficients.y * sqrt(f.coefficients.x / mass) * linearVel;
+            float3 dampingAcceleration = -2.0 * f.coefficients.y * sqrt(stiffness / mass) * linearVel;
             float dampingLimit = length(linearVel) / dt;
             float dampingLength = length(dampingAcceleration);
             if (dampingLength > dampingLimit)

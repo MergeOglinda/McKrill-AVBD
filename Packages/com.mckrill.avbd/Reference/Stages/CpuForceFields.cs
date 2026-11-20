@@ -81,13 +81,21 @@ namespace McKrill.Avbd.Reference
                     float3 offsetSum = new float3(springSums[i * 4], springSums[i * 4 + 1], springSums[i * 4 + 2]);
                     float3 toTarget = -offsetSum / (FixedPoint * members);
 
-                    float3 springAcceleration = f.coefficients.x * toTarget / mass;
+                    float stiffness = f.coefficients.x;
+                    if (math.dot(f.axis.xyz, f.axis.xyz) > 0f)
+                    {
+                        float3 fromTarget = -toTarget;
+                        float3 across = fromTarget - math.dot(fromTarget, f.axis.xyz) * f.axis.xyz;
+                        stiffness *= 1f + f.coefficients.z * math.length(across);
+                    }
+
+                    float3 springAcceleration = stiffness * toTarget / mass;
                     float springLimit = math.length(toTarget) / (dt * dt);
                     float springLength = math.length(springAcceleration);
                     if (springLength > springLimit)
                         springAcceleration *= springLimit / springLength;
 
-                    float3 dampingAcceleration = -2f * f.coefficients.y * math.sqrt(f.coefficients.x / mass) * linearVel;
+                    float3 dampingAcceleration = -2f * f.coefficients.y * math.sqrt(stiffness / mass) * linearVel;
                     float dampingLimit = math.length(linearVel) / dt;
                     float dampingLength = math.length(dampingAcceleration);
                     if (dampingLength > dampingLimit)

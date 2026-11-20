@@ -320,6 +320,35 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void Spring_WithALine_IsStifferTheFartherTheCentroidIsFromTheLine()
+        {
+            AvbdSolverSettings settings = Settings(float3.zero);
+            float dt2 = settings.dt * settings.dt;
+
+            // One body at the origin; the target is (3, 0, 5) and the line through it runs along z (the line of sight). The body is 3 m from the line
+            // (the part of its offset across the line) and 5 m along it (which does not count).
+            Func<float, float3> pull = gain =>
+            {
+                CpuBodyArrays plain = Scene(Box(new float3(0f), 1f, Wings));
+                CpuBodyArrays pulled = Scene(Box(new float3(0f), 1f, Wings));
+                CpuPredict.Run(plain, settings, 1);
+                CpuPredict.Run(pulled, settings, 1, null, 0,
+                    Table(ForceFieldDescriptor.Spring(Wings, new float3(3f, 0f, 5f), 20f, 0f, new float3(0f, 0f, 2f), gain)), 1);
+                return (pulled.Inertial[0].position - plain.Inertial[0].position).xyz / dt2;
+            };
+
+            AssertNear(new float3(60f, 0f, 100f), pull(0f), 1e-4f, "constant stiffness: 20 N/m times the offset (3, 0, 5)");
+            AssertNear(new float3(60f, 0f, 100f) * 2.5f, pull(0.5f), 1e-4f, "gain 0.5 per m at 3 m from the line: 1 + 1.5 = 2.5 times");
+
+            // No line direction: no growth, whatever the gain.
+            CpuBodyArrays plainBody = Scene(Box(new float3(0f), 1f, Wings));
+            CpuBodyArrays noLine = Scene(Box(new float3(0f), 1f, Wings));
+            CpuPredict.Run(plainBody, settings, 1);
+            CpuPredict.Run(noLine, settings, 1, null, 0, Table(ForceFieldDescriptor.Spring(Wings, new float3(3f, 0f, 5f), 20f, 0f, float3.zero, 7f)), 1);
+            AssertNear(new float3(60f, 0f, 100f), (noLine.Inertial[0].position - plainBody.Inertial[0].position).xyz / dt2, 1e-4f, "no line");
+        }
+
+        [Test]
         public void Spring_OfAnEmptyGroup_DoesNothing()
         {
             AvbdSolverSettings settings = Settings(float3.zero);
@@ -364,7 +393,7 @@ namespace McKrill.Avbd.Tests
                     {
                         ForceFieldDescriptor.Spring(1u, new float3(3f, 8f, -2f), 150f, 1f),
                         ForceFieldDescriptor.Force(2u, new float3(5f, 0f, 1f)),
-                        ForceFieldDescriptor.Spring(6u, new float3(-4f, 1f, 5f), 40f, 0.3f), // overlaps the groups of the others
+                        ForceFieldDescriptor.Spring(6u, new float3(-4f, 1f, 5f), 40f, 0.3f, new float3(0.2f, 0.3f, 1f), 0.8f), // overlaps the groups of the others
                     };
                     var added = new List<ForceFieldHandle>();
                     foreach (ForceFieldDescriptor f in fields)
@@ -640,6 +669,8 @@ namespace McKrill.Avbd.Tests
                 Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Spring(1u, new float3(0f, float.NaN, 0f), 10f)), "target");
                 Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Spring(1u, float3.zero, -10f)), "negative stiffness");
                 Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Spring(1u, float3.zero, 10f, -1f)), "negative damping");
+                Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Spring(1u, float3.zero, 10f, 1f, float3.zero, -1f)), "negative gain");
+                Assert.Throws<ArgumentException>(() => solver.AddForceField(ForceFieldDescriptor.Spring(1u, float3.zero, 10f, 1f, new float3(0f, float.NaN, 1f), 1f)), "line");
                 Assert.AreEqual(0, solver.ForceFieldCount, "nothing was added");
 
                 ForceFieldHandle h = solver.AddForceField(ForceFieldDescriptor.GravityScale(1u, 0.5f));

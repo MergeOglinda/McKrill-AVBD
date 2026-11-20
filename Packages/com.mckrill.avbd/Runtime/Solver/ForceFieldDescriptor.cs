@@ -93,6 +93,13 @@ namespace McKrill.Avbd
         /// <summary>Spring: the damping ratio of the velocity of each body. 1 is critical damping, 0 none.</summary>
         public float dampingRatio;
 
+        /// <summary>Spring: a direction (any length but not zero; zero for none) of a line through <see cref="target"/>, for <see cref="offsetGain"/>.</summary>
+        public float3 lineDirection;
+
+        /// <summary>Spring: how much the stiffness grows with the distance of the centroid of the group from the line through <see cref="target"/> along
+        /// <see cref="lineDirection"/>, in 1/m: the stiffness is <c>stiffness * (1 + offsetGain * distance)</c>. 0 for a constant stiffness.</summary>
+        public float offsetGain;
+
         /// <summary>A constant force in N on each body of the group.</summary>
         public static ForceFieldDescriptor Force(uint groupMask, float3 force, ForceSpace space = ForceSpace.World)
         {
@@ -133,9 +140,16 @@ namespace McKrill.Avbd
         /// <c>2 dampingRatio sqrt(stiffness m) v</c> against its own velocity. The centroid is that of the bodies of the group at the start of the step;
         /// the sum of their offsets from the target must stay below 2 million m (a fixed-point sum in 32 bits).
         /// </summary>
-        public static ForceFieldDescriptor Spring(uint groupMask, float3 target, float stiffness, float dampingRatio = 1f)
+        /// <param name="lineDirection">With <paramref name="offsetGain"/>: the stiffness is <c>stiffness * (1 + offsetGain * d)</c>, where d is the distance in m of
+        /// the centroid from the line through the target along this direction. For a grab, the line of sight through the target: the farther the group is from the
+        /// center of the view, the harder it is pulled back. Zero (the default) for a constant stiffness.</param>
+        public static ForceFieldDescriptor Spring(uint groupMask, float3 target, float stiffness, float dampingRatio = 1f, float3 lineDirection = default, float offsetGain = 0f)
         {
-            return new ForceFieldDescriptor { kind = ForceKind.Spring, groupMask = groupMask, target = target, stiffness = stiffness, dampingRatio = dampingRatio };
+            return new ForceFieldDescriptor
+            {
+                kind = ForceKind.Spring, groupMask = groupMask, target = target, stiffness = stiffness, dampingRatio = dampingRatio,
+                lineDirection = lineDirection, offsetGain = offsetGain,
+            };
         }
 
         internal void Validate()
@@ -172,6 +186,9 @@ namespace McKrill.Avbd
                     RequireFinite(target);
                     if (!float.IsFinite(stiffness) || !float.IsFinite(dampingRatio) || stiffness < 0f || dampingRatio < 0f)
                         throw new ArgumentException("The stiffness and the damping ratio of a spring must be finite and not negative.");
+                    RequireFinite(lineDirection);
+                    if (!float.IsFinite(offsetGain) || offsetGain < 0f)
+                        throw new ArgumentException("The offset gain of a spring must be finite and not negative.", nameof(offsetGain));
                     break;
                 default:
                     throw new ArgumentException("Unknown force kind.", nameof(kind));
@@ -208,7 +225,8 @@ namespace McKrill.Avbd
                     break;
                 case ForceKind.Spring:
                     r.value = new float4(target, 0f);
-                    r.coefficients = new float4(stiffness, dampingRatio, 0f, 0f);
+                    r.axis = new float4(math.lengthsq(lineDirection) > 1e-12f ? math.normalize(lineDirection) : float3.zero, 0f);
+                    r.coefficients = new float4(stiffness, dampingRatio, offsetGain, 0f);
                     break;
             }
             return r;

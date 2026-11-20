@@ -58,7 +58,16 @@ The physics is `AvbdSolver.Explode`: a radial impulse applied in the next step's
 
 In grab mode, holding the left button casts a ray from the center of the camera, on the GPU, like an explosion. When the hit is back (a few frames), every body whose box is within *Radius* (0.1 to 10 m) of the hit point is labelled, on the GPU (`AvbdGroupLabeler`: it sets bit 2 of the group mask), and a spring force field (`ForceFieldDescriptor.Spring`) for that bit pulls the centroid of the labelled blocks to a point in front of the camera, at the distance the ray hit. Move or turn the camera to drag them. Every block gets the same force, so the group moves as one and keeps its arrangement, while the joints between it and the rest of the wall stretch and break. Letting go, switching the mode and Reset remove the field and the labels. A small radius grabs one block; a large one a whole patch. The immobile bottom row cannot be moved.
 
-*Force* is the stiffness of the spring in N/m for a point 10 m from the camera (10 to 2000, log scale) and grows in proportion to the distance: the force at 30 m is three times the force at 10 m, so far blocks can be pulled as hard as near ones. The pull on a block is the stiffness times how far the centroid of the group is from the target, and the group of n blocks is pulled with n times that. The hit point is on a surface, the centroid is not, so a grab pulls a little at the start. While the simulation is paused nothing moves.
+The panel has four sliders for the grab:
+
+| Control | What it does |
+| --- | --- |
+| Radius | 0.1 to 10 m. Bodies whose box is this close to the hit point are grabbed. It applies when the button goes down |
+| Force | 10 to 2000 N/m (log scale): the stiffness of the spring. Each block gets this times the distance in meters of the centroid of the group from the held point, in newtons, and a group of n blocks is pulled with n times that |
+| Damping ratio | 0 to 3. 0 lets the blocks swing around the held point, 1 is critical damping |
+| Offset gain | 0 to 5 per m. The force grows the farther the blocks are from the center of the screen: the stiffness is Force times (1 + gain times the distance in meters of the centroid from the line of sight through the held point). At 0 it is constant |
+
+The force and the damping can be changed while holding. The hit point is on a surface and the centroid of the grabbed blocks is not, so a grab pulls a little at the start. While the simulation is paused nothing moves.
 
 ## The wall
 

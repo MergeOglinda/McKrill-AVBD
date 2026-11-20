@@ -109,8 +109,12 @@ namespace McKrill.Avbd.Samples
         [Header("Grab")]
         [Tooltip("Meters around the point the camera ray hits: every body whose box is this close to the point is grabbed (the nearest block alone for a small radius, a group of blocks for a large one).")]
         [SerializeField, Range(0.1f, 10f)] float grabRadius = 1.5f;
-        [Tooltip("Stiffness in N/m of the spring that pulls the grabbed blocks (as one group, by their centroid) to the point in front of the camera, for a point 10 m away. It grows in proportion to the distance from the camera: the force for a point 30 m away is three times this.")]
+        [Tooltip("Stiffness in N/m of the spring that pulls the grabbed blocks (as one group, by their centroid) to the point at the center of the screen: each block gets this times how far the centroid is from that point, in newtons. It grows with the distance of the blocks from the center of the screen (see Offset gain).")]
         [SerializeField, Range(10f, 2000f)] float grabForce = 100f;
+        [Tooltip("Damping ratio of the velocity of each grabbed block. 0 is a spring that swings, 1 is critical damping.")]
+        [SerializeField, Range(0f, 3f)] float grabDamping = 1f;
+        [Tooltip("How much the force grows with the distance of the grabbed blocks from the center of the screen, per meter: the stiffness is Force times (1 + gain times the distance in meters of the blocks from the line of sight through the held point). 0 is a constant stiffness.")]
+        [SerializeField, Range(0f, 5f)] float grabOffsetGain = 0.5f;
 
         [Header("View")]
         [Tooltip("Fly camera: right drag to look, W A S D to move, Q and E for down and up, Shift for faster, mouse wheel to dolly.")]
@@ -658,8 +662,13 @@ namespace McKrill.Avbd.Samples
             }
         }
 
-        // The stiffness of the spring grows with the distance from the camera: grabForce at 10 m, twice as much at 20 m.
-        float GrabStiffness() => grabForce * grabDistance / 10f;
+        // The spring of the grab: the held point is on the line of sight at grabDistance, and the stiffness grows with how far the grabbed blocks are from that line,
+        // that is, from the center of the screen (the field does it on the GPU, from the centroid of the blocks).
+        ForceFieldDescriptor GrabSpring(float3 origin, float3 direction)
+        {
+            float3 forward = math.normalizesafe(direction);
+            return ForceFieldDescriptor.Spring(GrabGroup, origin + forward * grabDistance, grabForce, grabDamping, forward, grabOffsetGain);
+        }
 
         void StartGrab()
         {
@@ -686,7 +695,7 @@ namespace McKrill.Avbd.Samples
                 labeler.Label(point, radius, GrabGroup, 0u);
 
                 grabDistance = distance;
-                ForceFieldHandle field = solver.AddForceField(ForceFieldDescriptor.Spring(GrabGroup, point, GrabStiffness(), 1f));
+                ForceFieldHandle field = solver.AddForceField(GrabSpring(origin, direction));
                 if (!field.IsValid)
                 {
                     labeler.ClearAll(GrabGroup);
@@ -699,16 +708,14 @@ namespace McKrill.Avbd.Samples
             });
         }
 
-        // Every frame while a grab is held: the target is the point the camera looks at, at the distance of the grab, and the stiffness follows the distance
-        // and the slider.
+        // Every frame while a grab is held: the target is the point the camera looks at, at the distance of the grab, and the sliders of the panel apply.
         void UpdateGrab()
         {
             if (!grabActive || solver == null)
                 return;
 
             GetCameraRay(out float3 origin, out float3 direction);
-            float3 target = origin + math.normalizesafe(direction) * grabDistance;
-            solver.UpdateForceField(grabField, ForceFieldDescriptor.Spring(GrabGroup, target, GrabStiffness(), 1f));
+            solver.UpdateForceField(grabField, GrabSpring(origin, direction));
         }
 
         void EndGrab()
@@ -926,13 +933,17 @@ namespace McKrill.Avbd.Samples
                 GUILayout.Label("Radius: " + grabRadius.ToString("0.0") + " m   (blocks around the point the ray hits)");
                 grabRadius = GUILayout.HorizontalSlider(grabRadius, 0.1f, 10f);
 
-                // Stiffness on a log scale: 10 to 2000 N/m at 10 m from the camera; it grows in proportion to the distance.
-                GUILayout.Label("Force: " + grabForce.ToString("0") + " N/m at 10 m   (grows with the distance from the camera)");
+                // Stiffness on a log scale: 10 to 2000 N/m. Each block gets this times the distance of the group from the held point, in newtons.
+                GUILayout.Label("Force: " + grabForce.ToString("0") + " N/m   (a pull of this many N per meter the blocks are from the held point)");
                 grabForce = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(grabForce), 1f, Mathf.Log10(2000f))), 10f, 2000f);
 
-                GUILayout.Label(grabActive
-                    ? "Holding at " + grabDistance.ToString("0.0") + " m from the camera, " + GrabStiffness().ToString("0") + " N/m per block's offset"
-                    : grabStatus);
+                GUILayout.Label("Damping ratio: " + grabDamping.ToString("0.00") + "   (0 swings, 1 is critical)");
+                grabDamping = GUILayout.HorizontalSlider(grabDamping, 0f, 3f);
+
+                GUILayout.Label("Offset gain: " + grabOffsetGain.ToString("0.00") + " per m   (the force grows with the distance of the blocks from the center of the screen)");
+                grabOffsetGain = GUILayout.HorizontalSlider(grabOffsetGain, 0f, 5f);
+
+                GUILayout.Label(grabActive ? "Holding at " + grabDistance.ToString("0.0") + " m from the camera" : grabStatus);
             }
 
             GUILayout.Space(4f);
