@@ -31,8 +31,9 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Range(1, 30)] int iterations = 10;
         [Tooltip("Boxes along the pyramid base. Upstream uses 16; the managed reference is happier with fewer.")]
         [SerializeField, Range(4, 16)] int pyramidSize = 10;
-        [Tooltip("Upper bound on solver steps per rendered frame. If the solver cannot keep up, the simulation runs slower than real time instead of stalling.")]
-        [SerializeField, Range(1, 4)] int maxStepsPerFrame = 2;
+        // The solver runs this many steps per rendered frame, always, whatever the frame time: the simulation advances StepsPerFrame time steps
+        // every frame. It does not wait for the time of a step to pass and does not skip steps when a frame is slow.
+        const int StepsPerFrame = 2;
 
         [Header("View")]
         [SerializeField] TintMode tint = TintMode.GraphColor;
@@ -65,9 +66,7 @@ namespace McKrill.Avbd.Samples
         float yaw = 25f;
         float pitch = 18f;
 
-        float accumulator;
         bool paused;
-        bool behindRealTime;
         float stepMs;
 
         // Requests made from OnGUI. They are applied in Update so the IMGUI control count never
@@ -154,18 +153,8 @@ namespace McKrill.Avbd.Samples
             }
             else if (!paused)
             {
-                float dt = solver.Params.dt;
-                accumulator += Time.deltaTime;
-                int steps = 0;
-                while (accumulator >= dt && steps < maxStepsPerFrame)
-                {
+                for (int i = 0; i < StepsPerFrame; i++)
                     StepOnce();
-                    accumulator -= dt;
-                    steps++;
-                }
-                behindRealTime = accumulator >= dt;
-                if (behindRealTime)
-                    accumulator = 0f;
             }
 
             SyncVisuals();
@@ -197,8 +186,6 @@ namespace McKrill.Avbd.Samples
 
             for (int i = 0; i < solver.Bodies.Count; i++)
                 CreateBodyObject(solver.Bodies[i]);
-
-            accumulator = 0f;
             stepMs = 0f;
             FrameCamera();
             SyncVisuals();
@@ -521,8 +508,6 @@ namespace McKrill.Avbd.Samples
                 GUILayout.Label("solve failures " + stats.solveFailures + " (skipped primal updates)");
                 GUI.contentColor = oldContent;
             }
-            if (behindRealTime)
-                GUILayout.Label("running slower than real time");
 
             GUILayout.Space(4f);
             GUILayout.Label("Space pause   N step   B drop box   R reset\n1-5 scene   C sweep order\nDrag to orbit, wheel to zoom");

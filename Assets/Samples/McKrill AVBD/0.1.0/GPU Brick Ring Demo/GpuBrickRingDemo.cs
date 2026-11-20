@@ -68,8 +68,9 @@ namespace McKrill.Avbd.Samples
         [Header("Solver")]
         [Tooltip("Solver iterations per step: 4 in the performance test.")]
         [SerializeField, Range(1, 30)] int iterations = 4;
-        [Tooltip("Upper bound on solver steps per rendered frame. If the GPU cannot keep up, the simulation runs slower than real time instead of stalling.")]
-        [SerializeField, Range(1, 4)] int maxStepsPerFrame = 1;
+        // The solver runs this many steps per rendered frame, always, whatever the frame time: the simulation advances StepsPerFrame time steps
+        // every frame. It does not wait for the time of a step to pass and does not skip steps when a frame is slow.
+        const int StepsPerFrame = 2;
 
         [Header("Shots")]
         [Tooltip("Speed of a shot in meters per second.")]
@@ -125,9 +126,7 @@ namespace McKrill.Avbd.Samples
         float pitch = 10f;
         readonly HashSet<KeyCode> held = new HashSet<KeyCode>();
 
-        float accumulator;
         bool paused;
-        bool behindRealTime;
         bool tunnelRisk; // set in Update, not in OnGUI: a control that appears or disappears between Layout and Repaint is an IMGUI error
         float stepMs;
         float frameMs;
@@ -244,18 +243,8 @@ namespace McKrill.Avbd.Samples
             }
             else if (!paused)
             {
-                float dt = solver.Settings.dt;
-                accumulator += Time.deltaTime;
-                int steps = 0;
-                while (accumulator >= dt && steps < maxStepsPerFrame)
-                {
+                for (int i = 0; i < StepsPerFrame; i++)
                     StepOnce();
-                    accumulator -= dt;
-                    steps++;
-                }
-                behindRealTime = accumulator >= dt;
-                if (behindRealTime)
-                    accumulator = 0f;
             }
 
             DrawBodies();
@@ -372,8 +361,6 @@ namespace McKrill.Avbd.Samples
             bodies.ApplyEdits();
 
             CreateInstanceBuffer();
-
-            accumulator = 0f;
             stepMs = 0f;
             watch.Stop();
             buildMs = (float)watch.Elapsed.TotalMilliseconds;
@@ -649,8 +636,6 @@ namespace McKrill.Avbd.Samples
             GUILayout.Label("bodies " + (staticCount + shots.Count) + "   bricks " + brickCount + "   shots " + shots.Count + "/" + maxShots);
             GUILayout.Label("build " + buildMs.ToString("0") + " ms (CPU side, with the batch spawn)");
             GUILayout.Label("step " + stepMs.ToString("0.00") + " ms (CPU side)   frame " + frameMs.ToString("0.0") + " ms");
-            if (behindRealTime)
-                GUILayout.Label("running slower than real time");
 
             GUILayout.Space(4f);
             GUILayout.Label("Left click: shoot   Space: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
