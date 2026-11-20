@@ -78,13 +78,13 @@ namespace McKrill.Avbd.Tests
                 uint slotB = (uint)force.BodyB.Index;
                 if (force is AvbdJoint j)
                 {
-                    ConstraintRecord r = ConstraintRecordFactory.Joint(slotA, slotB, j.rA, j.rB, j.stiffnessLin, j.stiffnessAng, j.fracture, j.torqueArm);
+                    ConstraintRecord r = ConstraintRecordFactory.Joint(slotA, slotB, j.rA, j.rB, j.stiffnessLin, j.stiffnessAng, j.fracture, j.torqueArm, j.fractureLin);
                     r.penaltyLin = new float4(j.penaltyLin, 0f);
                     r.penaltyAng = new float4(j.penaltyAng, 0f);
                     r.lambdaLin = new float4(j.lambdaLin, 0f);
                     r.lambdaAng = new float4(j.lambdaAng, 0f);
-                    if (!float.IsPositiveInfinity(j.yield))
-                        plastic.Add(ConstraintRecordFactory.MakePlastic(ref r, (uint)plastic.Count, j.yield, j.breakBend));
+                    if (!float.IsPositiveInfinity(j.yield) || !float.IsPositiveInfinity(j.yieldLin))
+                        plastic.Add(ConstraintRecordFactory.MakePlastic(ref r, (uint)plastic.Count, j.yield, j.breakBend, j.yieldLin, j.breakStretch));
                     scene.constraints[scene.constraintCount++] = r;
                 }
                 else if (force is AvbdSpring s)

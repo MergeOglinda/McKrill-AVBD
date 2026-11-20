@@ -7,13 +7,14 @@
 // Plastic joint records. Field-by-field mirror of Runtime/Layout/PlasticRecords.cs. Built from float4 words only (packing rules P1 and P2).
 // The kernels that read them are compiled with AVBD_PLASTIC_JOINTS defined (a second variant of Dual, ConstraintInit and Primal).
 
-// 64 B: the extra state of a joint with AVBD_CONSTRAINT_FLAG_PLASTIC, found at its ident.w.
+// 64 B: the extra state of a joint with AVBD_CONSTRAINT_FLAG_PLASTIC or AVBD_CONSTRAINT_FLAG_PLASTIC_LIN, found at its ident.w.
 struct PlasticRecord
 {
     float4 rest;      // rest rotation (unit quaternion): body B is at rest when its rotation is rotA * rest. Identity at creation. Owner: D
     float4 restStart; // the rest rotation at creation: the origin of the bend
-    float4 limits;    // x = yield threshold (norm of the angular multiplier), y = bend limit in radians (with the BEND_BREAK flag)
-    float4 reserved;  // zero
+    float4 limits;    // x = angular yield threshold (norm of the angular multiplier, with PLASTIC), y = bend limit in radians (with BEND_BREAK),
+                      // z = linear yield threshold (norm of the linear multiplier, with PLASTIC_LIN), w = stretch limit in meters (with STRETCH_BREAK)
+    float4 reserved;  // xyz = the anchor on body A at creation: the origin the stretch is measured from (with PLASTIC_LIN)
 };
 
 // The angular constraint value of a joint, before the stabilization: the difference between the rotation of body B and the rest pose

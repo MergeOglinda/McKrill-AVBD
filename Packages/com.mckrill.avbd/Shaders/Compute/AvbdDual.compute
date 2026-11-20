@@ -4,9 +4,13 @@
 //                 and penalties (Eq. 19). The reference solver's Joint.Initialize.
 // Dual            After every primal sweep. Updates the multiplier of hard constraints, ramps the penalty (Eqs. 11 and 16) and breaks
 //                 joints whose angular multiplier exceeds the fracture threshold. The reference solver's Joint.UpdateDual.
+//                 A joint with FRACTURABLE_LIN breaks in the same way when its linear multiplier exceeds the linear threshold (reserved.x of the record).
 //                 With AVBD_PLASTIC_JOINTS, a plastic joint (PLASTIC flag) whose angular multiplier exceeds its yield value yields instead: the
 //                 multiplier is clamped to the yield value and the rest rotation of the joint moves to the current relative rotation, so the bend
-//                 stays; a joint that has yielded past its bend limit breaks.
+//                 stays; a joint that has yielded past its bend limit breaks. The linear row does the same (PLASTIC_LIN flag): the multiplier is clamped
+//                 to the linear yield value and the anchor on body A (in the constraint record, which the primal stage reads as it is) moves to where
+//                 the anchor on body B is, so the stretch stays; a joint whose anchor has moved past its stretch limit breaks. Both need hard rows,
+//                 because only a hard row stores a multiplier.
 //
 // One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
 // ordering, coloring or atomics are needed. Springs have no state and are skipped.
@@ -147,12 +151,14 @@ void Dual(uint3 id : SV_DispatchThreadID)
 #if defined(AVBD_PLASTIC_JOINTS)
     PlasticRecord plastic = (PlasticRecord)0;
     bool isPlastic = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) != 0u;
-    if (isPlastic)
+    if (flags & (AVBD_CONSTRAINT_FLAG_PLASTIC | AVBD_CONSTRAINT_FLAG_PLASTIC_LIN))
     {
         plastic = _Plastic[c.ident.w];
-        rest = plastic.rest;
+        if (isPlastic)
+            rest = plastic.rest;
     }
     bool yielded = false;
+    bool yieldedLin = false;
 #endif
 
     // Linear constraint
@@ -174,6 +180,22 @@ void Dual(uint3 id : SV_DispatchThreadID)
             cap = min(c.anchorA.w, AVBD_PENALTY_MAX);
         }
 
+#if defined(AVBD_PLASTIC_JOINTS)
+        // Yield of the linear row: a multiplier above the yield value is clamped to it, and the joint keeps the stretch it has now (the anchor on body A
+        // moves below). A multiplier above the fracture threshold does not yield: the joint breaks.
+        if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC_LIN)
+        {
+            float force = length(lambdaLin);
+            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && force > c.reserved.x;
+            if (force > plastic.limits.z && !fractures)
+            {
+                lambdaLin *= plastic.limits.z / force;
+                yieldedLin = true;
+            }
+        }
+        // A yielding row does not ramp its penalty: the joint is not getting stiffer while it gives way.
+        if (!yieldedLin)
+#endif
         // Ramp the penalty, clamped to the material stiffness (Eq. 16).
         penaltyLin = min(penaltyLin + abs(C) * AVBD_BETA_LIN, float3(cap, cap, cap));
     }
@@ -214,6 +236,7 @@ void Dual(uint3 id : SV_DispatchThreadID)
     }
 
     bool bentOff = false;
+    bool stretchedOff = false;
 #if defined(AVBD_PLASTIC_JOINTS)
     if (yielded)
     {
@@ -221,10 +244,22 @@ void Dual(uint3 id : SV_DispatchThreadID)
         if (flags & AVBD_CONSTRAINT_FLAG_BEND_BREAK)
             bentOff = AvbdJointBend(plastic.restStart, rest) > plastic.limits.y;
     }
+    if (yieldedLin)
+    {
+        // The anchor on body A moves to where the anchor on body B is now (in the body space of A; a joint to the world keeps a world point), so the
+        // linear error is zero from here on and the multiplier alone holds the joint at the stretch it has.
+        float3 moved = hasA ? AvbdQuatRotate(AvbdQuatConjugate(rotA), anchorB - posA) : anchorB;
+        c.anchorA = float4(moved, c.anchorA.w);
+        if (flags & AVBD_CONSTRAINT_FLAG_STRETCH_BREAK)
+            stretchedOff = length(moved - plastic.reserved.xyz) > plastic.limits.w;
+        c.c0Lin = float4(0.0, 0.0, 0.0, c.c0Lin.w); // the stabilization reference of this step must not pull the stretch back (the torque arm stays)
+    }
 #endif
 
-    // Fracture test, and the bend limit of a plastic joint
-    if (bentOff || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && dot(lambdaAng, lambdaAng) > c.c0Ang.w * c.c0Ang.w))
+    // Fracture tests of the two rows, and the bend and stretch limits of a plastic joint
+    if (bentOff || stretchedOff
+        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && dot(lambdaAng, lambdaAng) > c.c0Ang.w * c.c0Ang.w)
+        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && dot(lambdaLin, lambdaLin) > c.reserved.x * c.reserved.x))
     {
         penaltyLin = float3(0.0, 0.0, 0.0);
         penaltyAng = float3(0.0, 0.0, 0.0);
