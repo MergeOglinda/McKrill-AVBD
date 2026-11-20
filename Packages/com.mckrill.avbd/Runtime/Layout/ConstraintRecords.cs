@@ -40,7 +40,7 @@ namespace McKrill.Avbd
         /// <summary>The angular part is a hard constraint. The stored stiffness is then 0 and ignored. Owner: constraint creation.</summary>
         HardAngular = 1u << 1,
 
-        /// <summary>The joint breaks when its angular multiplier exceeds the stored fracture value. Owner: constraint creation.</summary>
+        /// <summary>The joint breaks when its angular multiplier exceeds the stored fracture value (c0Ang.w). Owner: constraint creation.</summary>
         Fracturable = 1u << 2,
 
         /// <summary>The joint has fractured and exerts no force. Owner: stage D (not written by stage V).</summary>
@@ -53,13 +53,27 @@ namespace McKrill.Avbd
         Stick = 1u << 4,
 
         /// <summary>
-        /// The joint is plastic: its <see cref="PlasticRecord"/> is slot ident.w of the plastic array. Needs <see cref="HardAngular"/>. Without this flag
-        /// ident.w means nothing (a contact record of the CPU oracle keeps its feature key there). Owner: constraint creation.
+        /// The joint is plastic in its angular row: its <see cref="PlasticRecord"/> is slot ident.w of the plastic array. Needs <see cref="HardAngular"/>.
+        /// Without this flag and without <see cref="PlasticLinear"/>, ident.w means nothing (a contact record of the CPU oracle keeps its feature key there).
+        /// Owner: constraint creation.
         /// </summary>
         Plastic = 1u << 5,
 
         /// <summary>A plastic joint breaks when it has bent further than <see cref="PlasticRecord.limits"/>.y radians off its original rest rotation. Owner: constraint creation.</summary>
         BendBreak = 1u << 6,
+
+        /// <summary>The joint breaks when its linear multiplier exceeds the stored linear fracture value (<see cref="ConstraintRecord.reserved"/>.x). Needs <see cref="HardLinear"/>. Owner: constraint creation.</summary>
+        FracturableLinear = 1u << 7,
+
+        /// <summary>
+        /// The joint is plastic in its linear row: when the linear multiplier is above the yield value (<see cref="PlasticRecord.limits"/>.z) the anchor on body A
+        /// moves to where the anchor on body B is, so the stretch stays. Needs <see cref="HardLinear"/>. The joint's <see cref="PlasticRecord"/> is slot ident.w
+        /// of the plastic array, as with <see cref="Plastic"/> (a joint can have both). Owner: constraint creation.
+        /// </summary>
+        PlasticLinear = 1u << 8,
+
+        /// <summary>A linearly plastic joint breaks when its anchor on body A has moved further than <see cref="PlasticRecord.limits"/>.w meters from where it started. Owner: constraint creation.</summary>
+        StretchBreak = 1u << 9,
     }
 
     /// <summary>Packing of the constraint flags word: low 24 bits are flags, high 8 bits are the <see cref="ConstraintKind"/>.</summary>
@@ -101,7 +115,10 @@ namespace McKrill.Avbd
         /// <summary>x = body A slot (AVBD_INVALID for a joint pinned to the world point rA), y = body B slot, z = flags | kind &lt;&lt; 24, w = feature key (contact), slot in the plastic array (joint with <see cref="ConstraintFlags.Plastic"/>), else unused.</summary>
         public uint4 ident;
 
-        /// <summary>xyz = anchor on body A in body space (a world-space point if A is the world). w = linear stiffness of a joint, stiffness of a spring.</summary>
+        /// <summary>
+        /// xyz = anchor on body A in body space (a world-space point if A is the world). w = linear stiffness of a joint, stiffness of a spring.
+        /// Owner of xyz: constraint creation; stage D too, for a joint with <see cref="ConstraintFlags.PlasticLinear"/>, whose anchor moves when it yields.
+        /// </summary>
         public float4 anchorA;
 
         /// <summary>xyz = anchor on body B in body space. w = angular stiffness of a joint, rest length of a spring.</summary>
@@ -125,7 +142,7 @@ namespace McKrill.Avbd
         /// <summary>Multiplier of the angular rows. w unused.</summary>
         public float4 lambdaAng;
 
-        /// <summary>Reserved, zero. Pads the record to 160 B.</summary>
+        /// <summary>x = linear fracture threshold of a joint (norm of the linear multiplier; read only with <see cref="ConstraintFlags.FracturableLinear"/>), else zero. yzw reserved, zero. Pads the record to 160 B.</summary>
         public float4 reserved;
     }
 }
