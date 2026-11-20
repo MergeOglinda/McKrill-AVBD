@@ -1,0 +1,67 @@
+// Moves every body of a group directly, on the GPU, so the CPU never reads the bodies: adds a translation to their position and/or sets their velocity.
+// Used by AvbdGroupMover. Nothing else of a body is touched: mass, moments, shape, friction, flags and the group mask stay, so the bodies keep their
+// inertia (a push by force or by making them kinematic would change how they respond). Free slots and static bodies (mass 0) are skipped; kinematic
+// bodies are moved. A position edit is a teleport like the SetPose edit: the step-start pose follows, so the solver does not take the jump for a motion.
+// A velocity edit is like SetVelocity: the previous linear velocity follows, so the adaptive warm start sees no acceleration.
+// Semantics are mirrored by Reference/Stages/CpuGroupMove.cs.
+
+#pragma kernel Move
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+
+#define AVBD_MOVE_POSITION         1u
+#define AVBD_MOVE_LINEAR_VELOCITY  2u
+#define AVBD_MOVE_ANGULAR_VELOCITY 4u
+
+RWStructuredBuffer<BodyStateRecord>  _BodyState;
+RWStructuredBuffer<BodyMotionRecord> _BodyMotion;
+StructuredBuffer<BodyMassRecord>     _BodyMass;
+StructuredBuffer<BodyMetaRecord>     _BodyMeta;
+
+float4 _MoveTranslation; // xyz: added to the position (with AVBD_MOVE_POSITION)
+float4 _MoveLinear;      // xyz: the new linear velocity (with AVBD_MOVE_LINEAR_VELOCITY)
+float4 _MoveAngular;     // xyz: the new angular velocity (with AVBD_MOVE_ANGULAR_VELOCITY)
+uint4  _MoveControl;     // x: group mask, y: fields (AVBD_MOVE_*)
+
+uint _Base;
+uint _Count; // slots to process: [0, _Count)
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Move(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    BodyMetaRecord meta = _BodyMeta[slot];
+    if (meta.ident.x & AVBD_BODY_FLAG_FREE)
+        return;
+    if ((meta.ident.y & _MoveControl.x) == 0u)
+        return;
+    if (!(_BodyMass[slot].momentMass.w > 0.0))
+        return;
+
+    uint fields = _MoveControl.y;
+    if (fields & AVBD_MOVE_POSITION)
+    {
+        BodyStateRecord s = _BodyState[slot];
+        s.position.xyz += _MoveTranslation.xyz;
+        s.startPosition = s.position;
+        s.startRotation = s.rotation;
+        _BodyState[slot] = s;
+    }
+
+    if (fields & (AVBD_MOVE_LINEAR_VELOCITY | AVBD_MOVE_ANGULAR_VELOCITY))
+    {
+        BodyMotionRecord v = _BodyMotion[slot];
+        if (fields & AVBD_MOVE_LINEAR_VELOCITY)
+        {
+            v.linearVel.xyz = _MoveLinear.xyz;
+            v.prevLinearVel.xyz = _MoveLinear.xyz;
+        }
+        if (fields & AVBD_MOVE_ANGULAR_VELOCITY)
+            v.angularVel.xyz = _MoveAngular.xyz;
+        _BodyMotion[slot] = v;
+    }
+}

@@ -74,4 +74,5 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
+- `AvbdGroupMover` (`AvbdGroupMove.compute`, `AvbdShaderSet.GroupMove`): moves every body of a group directly on the GPU, by a translation of the position and/or by setting the linear and angular velocity, without touching mass, inertia or anything else (not a force, not a kinematic body). The GPU Fracture Wall Demo's Grab has a *Direct* toggle that uses it instead of the spring force.
 - The demos (GPU Brick Ring, GPU Fracture Wall, GPU Pyramid, Reference Solver) always run 2 solver steps per frame, with the fixed time step, instead of fitting the steps to the frame time (no accumulator, no `maxStepsPerFrame`, no "running slower than real time" label). The simulation advances 2 steps per frame, so its speed follows the frame rate.
