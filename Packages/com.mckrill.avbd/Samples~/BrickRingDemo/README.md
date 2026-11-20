@@ -25,7 +25,7 @@ The same as in the *GPU Fracture Wall Demo*: left click shoots, right drag looks
 | Z-curve body order | Off (the default): the bodies are in the GPU arrays in the order the ring is built, course by course. On: in Z-curve order of their positions (`AvbdBodyBuffers.SpawnBatch`), so that bricks that touch are near each other in memory. Takes effect on **Reset**. Use it to compare frame times |
 | Ball, Ball speed | Whether the cube is there, and its speed (0 to 80 m/s). Takes effect on **Reset** |
 
-The panel shows the number of bodies, the CPU time of the last build (which includes sorting the batch when Z-curve order is on), and the step time and frame time. The step time is the time the CPU spent in `Step()`, not the GPU time: the frame time is the better number. At full size the scene takes much more than 16 ms per step on most GPUs, so a frame, which always runs 2 steps whatever the frame time, takes more than 32 ms there: the simulation runs slower than real time.
+The panel shows the number of bodies, the CPU time of the last build (which includes sorting the batch when Z-curve order is on), and the step time and frame time. The step time is the time the CPU spent in `Step()`, not the GPU time: the frame time is the better number. At full size the scene takes much more than 16 ms per step on most GPUs, so the demo runs one step per frame and says when it is slower than real time.
 
 ## Limits
 
