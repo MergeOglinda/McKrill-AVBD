@@ -24,4 +24,5 @@ MonoBehaviour:
   lists: {fileID: 7200000, guid: 868f55488ee34e0c9c9de472995e0176, type: 3}
   raycast: {fileID: 7200000, guid: d2ab5d3aa0494763a0e4055598ceb776, type: 3}
   groupLabel: {fileID: 7200000, guid: f484bcfcd80944ee8b6d5ec4ab421398, type: 3}
+  groupMove: {fileID: 7200000, guid: 2d9ec13126204fc490b2abc42e98882b, type: 3}
   instancedBoxes: {fileID: 4800000, guid: ea27341be0f647339dddd29ff595a504, type: 3}
