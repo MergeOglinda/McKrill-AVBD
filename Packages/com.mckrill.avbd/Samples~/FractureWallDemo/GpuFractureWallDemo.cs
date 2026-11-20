@@ -929,6 +929,7 @@ namespace McKrill.Avbd.Samples
             const float margin = 8f;
             const float width = 340f;
             float scale = Mathf.Clamp(Screen.height / 800f, 1f, 2.5f);
+            bool wasEnabled = GUI.enabled;
 
             Matrix4x4 oldMatrix = GUI.matrix;
             GUI.matrix = Matrix4x4.Scale(new Vector3(scale, scale, 1f));
@@ -987,7 +988,6 @@ namespace McKrill.Avbd.Samples
                 if (GUILayout.Toggle(grabDirect, "Direct: move the blocks, no force (mass and inertia unchanged)") != grabDirect)
                     requestGrabDirect = grabDirect ? 0 : 1;
 
-                bool wasEnabled = GUI.enabled;
                 GUI.enabled = wasEnabled && !grabDirect;
 
                 // Stiffness on a log scale: 10 to 2000 N/m. Each block gets this times the distance of the group from the held point, in newtons.
@@ -1041,7 +1041,6 @@ namespace McKrill.Avbd.Samples
             // is being laid out is an IMGUI error, and a click on the toggle changes the state in the middle of an event.
             GUILayout.Space(4f);
             plasticJoints = GUILayout.Toggle(plasticJoints, "Plastic yield: joints give way and keep the bend");
-            bool wasEnabled = GUI.enabled;
             GUI.enabled = wasEnabled && plasticJoints;
             GUILayout.Label("Yield threshold: " + yieldThreshold.ToString(yieldThreshold < 10f ? "0.0" : "0")
                 + (yieldThreshold >= fractureThreshold ? "   (not below the fracture threshold: joints break first)" : ""));
