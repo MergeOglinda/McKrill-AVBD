@@ -43,6 +43,11 @@
       "displayName": "GPU Brick Ring Demo",
       "description": "The 110 440-brick ring of the performance test: 40 courses of bricks in running bond, hit by a cube, on the GPU solver. Shoot boxes at it, resize it, and switch the order the bodies are stored in.",
       "path": "Samples~/BrickRingDemo"
+    },
+    {
+      "displayName": "JSON Mesh Import Demo",
+      "description": "Spawns the objects of a list of voxel files (JSON made from an STL mesh by Tools/Voxelize/voxelize_stl.py), 5 m apart: every voxel is a box and neighboring voxels are linked by fracturing ball-socket joints. Shoot boxes at them or blow them up.",
+      "path": "Samples~/JsonMeshImportDemo"
     }
   ]
 }
