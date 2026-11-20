@@ -111,7 +111,7 @@ for (int m = 0; m < data.jointCount; m++)
 }
 ```
 
-A Unity importer that does this for the AVBD package is not part of this script.
+The package's *JSON Mesh Import Demo* sample does this: it reads a list of voxel files, spawns the boxes and joints on the GPU solver and lets you shoot or blow them up (`Packages/com.mckrill.avbd/Samples~/JsonMeshImportDemo`, which also has a ready-made `VoxelMeshData` class that reads and checks the file).
 
 ## Limits
 
