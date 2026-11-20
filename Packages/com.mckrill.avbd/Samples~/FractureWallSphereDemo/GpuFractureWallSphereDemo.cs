@@ -996,10 +996,10 @@ namespace McKrill.Avbd.Samples
 #if UNITY_EDITOR
     static class GpuFractureWallDemoMenu
     {
-        [UnityEditor.MenuItem("GameObject/McKrill AVBD/GPU Fracture Wall Demo", false, 11)]
+        [UnityEditor.MenuItem("GameObject/McKrill AVBD/GPU Fracture Sphere Wall Demo", false, 11)]
         static void Create(UnityEditor.MenuCommand command)
         {
-            var go = new GameObject("AVBD GPU Fracture Wall Demo");
+            var go = new GameObject("GPU Fracture Sphere Wall Demo");
             UnityEditor.GameObjectUtility.SetParentAndAlign(go, command.context as GameObject);
             go.AddComponent<GpuFractureWallDemo>();
             UnityEditor.Undo.RegisterCreatedObjectUndo(go, "Create AVBD GPU Fracture Wall Demo");
