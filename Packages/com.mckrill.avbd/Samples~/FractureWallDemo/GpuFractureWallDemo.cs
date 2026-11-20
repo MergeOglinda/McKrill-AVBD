@@ -17,6 +17,8 @@ namespace McKrill.Avbd.Samples
     /// The joints can also be plastic (off by default). A plastic joint yields when its angular multiplier is above the yield threshold: the angle
     /// lock gives way and the joint keeps the bend it ends up with, instead of springing back. A bend limit breaks a joint that has bent too far.
     /// The yield threshold should be below the fracture threshold, which then only catches the loads that jump past it within one step.
+    /// The linear part of a joint can fracture, yield and break at a stretch limit in the same way (the joint keeps the stretch it ends up with).
+    /// Those three need rigid joints: only a rigid linear row has a multiplier to test, so they are ignored while "Rigid joints" is off.
     ///
     /// The simulation runs entirely through the package's public API: <see cref="AvbdBodyBuffers"/> holds the bodies,
     /// <see cref="AvbdSolver.Step"/> advances them. Collisions are part of that step: the broadphase finds the touching pairs, the narrow
@@ -82,6 +84,17 @@ namespace McKrill.Avbd.Samples
         [SerializeField] bool bendBreak = true;
         [Tooltip("The bend, in degrees, above which a plastic joint breaks (with bend break on).")]
         [SerializeField, Range(1f, 180f)] float bendBreakDegrees = 30f;
+
+        [Header("Linear fracture and plasticity (applied on Reset; need rigid joints)")]
+        [Tooltip("A joint breaks when the norm of its linear multiplier (the force it carries) is above the threshold below. Needs rigid joints.")]
+        [SerializeField] bool linearFracture = false;
+        [SerializeField, Min(0.01f)] float linearFractureThreshold = 400f;
+        [Tooltip("Joints yield in the linear row too: above the yield threshold the joint gives way and keeps the stretch. Needs rigid joints.")]
+        [SerializeField] bool linearYield = false;
+        [SerializeField, Min(0.1f)] float linearYieldThreshold = 100f;
+        [Tooltip("A joint that has yielded linearly breaks once its anchors have moved apart further than the distance below.")]
+        [SerializeField] bool stretchBreak = true;
+        [SerializeField, Range(0.01f, 2f)] float stretchBreakMeters = 0.25f;
 
         [Header("Solver")]
         [SerializeField, Range(1, 30)] int iterations = 10;
@@ -400,7 +413,7 @@ namespace McKrill.Avbd.Samples
             int manifoldSlots = Mathf.Min(blocks * 8 + maxShots * 16 + 256, AvbdConstraintBuffers.MaxContactManifolds);
             // The plastic array only exists if the joints can be plastic: without it the solver runs the joint kernels with no plastic code at all.
             int jointCapacity = blocks * 3 + 8;
-            constraints = new AvbdConstraintBuffers(bodies, jointCapacity, null, manifoldSlots, plasticJoints ? jointCapacity : 0);
+            constraints = new AvbdConstraintBuffers(bodies, jointCapacity, null, manifoldSlots, (plasticJoints || (linearYield && rigidJoints)) ? jointCapacity : 0);
             solver = new AvbdSolver(bodies, settings, null, constraints);
             raycaster = new AvbdRaycaster(bodies);
             labeler = new AvbdGroupLabeler(bodies);
@@ -489,7 +502,12 @@ namespace McKrill.Avbd.Samples
             float linear = rigidJoints ? float.PositiveInfinity : jointStiffness;
             float yield = plasticJoints ? yieldThreshold : float.PositiveInfinity;
             float bendLimit = plasticJoints && bendBreak ? Mathf.Min(bendBreakDegrees * Mathf.Deg2Rad, Mathf.PI) : float.PositiveInfinity;
-            if (constraints.AddJoint(a, b, anchor - positionA, anchor - positionB, linear, float.PositiveInfinity, fractureThreshold, yield, bendLimit) >= 0)
+            // The linear options need a hard linear row (AddJoint throws otherwise), so they apply to rigid joints only.
+            float fractureLinear = rigidJoints && linearFracture ? linearFractureThreshold : float.PositiveInfinity;
+            float yieldLinear = rigidJoints && linearYield ? linearYieldThreshold : float.PositiveInfinity;
+            float stretchLimit = rigidJoints && linearYield && stretchBreak ? stretchBreakMeters : float.PositiveInfinity;
+            if (constraints.AddJoint(a, b, anchor - positionA, anchor - positionB, linear, float.PositiveInfinity, fractureThreshold, yield, bendLimit,
+                    fractureLinear, yieldLinear, stretchLimit) >= 0)
                 jointCount++;
         }
 
@@ -991,6 +1009,26 @@ namespace McKrill.Avbd.Samples
             GUI.enabled = wasEnabled && plasticJoints && bendBreak;
             GUILayout.Label("Bend limit: " + bendBreakDegrees.ToString("0") + " degrees");
             bendBreakDegrees = Mathf.Round(GUILayout.HorizontalSlider(bendBreakDegrees, 1f, 180f));
+            GUI.enabled = wasEnabled;
+
+            // Linear fracture and plasticity: only for rigid joints (greyed out otherwise).
+            GUILayout.Space(4f);
+            bool linearEnabled = wasEnabled && rigidJoints;
+            GUI.enabled = linearEnabled;
+            linearFracture = GUILayout.Toggle(linearFracture, "Linear fracture: a joint breaks under force" + (rigidJoints ? "" : "   (needs rigid joints)"));
+            GUI.enabled = linearEnabled && linearFracture;
+            GUILayout.Label("Linear fracture threshold: " + linearFractureThreshold.ToString("0"));
+            linearFractureThreshold = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(linearFractureThreshold), 0f, 5f)), 1f, 1e5f);
+            GUI.enabled = linearEnabled;
+            linearYield = GUILayout.Toggle(linearYield, "Linear yield: joints give way and keep the stretch");
+            GUI.enabled = linearEnabled && linearYield;
+            GUILayout.Label("Linear yield threshold: " + linearYieldThreshold.ToString("0")
+                + (linearFracture && linearYieldThreshold >= linearFractureThreshold ? "   (not below the fracture threshold: joints break first)" : ""));
+            linearYieldThreshold = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(linearYieldThreshold), -1f, 5f)), 0.1f, 1e5f);
+            stretchBreak = GUILayout.Toggle(stretchBreak, "Stretch break: a joint breaks when stretched too far");
+            GUI.enabled = linearEnabled && linearYield && stretchBreak;
+            GUILayout.Label("Stretch limit: " + stretchBreakMeters.ToString("0.00") + " m");
+            stretchBreakMeters = Mathf.Round(GUILayout.HorizontalSlider(stretchBreakMeters, 0.01f, 2f) * 100f) / 100f;
             GUI.enabled = wasEnabled;
             GUILayout.Space(4f);
             GUILayout.Space(4f);

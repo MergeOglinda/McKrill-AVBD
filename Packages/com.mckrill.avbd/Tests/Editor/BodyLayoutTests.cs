@@ -192,7 +192,7 @@ namespace McKrill.Avbd.Tests
             ConstraintFlags[] flags =
             {
                 ConstraintFlags.HardLinear, ConstraintFlags.HardAngular, ConstraintFlags.Fracturable, ConstraintFlags.Broken, ConstraintFlags.Stick,
-                ConstraintFlags.Plastic, ConstraintFlags.BendBreak,
+                ConstraintFlags.Plastic, ConstraintFlags.BendBreak, ConstraintFlags.FracturableLinear, ConstraintFlags.PlasticLinear, ConstraintFlags.StretchBreak,
             };
             uint seen = 0;
             foreach (ConstraintFlags flag in flags)
@@ -220,6 +220,9 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)ConstraintFlags.Broken, d["AVBD_CONSTRAINT_FLAG_BROKEN"]);
             Assert.AreEqual((uint)ConstraintFlags.Plastic, d["AVBD_CONSTRAINT_FLAG_PLASTIC"]);
             Assert.AreEqual((uint)ConstraintFlags.BendBreak, d["AVBD_CONSTRAINT_FLAG_BEND_BREAK"]);
+            Assert.AreEqual((uint)ConstraintFlags.FracturableLinear, d["AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN"]);
+            Assert.AreEqual((uint)ConstraintFlags.PlasticLinear, d["AVBD_CONSTRAINT_FLAG_PLASTIC_LIN"]);
+            Assert.AreEqual((uint)ConstraintFlags.StretchBreak, d["AVBD_CONSTRAINT_FLAG_STRETCH_BREAK"]);
             Assert.AreEqual(ConstraintFlagLayout.FlagsMask, d["AVBD_CONSTRAINT_FLAGS_MASK"]);
             Assert.AreEqual((uint)ConstraintFlagLayout.KindShift, d["AVBD_CONSTRAINT_KIND_SHIFT"]);
             Assert.AreEqual((uint)ConstraintKind.Joint, d["AVBD_CONSTRAINT_KIND_JOINT"]);
@@ -282,6 +285,44 @@ namespace McKrill.Avbd.Tests
             PlasticRecord q = ConstraintRecordFactory.MakePlastic(ref limited, 0u, 50f, 0.5f);
             Assert.IsTrue((ConstraintFlagLayout.FlagsOf(limited.ident.z) & ConstraintFlags.BendBreak) != 0);
             Assert.AreEqual(0.5f, q.limits.y);
+        }
+
+        [Test]
+        public void MakePlastic_FlagsTheLinearRowToo_AndKeepsTheStartingAnchor()
+        {
+            float inf = float.PositiveInfinity;
+            ConstraintRecord both = ConstraintRecordFactory.Joint(1u, 2u, new float3(1f, 2f, 3f), float3.zero, inf, inf, inf, 1f);
+            PlasticRecord p = ConstraintRecordFactory.MakePlastic(ref both, 4u, 50f, inf, 7f, 0.25f);
+            ConstraintFlags flags = ConstraintFlagLayout.FlagsOf(both.ident.z);
+            Assert.IsTrue((flags & ConstraintFlags.Plastic) != 0 && (flags & ConstraintFlags.PlasticLinear) != 0 && (flags & ConstraintFlags.StretchBreak) != 0);
+            Assert.IsTrue((flags & ConstraintFlags.BendBreak) == 0);
+            Assert.AreEqual(new float4(50f, 0f, 7f, 0.25f), p.limits);
+            Assert.AreEqual(new float4(1f, 2f, 3f, 0f), p.reserved, "the anchor on A at creation");
+
+            // A joint that is plastic in the linear row only has no angular yield and no Plastic flag, but it does have a plastic record.
+            ConstraintRecord linearOnly = ConstraintRecordFactory.Joint(1u, 2u, float3.zero, float3.zero, inf, inf, inf, 1f);
+            PlasticRecord q = ConstraintRecordFactory.MakePlastic(ref linearOnly, 9u, inf, inf, 7f);
+            flags = ConstraintFlagLayout.FlagsOf(linearOnly.ident.z);
+            Assert.IsTrue((flags & ConstraintFlags.Plastic) == 0 && (flags & ConstraintFlags.PlasticLinear) != 0 && (flags & ConstraintFlags.StretchBreak) == 0);
+            Assert.AreEqual(9u, linearOnly.ident.w);
+            Assert.AreEqual(7f, q.limits.z);
+        }
+
+        [Test]
+        public void Joint_StoresTheLinearFractureValue_AndNeedsAHardLinearRow()
+        {
+            float inf = float.PositiveInfinity;
+            ConstraintRecord never = ConstraintRecordFactory.Joint(1u, 2u, float3.zero, float3.zero, inf, inf, inf, 1f);
+            Assert.IsTrue((ConstraintFlagLayout.FlagsOf(never.ident.z) & ConstraintFlags.FracturableLinear) == 0);
+            Assert.AreEqual(0f, never.reserved.x);
+
+            ConstraintRecord breaks = ConstraintRecordFactory.Joint(1u, 2u, float3.zero, float3.zero, inf, 0f, inf, 1f, 12f);
+            Assert.IsTrue((ConstraintFlagLayout.FlagsOf(breaks.ident.z) & ConstraintFlags.FracturableLinear) != 0);
+            Assert.IsTrue((ConstraintFlagLayout.FlagsOf(breaks.ident.z) & ConstraintFlags.Fracturable) == 0, "the angular fracture flag is separate");
+            Assert.AreEqual(12f, breaks.reserved.x);
+
+            Assert.Throws<System.ArgumentException>(() => ConstraintRecordFactory.Joint(1u, 2u, float3.zero, float3.zero, 1000f, 0f, inf, 1f, 12f),
+                "a soft row has no multiplier, so a linear fracture value could never be reached");
         }
 
         [Test]

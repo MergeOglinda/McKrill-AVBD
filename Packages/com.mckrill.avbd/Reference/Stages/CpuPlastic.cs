@@ -9,7 +9,7 @@ namespace McKrill.Avbd.Reference
     /// </summary>
     internal static class CpuPlastic
     {
-        /// <summary>The plastic record of a joint with <see cref="ConstraintFlags.Plastic"/> (slot ident.w).</summary>
+        /// <summary>The plastic record of a joint with <see cref="ConstraintFlags.Plastic"/> or <see cref="ConstraintFlags.PlasticLinear"/> (slot ident.w).</summary>
         public static ref PlasticRecord Of(PlasticRecord[] plastic, in ConstraintRecord joint)
         {
             if (plastic == null)

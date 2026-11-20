@@ -51,9 +51,10 @@ namespace McKrill.Avbd.Reference
         public AvbdJoint AddJoint(
             AvbdBody bodyA, AvbdBody bodyB, float3 rA, float3 rB,
             float stiffnessLin = float.PositiveInfinity, float stiffnessAng = 0f, float fracture = float.PositiveInfinity,
-            float yield = float.PositiveInfinity, float breakBend = float.PositiveInfinity)
+            float yield = float.PositiveInfinity, float breakBend = float.PositiveInfinity,
+            float fractureLin = float.PositiveInfinity, float yieldLin = float.PositiveInfinity, float breakStretch = float.PositiveInfinity)
         {
-            var joint = new AvbdJoint(this, bodyA, bodyB, rA, rB, stiffnessLin, stiffnessAng, fracture, yield, breakBend);
+            var joint = new AvbdJoint(this, bodyA, bodyB, rA, rB, stiffnessLin, stiffnessAng, fracture, yield, breakBend, fractureLin, yieldLin, breakStretch);
             AddForce(joint);
             return joint;
         }
