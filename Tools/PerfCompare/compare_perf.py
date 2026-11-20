@@ -70,6 +70,11 @@ def num(v):
     return "" if v is None else round(v, 4)
 
 
+def sample_count(group):
+    """Number of samples of a SampleGroup dict (multi_compare_perf.py sets "SampleCount" on the groups it builds from several runs)."""
+    return group["SampleCount"] if "SampleCount" in group else len(group["Samples"])
+
+
 def compare(base_tests, cand_tests, threshold):
     header = ["test", "group", "unit", "kind", "baseline_status", "candidate_status",
               "baseline_median", "candidate_median", "delta_median", "delta_median_pct",
@@ -101,11 +106,11 @@ def compare(base_tests, cand_tests, threshold):
                 factor = 1.0
             if gb:
                 row.update(baseline_median=gb["Median"], baseline_avg=gb["Average"], baseline_sum=gb["Sum"], baseline_min=gb["Min"], baseline_max=gb["Max"],
-                           baseline_stddev=gb["StandardDeviation"], baseline_samples=len(gb["Samples"]))
+                           baseline_stddev=gb["StandardDeviation"], baseline_samples=sample_count(gb))
             if gc:
                 row.update(candidate_median=gc["Median"] * factor, candidate_avg=gc["Average"] * factor, candidate_sum=gc["Sum"] * factor, candidate_min=gc["Min"] * factor,
                            candidate_max=gc["Max"] * factor, candidate_stddev=gc["StandardDeviation"] * factor,
-                           candidate_samples=len(gc["Samples"]))
+                           candidate_samples=sample_count(gc))
             if gb and gc:
                 delta = row["candidate_median"] - row["baseline_median"]
                 row["delta_median"] = delta
@@ -137,25 +142,19 @@ def compare(base_tests, cand_tests, threshold):
     return header, rows
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("baseline", help="NUnit XML result file of the baseline run")
-    p.add_argument("candidate", help="NUnit XML result file of the run to compare")
-    p.add_argument("-o", "--output", default="perf_comparison.csv", help="CSV file to write (default: perf_comparison.csv)")
-    p.add_argument("--threshold", type=float, default=5.0, help="percent change of the median below which a group is 'same' (default 5)")
-    args = p.parse_args()
-
-    header, rows = compare(read_run(args.baseline), read_run(args.candidate), args.threshold)
-    with open(args.output, "w", newline="", encoding="utf-8") as f:
+def write_csv(path, header, rows):
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(header)
         for r in rows:
             w.writerow([(num(r[h]) if isinstance(r.get(h), float) else r.get(h, "")) for h in header])
 
+
+def print_summary(rows, output, threshold):
     counts = {}
     for r in rows:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
-    print("%d rows written to %s (%s)" % (len(rows), args.output, ", ".join("%s: %d" % kv for kv in sorted(counts.items()))))
+    print("%d rows written to %s (%s)" % (len(rows), output, ", ".join("%s: %d" % kv for kv in sorted(counts.items()))))
     for r in rows:
         if r["kind"] != "time" or r["group"] in CONSOLE_SKIPPED_GROUPS:
             continue
@@ -165,10 +164,23 @@ def main():
                                                                   r["baseline_median"], r["candidate_median"], r["unit"]))
         # The sum of the samples, when it moved by more than the threshold too. A group with a single sample (in either run) has a sum equal to its
         # median, so it is left out. The sum depends on the number of samples, which is shown when it differs.
-        if abs(r.get("delta_sum_pct", 0.0)) > args.threshold and r["baseline_samples"] > 1 and r["candidate_samples"] > 1:
+        if abs(r.get("delta_sum_pct", 0.0)) > threshold and r["baseline_samples"] > 1 and r["candidate_samples"] > 1:
             samples = "" if r["baseline_samples"] == r["candidate_samples"] else ", samples %d vs %d" % (r["baseline_samples"], r["candidate_samples"])
             print("  sum %-4s %+7.1f%%  %s  (sum %.2f -> %.2f %s, difference %+.2f %s%s)" % (
                 r["sum_verdict"], r["delta_sum_pct"], name, r["baseline_sum"], r["candidate_sum"], r["unit"], r["delta_sum"], r["unit"], samples))
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("baseline", help="NUnit XML result file of the baseline run")
+    p.add_argument("candidate", help="NUnit XML result file of the run to compare")
+    p.add_argument("-o", "--output", default="perf_comparison.csv", help="CSV file to write (default: perf_comparison.csv)")
+    p.add_argument("--threshold", type=float, default=5.0, help="percent change of the median below which a group is 'same' (default 5)")
+    args = p.parse_args()
+
+    header, rows = compare(read_run(args.baseline), read_run(args.candidate), args.threshold)
+    write_csv(args.output, header, rows)
+    print_summary(rows, args.output, args.threshold)
 
 
 if __name__ == "__main__":
