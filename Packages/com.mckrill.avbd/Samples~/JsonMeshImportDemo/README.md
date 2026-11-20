@@ -1,10 +1,10 @@
 # JSON Mesh Import Demo
 
-Spawns the objects of a list of voxel files on the GPU solver. A voxel file is the JSON that `Tools/Voxelize/voxelize_stl.py` writes from an STL mesh (see `Tools/Voxelize/README.md` for the script and the file format). Every voxel becomes a box body and every joint of the file becomes a ball-socket joint with a hard angle lock between two neighboring boxes, at the middle between their centers. The joints fracture like those of the *GPU Fracture Wall Demo*, which this demo is based on: shoot boxes at the objects, or blow them up.
+Spawns the objects of a list of voxel files on the GPU solver. A voxel file is the JSON that `Tools/Voxelize/voxelize_stl.py` writes from an STL mesh (see `Tools/Voxelize/README.md` for the script and the file format). Every voxel becomes a box body (or a sphere body, see *Spheres instead of boxes* below) and every joint of the file becomes a ball-socket joint with a hard angle lock between two neighboring boxes, at the middle between their centers. The joints fracture like those of the *GPU Fracture Wall Demo*, which this demo is based on: shoot boxes at the objects, or blow them up.
 
 The objects stand on the ground in a row along x, **5 m apart** (center to center), the row centered on x = 0. Each object is placed so that the middle of its bounding box is on its spot in x and z and its lowest voxel rests on the ground.
 
-The demo uses only the package's public API (`AvbdBodyBuffers`, `AvbdConstraintBuffers`, `AvbdSolver.Step()`), and draws every box with one instanced draw call, as the fracture wall demo does. It contains no collision or fracture code. `VoxelMeshData.cs` reads and checks the JSON.
+The demo uses only the package's public API (`AvbdBodyBuffers`, `AvbdConstraintBuffers`, `AvbdSolver.Step()`), and draws the voxels with instanced draw calls (one for the boxes, one for the spheres), as the fracture wall demo does. It contains no collision or fracture code. `VoxelMeshData.cs` reads and checks the JSON.
 
 ## Run it
 
@@ -62,6 +62,7 @@ The click mode button and its shot and explosion settings, the solver's iteratio
 | --- | --- |
 | Objects | One line for each entry of the list: the number of voxels and joints and the size of the object, or why it was not loaded |
 | Voxel mass | 0.01 to 10 kg (log scale), default 0.25 kg like a block of the fracture wall. The mass of every voxel; the density of an object follows from it and the size of its voxels |
+| Spheres instead of boxes | Off by default. On: every voxel is a sphere instead of a box (the `sphereVoxels` field of the component, which is the parameter the panel toggles). Takes effect on **Reset** |
 | Rigid joints, Joint stiffness, Fracture threshold | As in the fracture wall demo (defaults: stiffness 5e3, threshold 40). **They are the wall's numbers, not tuned for voxels**: the multiplier a joint sees depends on the voxel size and mass, so if nothing breaks lower the threshold or shoot harder, and if an object falls apart by itself raise it |
 | Plastic yield, Yield threshold, Bend break, Bend limit | As in the fracture wall demo |
 
@@ -71,9 +72,19 @@ The click mode button and its shot and explosion settings, the solver's iteratio
 - A joint holds two voxels together: while it holds they do not collide with each other. Voxels that are not joined collide like any other pair. At the default connectivity of 6 only face neighbors are joined, so an object is as stiff as a lattice of ball-socket joints with an angle lock can make it; `--connectivity 18` or `26` in the script gives it more joints per voxel.
 - The scene is y-up. A mesh from a z-up tool needs `--zup-to-yup` in the script, or it lies on its side.
 
+## Spheres instead of boxes
+
+The `sphereVoxels` field (**Objects (applied on Reset)** in the inspector) and the panel's *Spheres instead of boxes* toggle switch the voxels from boxes to spheres. In sphere mode:
+
+- The diameter of a sphere is the edge of the box it replaces (the voxel size less the gap), so a sphere touches the middle of each face of its cell and face neighbors are almost touching, as in the *GPU Fracture Wall Sphere Demo*.
+- A sphere has the mass *Voxel mass*, the same as a box: the density is computed from the volume of the sphere (about 52% of the box), so a sphere is denser than a box.
+- The joints are the same: a ball-socket joint with an angle lock at the middle between the two voxel centers. A sphere object is as stiff as a lattice of joints can make it, but its voxels touch at single points, so it collides and piles up differently from the box object (a sphere rolls where a box slides).
+- Spheres have one contact point per pair, and the ground and the shots stay boxes.
+- The spheres are drawn with their own instanced draw call and a 192-triangle sphere mesh, built in code.
+
 ## Limits
 
 - Every voxel is a body: the files that ship have 500 to 900 voxels each, and a finer grid grows with the cube of the resolution. The package's limits on bodies, joints and contact manifolds apply (the demo sizes its buffers from the files).
-- The shot size slider goes up to 2 m and shots are cubes.
+- The shot size slider goes up to 2 m and shots are cubes, also in sphere mode.
 - Drawing is instanced and has **no shadows**, as in the fracture wall demo.
 - Written without a Unity editor: not compiled, not run.
