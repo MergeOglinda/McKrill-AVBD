@@ -15,6 +15,8 @@ namespace McKrill.Avbd.Reference
         {
             float dt = settings.dt;
             float3 gravity = settings.gravity;
+            // The centroids of the springs, over the poses at the start of the step (the kernel ForceFieldAccumulate runs before the predict kernel).
+            int[] springSums = forceFields != null && forceFieldSlots > 0 ? CpuForceFieldMath.SpringSums(bodies, count, forceFields, forceFieldSlots) : null;
 
             for (int slot = 0; slot < count; slot++)
             {
@@ -49,7 +51,7 @@ namespace McKrill.Avbd.Reference
                 if (forceFields != null && forceFieldSlots > 0)
                 {
                     inertialPos += CpuForceFieldMath.Acceleration(bodies.Meta[slot].ident.y, bodies.Mass[slot].momentMass.w, new quaternion(s.rotation),
-                        linearVel, gravity, dt, forceFields, forceFieldSlots) * (dt * dt);
+                        linearVel, gravity, dt, forceFields, forceFieldSlots, springSums) * (dt * dt);
                 }
                 float4 predictedRot = AvbdQuat.IntegrateAngular(new quaternion(s.rotation), angularVel * dt).value;
 

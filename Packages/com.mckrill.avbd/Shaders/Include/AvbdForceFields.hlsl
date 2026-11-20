@@ -11,6 +11,11 @@
 #define AVBD_FORCE_GRAVITY_SCALE 2
 #define AVBD_FORCE_DRAG 3
 #define AVBD_FORCE_WING 4
+#define AVBD_FORCE_SPRING 5
+
+// A spring field needs the centroid of its group. ForceFieldAccumulate sums, for each spring field, the offsets (position - target) of the bodies of its
+// group as integers in 1/AVBD_FORCE_FIXED_POINT m (an integer sum does not depend on the order the threads add in), and counts the bodies.
+#define AVBD_FORCE_FIXED_POINT 1024
 
 // Flags in ident.z.
 #define AVBD_FORCE_FLAG_BODY_SPACE 1 // the force of a constant field is in the body's frame, not the world's
@@ -18,9 +23,10 @@
 // 64 B. One force field. Only float4 and uint4 members, like every record (layout rule P1).
 struct ForceFieldRecord
 {
-    float4 value;        // constant: the force in N. drag and wing: the velocity of the air (wind) in m/s
-    float4 axis;         // wing: xyz = the normal of the wing in the body's frame (unit)
-    float4 coefficients; // gravity scale: x = scale. drag: x = linear, y = quadratic. wing: x = lift slope, y = drag coefficient, z = half the air density times the area
+    float4 value;        // constant: the force in N. drag and wing: the velocity of the air (wind) in m/s. spring: the target point
+    float4 axis;         // wing: xyz = the normal of the wing in the body's frame (unit). spring: xyz = the direction of a line through the target (unit, or 0 for none)
+    float4 coefficients; // gravity scale: x = scale. drag: x = linear, y = quadratic. wing: x = lift slope, y = drag coefficient, z = half the air density times the area.
+                         // spring: x = stiffness in N/m, y = damping ratio, z = how much the stiffness grows with the distance of the centroid from the line, in 1/m
     uint4  ident;        // x = kind, y = group mask of the bodies it acts on, z = flags
 };
 

@@ -17,6 +17,12 @@ namespace McKrill.Avbd
 
         /// <summary>A wing: lift and drag on a flat plate moving through air. Give it to the blocks that form the wings of an airplane.</summary>
         Wing = 4,
+
+        /// <summary>
+        /// A damped spring that pulls the group, as a whole, toward a point. The force depends on the centroid of the group, so every body of the group gets
+        /// the same force and the group keeps its shape. Use it to hold or drag a set of blocks.
+        /// </summary>
+        Spring = 5,
     }
 
     /// <summary>The frame of the force of a <see cref="ForceKind.Constant"/> field.</summary>
@@ -32,7 +38,7 @@ namespace McKrill.Avbd
     /// A force that acts on a group of bodies, for <see cref="AvbdSolver.AddForceField"/>. A body is in the group if its group mask
     /// (<see cref="BodyDescriptor.groupMask"/>, <see cref="AvbdBodyBuffers.SetGroupMask"/>) has a bit in common with <see cref="groupMask"/>; this is
     /// the only label, and it is already part of every body. Static and kinematic bodies are never moved. Make one with <see cref="Force"/>,
-    /// <see cref="GravityScale"/>, <see cref="Drag"/> or <see cref="Wing"/>.
+    /// <see cref="GravityScale"/>, <see cref="Drag"/>, <see cref="Wing"/> or <see cref="Spring"/>.
     /// </summary>
     /// <remarks>
     /// A new body has all bits set in its group mask, so it is in every group. Give the bodies the masks of the groups they belong to (for an airplane,
@@ -78,6 +84,22 @@ namespace McKrill.Avbd
         /// <summary>Wing: the drag of the surface at no angle of attack, as a coefficient.</summary>
         public float dragCoefficient;
 
+        /// <summary>Spring: the point the centroid of the group is pulled to.</summary>
+        public float3 target;
+
+        /// <summary>Spring: the stiffness in N/m: the force on each body of the group is <c>stiffness * (target - centroid)</c>.</summary>
+        public float stiffness;
+
+        /// <summary>Spring: the damping ratio of the velocity of each body. 1 is critical damping, 0 none.</summary>
+        public float dampingRatio;
+
+        /// <summary>Spring: a direction (any length but not zero; zero for none) of a line through <see cref="target"/>, for <see cref="offsetGain"/>.</summary>
+        public float3 lineDirection;
+
+        /// <summary>Spring: how much the stiffness grows with the distance of the centroid of the group from the line through <see cref="target"/> along
+        /// <see cref="lineDirection"/>, in 1/m: the stiffness is <c>stiffness * (1 + offsetGain * distance)</c>. 0 for a constant stiffness.</summary>
+        public float offsetGain;
+
         /// <summary>A constant force in N on each body of the group.</summary>
         public static ForceFieldDescriptor Force(uint groupMask, float3 force, ForceSpace space = ForceSpace.World)
         {
@@ -112,6 +134,24 @@ namespace McKrill.Avbd
             };
         }
 
+        /// <summary>
+        /// A damped spring that pulls the centroid of the group toward <paramref name="target"/>. Each body of the group gets the force
+        /// <c>stiffness * (target - centroid)</c> in N (so a group of n bodies is pulled with n times that), and a damping force
+        /// <c>2 dampingRatio sqrt(stiffness m) v</c> against its own velocity. The centroid is that of the bodies of the group at the start of the step;
+        /// the sum of their offsets from the target must stay below 2 million m (a fixed-point sum in 32 bits).
+        /// </summary>
+        /// <param name="lineDirection">With <paramref name="offsetGain"/>: the stiffness is <c>stiffness * (1 + offsetGain * d)</c>, where d is the distance in m of
+        /// the centroid from the line through the target along this direction. For a grab, the line of sight through the target: the farther the group is from the
+        /// center of the view, the harder it is pulled back. Zero (the default) for a constant stiffness.</param>
+        public static ForceFieldDescriptor Spring(uint groupMask, float3 target, float stiffness, float dampingRatio = 1f, float3 lineDirection = default, float offsetGain = 0f)
+        {
+            return new ForceFieldDescriptor
+            {
+                kind = ForceKind.Spring, groupMask = groupMask, target = target, stiffness = stiffness, dampingRatio = dampingRatio,
+                lineDirection = lineDirection, offsetGain = offsetGain,
+            };
+        }
+
         internal void Validate()
         {
             switch (kind)
@@ -141,6 +181,14 @@ namespace McKrill.Avbd
                         throw new ArgumentException("The density of the air must be above zero.", nameof(airDensity));
                     if (!float.IsFinite(liftSlope) || !float.IsFinite(dragCoefficient) || liftSlope < 0f || dragCoefficient < 0f)
                         throw new ArgumentException("The lift slope and the drag coefficient must be finite and not negative.");
+                    break;
+                case ForceKind.Spring:
+                    RequireFinite(target);
+                    if (!float.IsFinite(stiffness) || !float.IsFinite(dampingRatio) || stiffness < 0f || dampingRatio < 0f)
+                        throw new ArgumentException("The stiffness and the damping ratio of a spring must be finite and not negative.");
+                    RequireFinite(lineDirection);
+                    if (!float.IsFinite(offsetGain) || offsetGain < 0f)
+                        throw new ArgumentException("The offset gain of a spring must be finite and not negative.", nameof(offsetGain));
                     break;
                 default:
                     throw new ArgumentException("Unknown force kind.", nameof(kind));
@@ -174,6 +222,11 @@ namespace McKrill.Avbd
                     r.value = new float4(wind, 0f);
                     r.axis = new float4(math.normalize(normal), 0f);
                     r.coefficients = new float4(liftSlope, dragCoefficient, 0.5f * airDensity * area, 0f);
+                    break;
+                case ForceKind.Spring:
+                    r.value = new float4(target, 0f);
+                    r.axis = new float4(math.lengthsq(lineDirection) > 1e-12f ? math.normalize(lineDirection) : float3.zero, 0f);
+                    r.coefficients = new float4(stiffness, dampingRatio, offsetGain, 0f);
                     break;
             }
             return r;

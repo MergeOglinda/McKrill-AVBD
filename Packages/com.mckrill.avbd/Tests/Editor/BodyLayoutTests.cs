@@ -247,6 +247,8 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)ForceKind.GravityScale, d["AVBD_FORCE_GRAVITY_SCALE"]);
             Assert.AreEqual((uint)ForceKind.Drag, d["AVBD_FORCE_DRAG"]);
             Assert.AreEqual((uint)ForceKind.Wing, d["AVBD_FORCE_WING"]);
+            Assert.AreEqual((uint)ForceKind.Spring, d["AVBD_FORCE_SPRING"]);
+            Assert.AreEqual(1024u, d["AVBD_FORCE_FIXED_POINT"]);
             Assert.AreEqual((uint)ForceSpace.Body, d["AVBD_FORCE_FLAG_BODY_SPACE"]);
             AssertStructMatches(ReadInclude("AvbdForceFields.hlsl"), "ForceFieldRecord", typeof(ForceFieldRecord));
         }
