@@ -47,7 +47,7 @@ The same as in the *GPU Fracture Wall Demo*, except for the volley (there is no 
 
 | Input | Action |
 | --- | --- |
-| Left click (outside the panel) | Shoot a box in the direction the camera looks, or, in explosion mode, set off an explosion where the camera ray hits |
+| Left click (outside the panel) | Shoot a box in the direction the camera looks, in explosion mode, set off an explosion where the camera ray hits; in throw mode, click to select a voxel and every voxel joined to it, click again to throw them |
 | Right drag | Look around |
 | `W` `A` `S` `D`, `Q` `E` | Move, down and up. `Shift` is three times faster |
 | Mouse wheel | Move forward and back |
@@ -56,7 +56,7 @@ The same as in the *GPU Fracture Wall Demo*, except for the volley (there is no 
 
 ## The panel
 
-The click mode button and its shot and explosion settings, the solver's iterations and the joint settings are as in the fracture wall demo. The object and joint settings take effect on **Reset**, because the package cannot change a joint after it was added.
+The click mode buttons (Shot, Explosion and Throw) and their shot and explosion settings, the solver's iterations and the joint settings are as in the fracture wall demo. The object and joint settings take effect on **Reset**, because the package cannot change a joint after it was added.
 
 | Control | What it does |
 | --- | --- |
@@ -77,3 +77,7 @@ The click mode button and its shot and explosion settings, the solver's iteratio
 - The shot size slider goes up to 2 m and shots are cubes.
 - Drawing is instanced and has **no shadows**, as in the fracture wall demo.
 - Written without a Unity editor: not compiled, not run.
+
+## Throw
+
+In throw mode the first left click casts a ray from the center of the camera on the GPU and selects the voxel it hits and every voxel joined to it by joints that have not fractured: a whole object while it is intact, one piece of it after it has broken. The selection is drawn in green. The next click throws it: the voxels are put in front of the camera, keeping their arrangement and rotation, and get the velocity of the *Speed* slider (5 to 200 m/s) along the line of sight. It works as in the fracture wall demo (see its README); the objects here are not joined to the ground, so any object can be thrown. This demo has no Grab mode.
