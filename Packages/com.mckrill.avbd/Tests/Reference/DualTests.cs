@@ -196,6 +196,239 @@ namespace McKrill.Avbd.Tests
             }
         }
 
+        // ---- linear fracture and plasticity ---------------------------------------------------------------------
+
+        [Test]
+        public void Oracle_YieldsAndBreaksLinearlyPlasticJoints_LikeTheReferenceSolver([Values(1, 3)] int iterations)
+        {
+            var solver = new ReferenceSolver();
+            LinearPlasticScene(solver, out AvbdJoint yields, out AvbdJoint holds, out AvbdJoint stretches, out AvbdJoint world);
+            CheckOracleAgainstReference(solver, iterations, "linear plastic scene");
+
+            Assert.AreNotEqual(yields.rAStart, yields.rA, "the first joint must have yielded: its anchor on A moved");
+            Assert.LessOrEqual(math.length(yields.lambdaLin), yields.yieldLin * 1.001f, "a yielded row holds its multiplier at the yield value");
+            Assert.IsFalse(yields.broken, "yielding alone does not break a joint");
+            Assert.AreEqual(yields.rAStart, holds.rA, "the joint with a huge yield value stays rigid");
+            Assert.IsFalse(holds.broken);
+            Assert.IsTrue(stretches.broken, "the joint that yielded past its stretch limit must break");
+            Assert.AreNotEqual(world.rAStart, world.rA, "a joint to the world moves its world point");
+            Assert.IsFalse(world.broken);
+        }
+
+        [Test]
+        public void Oracle_BreaksALinearlyFracturingJoint_LikeTheReferenceSolver()
+        {
+            var solver = new ReferenceSolver();
+            LinearFractureScene(solver, out AvbdJoint weak, out AvbdJoint strong);
+            CheckOracleAgainstReference(solver, 3, "linear fracture scene");
+
+            Assert.IsTrue(weak.broken, "the scenario must break the weak joint");
+            Assert.IsFalse(strong.broken, "the strong joint must hold");
+        }
+
+        [Test]
+        public void Oracle_ALinearlyPlasticJointThatNeverYields_IsTheRigidJoint()
+        {
+            var rigid = new ReferenceSolver();
+            var plastic = new ReferenceSolver();
+            foreach (ReferenceSolver s in new[] { rigid, plastic })
+            {
+                float yield = s == plastic ? 1e9f : float.PositiveInfinity;
+                float inf = float.PositiveInfinity;
+                s.Clear();
+                AvbdBody a = s.AddBody(new float3(1f), 0f, 0.5f, new float3(0f, 0f, 5f));
+                AvbdBody b = s.AddBody(new float3(1f), 1f, 0.5f, new float3(2f, 0f, 5f));
+                AvbdJoint j = s.AddJoint(a, b, new float3(1f, 0f, 0f), new float3(-1f, 0f, 0f), inf, inf, inf, inf, inf, inf, yield);
+                j.penaltyLin = new float3(1000f);
+                j.penaltyAng = new float3(100f);
+                j.lambdaLin = new float3(5f, 0f, 0f);
+                s.Params.gravity = new float3(0f, 0f, -10f);
+                s.Params.iterations = 3;
+                s.Params.mode = GaussSeidelMode.Colored;
+                s.Step();
+            }
+            for (int i = 0; i < 2; i++)
+            {
+                Assert.AreEqual(rigid.Bodies[i].PositionLin, plastic.Bodies[i].PositionLin, "body " + i + " position");
+                Assert.AreEqual(rigid.Bodies[i].PositionAng.value, plastic.Bodies[i].PositionAng.value, "body " + i + " rotation");
+            }
+        }
+
+        // A hard world joint at (0, 0.5, 0) on a body at the origin: the linear error is (0, 0.5, 0), so with a penalty of 100 the multiplier jumps to
+        // (0, 50, 0). No angle lock. Returns the record, with the plastic record in plastic[0] when yieldLinear is finite.
+        static ConstraintRecord WorldPin(float fractureLinear, float yieldLinear, float stretchLimit, out CpuBodyArrays bodies, out PlasticRecord[] plastic)
+        {
+            bodies = OneBodyWithRotation(quaternion.identity, out BodyHandle b);
+            ConstraintRecord c = ConstraintRecordFactory.Joint(AvbdConst.Invalid, (uint)b.Slot, new float3(0f, 0.5f, 0f), float3.zero,
+                float.PositiveInfinity, 0f, float.PositiveInfinity, 1f, fractureLinear);
+            plastic = float.IsPositiveInfinity(yieldLinear)
+                ? null
+                : new[] { ConstraintRecordFactory.MakePlastic(ref c, 0u, float.PositiveInfinity, float.PositiveInfinity, yieldLinear, stretchLimit) };
+            c.penaltyLin = new float4(100f, 100f, 100f, 0f);
+            return c;
+        }
+
+        static bool IsBroken(in ConstraintRecord c) => (ConstraintFlagLayout.FlagsOf(c.ident.z) & ConstraintFlags.Broken) != 0;
+
+        [Test]
+        public void Oracle_LinearYield_ClampsTheMultiplier_AndKeepsTheStretch_ByHand()
+        {
+            ConstraintRecord c = WorldPin(float.PositiveInfinity, 10f, float.PositiveInfinity, out CpuBodyArrays bodies, out PlasticRecord[] plastic);
+
+            AvbdSolverSettings s = AvbdSolverSettings.Default;
+            CpuDual.Update(bodies, ref c, s, plastic);
+
+            Assert.AreEqual(10f, math.length(c.lambdaLin.xyz), 1e-3f, "the multiplier is held at the yield value");
+            Assert.Greater(c.lambdaLin.y, 0f, "in the direction of the error");
+            AssertNear(float3.zero, c.anchorA.xyz, 1e-6f, "the world point moves to where the anchor on B is");
+            Assert.AreEqual(float3.zero, c.c0Lin.xyz, "the stabilization reference is cleared, so it cannot pull the stretch back");
+            Assert.AreEqual(1f, c.c0Lin.w, "the torque arm stays");
+            Assert.AreEqual(100f, c.penaltyLin.x, "a yielding row does not ramp its penalty");
+            Assert.IsFalse(IsBroken(c));
+            AssertNear(new float4(0f, 0.5f, 0f, 0f), plastic[0].reserved, 0f, "the starting anchor never changes");
+
+            // At the new anchor the error is zero: nothing pulls the joint back, and the multiplier stays.
+            float3 held = c.lambdaLin.xyz;
+            CpuDual.Update(bodies, ref c, s, plastic);
+            AssertNear(held, c.lambdaLin.xyz, 1e-3f, "the held multiplier");
+            AssertNear(float3.zero, c.anchorA.xyz, 1e-6f, "the anchor after a second update");
+        }
+
+        [Test]
+        public void Oracle_LinearYield_MovesTheAnchorOnABodyInItsBodySpace()
+        {
+            // Body A is turned 90 degrees about z and sits at (0,5,0): its anchor (1,0,0) is at (0,6,0) in the world. Body B at (2,5,0) has its anchor (-1,0,0) at
+            // (1,5,0). The error is (-1,1,0): a multiplier far above the yield value of 10.
+            var bodies = new CpuBodyArrays(4);
+            var queue = new BodyEditQueue(4);
+            var commands = new List<EditCommand>();
+            quaternion turned = quaternion.AxisAngle(new float3(0f, 0f, 1f), math.PI * 0.5f);
+            BodyDescriptor da = BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 5f, 0f));
+            da.rotation = turned;
+            BodyHandle a = queue.Spawn(da);
+            BodyHandle b = queue.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(2f, 5f, 0f)));
+            queue.Drain(commands);
+            bodies.Apply(commands);
+
+            ConstraintRecord c = ConstraintRecordFactory.Joint((uint)a.Slot, (uint)b.Slot, new float3(1f, 0f, 0f), new float3(-1f, 0f, 0f),
+                float.PositiveInfinity, 0f, float.PositiveInfinity, 1f);
+            PlasticRecord[] plastic = { ConstraintRecordFactory.MakePlastic(ref c, 0u, float.PositiveInfinity, float.PositiveInfinity, 10f) };
+            c.penaltyLin = new float4(100f, 100f, 100f, 0f);
+
+            CpuDual.Update(bodies, ref c, AvbdSolverSettings.Default, plastic);
+
+            Assert.AreEqual(10f, math.length(c.lambdaLin.xyz), 1e-3f);
+            AssertNear(new float3(0f, -1f, 0f), c.anchorA.xyz, 1e-5f, "(1,5,0) - (0,5,0), turned back by the 90 degrees of A");
+            AssertNear(new float3(1f, 5f, 0f), AvbdQuat.Transform(new float3(0f, 5f, 0f), turned, c.anchorA.xyz), 1e-5f, "the anchors coincide in the world now");
+            AssertNear(new float4(1f, 0f, 0f, 0f), plastic[0].reserved, 0f, "the starting anchor never changes");
+        }
+
+        [Test]
+        public void Oracle_StretchLimit_BreaksALinearlyYieldedJointOnlyPastTheLimit()
+        {
+            foreach (float limit in new[] { 0.2f, 1f })
+            {
+                // The anchor moves 0.5 m, from (0, 0.5, 0) to (0, 0, 0).
+                ConstraintRecord c = WorldPin(float.PositiveInfinity, 10f, limit, out CpuBodyArrays bodies, out PlasticRecord[] plastic);
+                CpuDual.Update(bodies, ref c, AvbdSolverSettings.Default, plastic);
+
+                Assert.AreEqual(limit < 0.5f, IsBroken(c), "a stretch of 0.5 m against a limit of " + limit);
+                if (IsBroken(c))
+                    Assert.AreEqual(0f, math.lengthsq(c.lambdaLin.xyz) + math.lengthsq(c.penaltyLin.xyz), "a broken joint exerts nothing");
+            }
+        }
+
+        [Test]
+        public void Oracle_LinearFracture_BreaksOnlyAboveTheValue()
+        {
+            foreach (float fracture in new[] { 20f, 60f })
+            {
+                ConstraintRecord c = WorldPin(fracture, float.PositiveInfinity, float.PositiveInfinity, out CpuBodyArrays bodies, out _);
+                CpuDual.Update(bodies, ref c, AvbdSolverSettings.Default);
+
+                Assert.AreEqual(fracture < 50f, IsBroken(c), "a multiplier of 50 against a fracture value of " + fracture);
+                if (IsBroken(c))
+                    Assert.AreEqual(0f, math.lengthsq(c.lambdaLin.xyz) + math.lengthsq(c.penaltyLin.xyz));
+                else
+                    Assert.AreEqual(50f, c.lambdaLin.y, 1e-3f);
+            }
+        }
+
+        [Test]
+        public void Oracle_ALinearMultiplierAboveTheFractureValue_BreaksInsteadOfYielding()
+        {
+            ConstraintRecord c = WorldPin(40f, 10f, float.PositiveInfinity, out CpuBodyArrays bodies, out PlasticRecord[] plastic); // the multiplier jumps to 50
+            CpuDual.Update(bodies, ref c, AvbdSolverSettings.Default, plastic);
+
+            Assert.IsTrue(IsBroken(c));
+            AssertNear(new float3(0f, 0.5f, 0f), c.anchorA.xyz, 0f, "a joint that breaks does not move its anchor");
+        }
+
+        [Test]
+        public void Oracle_ALinearFractureValue_DoesNotTouchTheAngularRow()
+        {
+            // A hard angular row with a huge multiplier but only a linear fracture value: the angular multiplier is not tested against it.
+            CpuBodyArrays bodies = OneBodyWithRotation(quaternion.AxisAngle(new float3(0f, 0f, 1f), 0.1f), out BodyHandle b);
+            ConstraintRecord c = ConstraintRecordFactory.Joint(AvbdConst.Invalid, (uint)b.Slot, float3.zero, float3.zero,
+                float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity, 1f, 5f);
+            c.penaltyLin = new float4(1000f, 1000f, 1000f, 0f);
+            c.penaltyAng = new float4(1000f, 1000f, 1000f, 0f);
+
+            CpuDual.Update(bodies, ref c, AvbdSolverSettings.Default);
+
+            Assert.Greater(math.length(c.lambdaAng.xyz), 50f);
+            Assert.IsFalse(IsBroken(c));
+        }
+
+        // Like PlasticScene, with the yield in the linear row: a static box and three dynamic ones in a row, joined by hard joints, and a fourth dynamic box pinned
+        // to the world 0.3 m from its anchor. The first joint yields (linear yield value 0.01 against a multiplier of about 2) and stretches with no limit, the
+        // second has a yield value it never reaches, the third yields and breaks at once, because its stretch limit is tiny, and the pin yields too.
+        static void LinearPlasticScene(ReferenceSolver s, out AvbdJoint yields, out AvbdJoint holds, out AvbdJoint stretches, out AvbdJoint world)
+        {
+            s.Clear();
+            AvbdBody a = s.AddBody(new float3(1f), 0f, 0.5f, new float3(0f, 0f, 5f));
+            AvbdBody b = s.AddBody(new float3(1f), 1f, 0.5f, new float3(2f, 0f, 5f));
+            AvbdBody c = s.AddBody(new float3(1f), 1f, 0.5f, new float3(4f, 0f, 5f));
+            AvbdBody d = s.AddBody(new float3(1f), 1f, 0.5f, new float3(6f, 0f, 5f));
+            AvbdBody e = s.AddBody(new float3(1f), 1f, 0.5f, new float3(8f, 0f, 5f));
+
+            float3 rA = new float3(1f, 0f, 0f);
+            float3 rB = new float3(-1f, 0f, 0f);
+            float inf = float.PositiveInfinity;
+            yields = s.AddJoint(a, b, rA, rB, inf, inf, inf, inf, inf, inf, 0.01f);
+            holds = s.AddJoint(b, c, rA, rB, inf, inf, inf, inf, inf, inf, 1e9f);
+            stretches = s.AddJoint(c, d, rA, rB, inf, inf, inf, inf, inf, inf, 0.01f, 1e-6f);
+            world = s.AddJoint(null, e, new float3(8.3f, 0f, 5f), float3.zero, inf, inf, inf, inf, inf, inf, 0.01f);
+            foreach (AvbdJoint j in new[] { yields, holds, stretches, world })
+            {
+                j.penaltyLin = new float3(1000f);
+                j.penaltyAng = new float3(100f);
+                j.lambdaLin = new float3(0f, 1f, 2f);
+                j.lambdaAng = new float3(5f, 0f, 0f);
+            }
+        }
+
+        // Like FractureScene, with the fracture value in the linear row: the first joint breaks at the first dual update (linear fracture 0.01 against a
+        // multiplier of about 2), the second never does.
+        static void LinearFractureScene(ReferenceSolver s, out AvbdJoint weak, out AvbdJoint strong)
+        {
+            s.Clear();
+            AvbdBody a = s.AddBody(new float3(1f), 0f, 0.5f, new float3(0f, 0f, 5f));
+            AvbdBody b = s.AddBody(new float3(1f), 1f, 0.5f, new float3(2f, 0f, 5f));
+            AvbdBody c = s.AddBody(new float3(1f), 1f, 0.5f, new float3(4f, 0f, 5f));
+            float inf = float.PositiveInfinity;
+
+            weak = s.AddJoint(a, b, new float3(1f, 0f, 0f), new float3(-1f, 0f, 0f), inf, inf, inf, inf, inf, 0.01f);
+            strong = s.AddJoint(b, c, new float3(1f, 0f, 0f), new float3(-1f, 0f, 0f), inf, inf, inf, inf, inf, 1e6f);
+            foreach (AvbdJoint j in new[] { weak, strong })
+            {
+                j.penaltyLin = new float3(1000f);
+                j.penaltyAng = new float3(100f);
+                j.lambdaLin = new float3(0f, 1f, 2f);
+                j.lambdaAng = new float3(5f, 0f, 0f);
+            }
+        }
+
         // A static box and three dynamic ones in a row, joined by three hard joints (linear and angular), each with the same load: the first yields (yield
         // value 0.01 against a multiplier of about 5) and bends with no limit, the second has a yield value it never reaches, the third yields and breaks at
         // once, because its bend limit is tiny.
@@ -296,11 +529,14 @@ namespace McKrill.Avbd.Tests
                 AssertNear(j.penaltyAng, r.penaltyAng.xyz, tol, name + " penaltyAng");
                 AssertNear(j.lambdaLin, r.lambdaLin.xyz, tol, name + " lambdaLin");
                 AssertNear(j.lambdaAng, r.lambdaAng.xyz, tol, name + " lambdaAng");
+                AssertNear(j.rA, r.anchorA.xyz, PositionTolerance * iterations, name + " anchorA");
                 if (!float.IsPositiveInfinity(j.yield))
                 {
                     Assert.IsTrue((ConstraintFlagLayout.FlagsOf(r.ident.z) & ConstraintFlags.Plastic) != 0, name + " is plastic");
                     AssertNear(j.rest.value, scene.plastic[r.ident.w].rest, RotationTolerance * iterations, name + " rest");
                 }
+                if (!float.IsPositiveInfinity(j.yieldLin))
+                    Assert.IsTrue((ConstraintFlagLayout.FlagsOf(r.ident.z) & ConstraintFlags.PlasticLinear) != 0, name + " is linearly plastic");
                 ci++;
             }
         }
@@ -380,7 +616,7 @@ namespace McKrill.Avbd.Tests
                     Assert.AreEqual(i, buffers.Spawn(scene.descriptors[i]).Slot);
                 for (int i = 0; i < scene.constraintCount; i++)
                 {
-                    bool plastic = (ConstraintFlagLayout.FlagsOf(raw[i].ident.z) & ConstraintFlags.Plastic) != 0;
+                    bool plastic = (ConstraintFlagLayout.FlagsOf(raw[i].ident.z) & (ConstraintFlags.Plastic | ConstraintFlags.PlasticLinear)) != 0;
                     Assert.AreEqual(i, plastic ? constraints.AddRecord(raw[i], rawPlastic[raw[i].ident.w]) : constraints.AddRecord(raw[i]));
                 }
 
@@ -406,6 +642,8 @@ namespace McKrill.Avbd.Tests
                     string name = what + ", constraint " + i;
 
                     Assert.AreEqual(expected.ident, actual.ident, name + " ident (bodies, flags, broken)");
+                    AssertNear(expected.anchorA, actual.anchorA, PositionTolerance * iterations, name + " anchorA (it moves when a linear row yields)");
+                    Assert.AreEqual(expected.reserved, actual.reserved, name + " reserved (the linear fracture value never changes)");
                     float tol = DualTolerance * iterations;
                     AssertNear(expected.c0Lin, actual.c0Lin, 1e-4f, name + " c0Lin");
                     AssertNear(expected.c0Ang, actual.c0Ang, 1e-4f, name + " c0Ang");
@@ -425,6 +663,7 @@ namespace McKrill.Avbd.Tests
                         AssertNear(scene.plastic[i].rest, plastic[i].rest, RotationTolerance * iterations, name + " rest");
                         Assert.AreEqual(scene.plastic[i].restStart, plastic[i].restStart, name + " restStart never changes");
                         Assert.AreEqual(scene.plastic[i].limits, plastic[i].limits, name + " limits never change");
+                        Assert.AreEqual(scene.plastic[i].reserved, plastic[i].reserved, name + " starting anchor never changes");
                     }
                 }
             }
@@ -438,6 +677,27 @@ namespace McKrill.Avbd.Tests
             var solver = new ReferenceSolver();
             PlasticScene(solver, out _, out _, out _);
             CheckGpuAgainstOracle(solver, iterations, "plastic scene", 8);
+        }
+
+        [TestCase(1)]
+        [TestCase(3)]
+        public void Gpu_Step_MatchesTheOracle_OnTheLinearPlasticScene(int iterations)
+        {
+            RequireCompute();
+            var solver = new ReferenceSolver();
+            LinearPlasticScene(solver, out _, out _, out _, out _);
+            CheckGpuAgainstOracle(solver, iterations, "linear plastic scene", 8);
+        }
+
+        [TestCase(1)]
+        [TestCase(3)]
+        public void Gpu_Step_MatchesTheOracle_OnTheLinearFractureScene(int iterations)
+        {
+            RequireCompute();
+            var solver = new ReferenceSolver();
+            LinearFractureScene(solver, out _, out _);
+            CheckGpuAgainstOracle(solver, iterations, "linear fracture scene"); // linear fracture needs no plastic array
+            CheckGpuAgainstOracle(solver, iterations, "linear fracture scene with a plastic array", 4);
         }
 
         [Test]
@@ -573,6 +833,147 @@ namespace McKrill.Avbd.Tests
 
             HangingBox(true, 3f, out _, out bool brokenFar, out _);
             Assert.IsFalse(brokenFar, "a limit of 3 rad is not reached by a box hanging off a hinge");
+        }
+
+        [Test]
+        public void Buffers_RejectLinearFractureAndPlasticityThatCannotWork()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(8))
+            using (var rigidOnly = new AvbdConstraintBuffers(buffers, 8))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 8, null, 0, 2))
+            {
+                BodyHandle a = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 0f, new float3(0f, 5f, 0f)));
+                BodyHandle b = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 2f, 0f)));
+                float inf = float.PositiveInfinity;
+
+                Assert.Throws<System.InvalidOperationException>(() => rigidOnly.AddJoint(a, b, float3.zero, float3.zero, inf, inf, inf, inf, inf, inf, 10f),
+                    "buffers made without a plastic capacity cannot hold a linearly plastic joint");
+                Assert.Throws<System.ArgumentException>(() => constraints.AddJoint(a, b, float3.zero, float3.zero, 500f, inf, inf, inf, inf, inf, 10f), "a linearly plastic joint needs a hard linear row");
+                Assert.Throws<System.ArgumentException>(() => constraints.AddJoint(a, b, float3.zero, float3.zero, 500f, inf, inf, inf, inf, 10f), "a linear fracture value needs a hard linear row");
+                Assert.Throws<System.ArgumentException>(() => constraints.AddJoint(a, b, float3.zero, float3.zero, inf, inf, inf, inf, inf, -1f), "the fracture value is not negative");
+                Assert.Throws<System.ArgumentException>(() => constraints.AddJoint(a, b, float3.zero, float3.zero, inf, inf, inf, inf, inf, float.NaN));
+                Assert.Throws<System.ArgumentException>(() => constraints.AddJoint(a, b, float3.zero, float3.zero, inf, inf, inf, inf, inf, inf, 0f), "the linear yield must be above zero");
+                Assert.Throws<System.ArgumentException>(() => constraints.AddJoint(a, b, float3.zero, float3.zero, inf, inf, inf, inf, inf, inf, float.NaN));
+                Assert.Throws<System.ArgumentException>(() => constraints.AddJoint(a, b, float3.zero, float3.zero, inf, inf, inf, inf, inf, inf, inf, 0.5f), "a stretch limit needs a linear yield value");
+                Assert.Throws<System.ArgumentException>(() => constraints.AddJoint(a, b, float3.zero, float3.zero, inf, inf, inf, inf, inf, inf, 10f, 0f), "a stretch limit must be above zero");
+                Assert.Throws<System.ArgumentException>(() => constraints.AddJoint(a, b, float3.zero, float3.zero, inf, inf, inf, 10f, 0.5f, inf, inf, 0.5f), "a stretch limit is not a bend limit");
+                Assert.AreEqual(0, constraints.Count, "nothing was added");
+                Assert.AreEqual(0, rigidOnly.Count);
+
+                // A linear fracture value needs no plastic capacity.
+                Assert.AreEqual(0, rigidOnly.AddJoint(a, b, float3.zero, float3.zero, inf, inf, inf, inf, inf, 25f));
+            }
+        }
+
+        [Test]
+        public void Buffers_BuildTheRecordsOfLinearFractureAndPlasticity()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(8))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 8, null, 0, 2))
+            {
+                BodyHandle a = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 0f, new float3(0f, 5f, 0f)));
+                BodyHandle b = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 2f, 0f)));
+                float inf = float.PositiveInfinity;
+
+                int fracturing = constraints.AddJoint(a, b, new float3(1f, 2f, 3f), float3.zero, inf, inf, inf, inf, inf, 25f);
+                int linear = constraints.AddJoint(a, b, new float3(4f, 5f, 6f), float3.zero, inf, inf, inf, inf, inf, inf, 7f, 0.3f);
+                int both = constraints.AddJoint(a, b, float3.zero, float3.zero, inf, inf, 90f, 10f, inf, 80f, 20f);
+                constraints.Rebuild();
+
+                var records = new ConstraintRecord[8];
+                constraints.Records.GetData(records);
+                ConstraintFlags f0 = ConstraintFlagLayout.FlagsOf(records[fracturing].ident.z);
+                Assert.IsTrue((f0 & ConstraintFlags.FracturableLinear) != 0 && (f0 & ConstraintFlags.Fracturable) == 0 && (f0 & ConstraintFlags.PlasticLinear) == 0);
+                Assert.AreEqual(25f, records[fracturing].reserved.x);
+
+                ConstraintFlags f1 = ConstraintFlagLayout.FlagsOf(records[linear].ident.z);
+                Assert.IsTrue((f1 & ConstraintFlags.PlasticLinear) != 0 && (f1 & ConstraintFlags.StretchBreak) != 0 && (f1 & ConstraintFlags.Plastic) == 0);
+                Assert.AreEqual(0u, records[linear].ident.w);
+
+                ConstraintFlags f2 = ConstraintFlagLayout.FlagsOf(records[both].ident.z);
+                Assert.IsTrue((f2 & ConstraintFlags.Plastic) != 0 && (f2 & ConstraintFlags.PlasticLinear) != 0 && (f2 & ConstraintFlags.FracturableLinear) != 0
+                              && (f2 & ConstraintFlags.Fracturable) != 0 && (f2 & ConstraintFlags.StretchBreak) == 0);
+                Assert.AreEqual(1u, records[both].ident.w);
+
+                PlasticRecord[] plastic = constraints.ReadPlastic();
+                Assert.AreEqual(2, plastic.Length, "the joint that only fractures takes no plastic slot");
+                Assert.AreEqual(new float4(0f, 0f, 7f, 0.3f), plastic[0].limits);
+                Assert.AreEqual(new float4(4f, 5f, 6f, 0f), plastic[0].reserved);
+                Assert.AreEqual(new float4(10f, 0f, 20f, 0f), plastic[1].limits);
+            }
+        }
+
+        // A static box with a dynamic one hanging from it on a ball joint (hard linear row, no angle lock): the joint holds the box's weight, a force of 10
+        // (mass 1, gravity 10). Rigid, the box hangs where it is. With a linear yield value of 1, far below the load, the linear row gives way and the box keeps
+        // sinking, held back only by the yield value; a stretch limit breaks the joint once the box has sunk that far, and a linear fracture value below the
+        // load breaks the joint, after which the box falls freely.
+        static void HangingFromBall(float fractureLinear, float yieldLinear, float stretchLimit, out float drop, out bool broken, out float stretch)
+        {
+            using (var buffers = new AvbdBodyBuffers(8))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 4, null, 0, float.IsPositiveInfinity(yieldLinear) ? 0 : 1))
+            {
+                BodyHandle a = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 0f, new float3(0f, 5f, 0f)));
+                BodyHandle b = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 3f, 0f)));
+                float inf = float.PositiveInfinity;
+                // The anchors meet at (0, 4, 0): the bottom of the gap between the boxes.
+                constraints.AddJoint(a, b, new float3(0f, -1f, 0f), new float3(0f, 1f, 0f), inf, 0f, inf, inf, inf, fractureLinear, yieldLinear, stretchLimit);
+
+                var solver = new AvbdSolver(buffers, AvbdSolverSettings.Default, null, constraints); // y is up
+                for (int i = 0; i < 120; i++)
+                    solver.Step();
+
+                var state = new BodyStateRecord[8];
+                buffers.State.GetData(state);
+                drop = 3f - state[(int)b.Slot].position.y;
+
+                var records = new ConstraintRecord[4];
+                constraints.Records.GetData(records);
+                broken = (ConstraintFlagLayout.FlagsOf(records[0].ident.z) & ConstraintFlags.Broken) != 0;
+                stretch = math.length(records[0].anchorA.xyz - new float3(0f, -1f, 0f));
+            }
+        }
+
+        [Test]
+        public void Gpu_ALinearlyPlasticJoint_StretchesUnderALoadTheRigidJointHolds_AndKeepsTheStretch()
+        {
+            RequireCompute();
+            float inf = float.PositiveInfinity;
+            HangingFromBall(inf, inf, inf, out float rigidDrop, out bool rigidBroken, out float rigidStretch);
+            HangingFromBall(inf, 1f, inf, out float plasticDrop, out bool plasticBroken, out float plasticStretch);
+
+            Assert.IsFalse(rigidBroken);
+            Assert.IsFalse(plasticBroken, "yielding alone does not break a joint");
+            Assert.Less(rigidDrop, 0.5f, "the rigid joint holds the box");
+            Assert.AreEqual(0f, rigidStretch, 1e-6f, "and its anchor never moves");
+            Assert.Greater(plasticDrop, 1f, "the plastic joint gives way under the same load: the box keeps sinking while the joint holds it back at the yield value");
+            Assert.Greater(plasticStretch, 0.5f, "and the anchor on A has moved with it: the joint does not pull the box back");
+        }
+
+        [Test]
+        public void Gpu_ALinearlyPlasticJoint_BreaksOnceItIsStretchedPastItsLimit()
+        {
+            RequireCompute();
+            float inf = float.PositiveInfinity;
+            HangingFromBall(inf, 1f, 0.1f, out _, out bool broken, out _);
+            Assert.IsTrue(broken, "a limit of 0.1 m is passed long before the box has finished sinking");
+
+            HangingFromBall(inf, 1f, 1000f, out _, out bool brokenFar, out _);
+            Assert.IsFalse(brokenFar, "a limit of 1000 m is not reached in two seconds");
+        }
+
+        [Test]
+        public void Gpu_ALinearFractureValue_BreaksAJointUnderALoadAboveIt_AndOnlyThen()
+        {
+            RequireCompute();
+            float inf = float.PositiveInfinity;
+            HangingFromBall(2f, inf, inf, out float drop, out bool broken, out _);
+            Assert.IsTrue(broken, "the joint carries a force of about 10: above its fracture value of 2");
+            Assert.Greater(drop, 5f, "and the box falls freely once it is broken");
+
+            HangingFromBall(1000f, inf, inf, out _, out bool holds, out _);
+            Assert.IsFalse(holds);
         }
 
         [Test]

@@ -51,8 +51,11 @@ namespace McKrill.Avbd
             public float stiffnessLin; // joint: linear stiffness. spring: stiffness
             public float stiffnessAng;
             public float fractureOrRest; // joint: fracture threshold. spring: rest length, negative = current distance
-            public float yield;          // joint: multiplier norm above which it yields, +infinity = not plastic
+            public float yield;          // joint: angular multiplier norm above which it yields, +infinity = not plastic
             public float bendLimit;      // joint: radians of bend above which a plastic joint breaks, +infinity = none
+            public float fractureLinear; // joint: linear multiplier norm above which it breaks, +infinity = never
+            public float yieldLinear;    // joint: linear multiplier norm above which it yields, +infinity = not plastic in the linear row
+            public float stretchLimit;   // joint: meters of stretch above which a linearly plastic joint breaks, +infinity = none
         }
 
         readonly AvbdBodyBuffers bodies;
@@ -83,6 +86,7 @@ namespace McKrill.Avbd
         int plasticUploaded;               // plastic records already on the GPU
         int plasticReserved;               // plastic joints added, counting those that are not built yet
         bool warnedFractureBelowYield;
+        bool warnedFractureLinearBelowYield;
 
         readonly int contactSlots;
         readonly int tableSize;
@@ -427,18 +431,27 @@ namespace McKrill.Avbd
         /// <summary>
         /// Adds a ball-socket joint with an optional angle lock, like upstream's Joint. Pass an invalid <paramref name="bodyA"/> to pin
         /// bodyB to the world-space point rA. Stiffness is a number above or equal to zero, or +infinity for a hard constraint.
-        /// A stiffnessAng of 0 disables the angle lock. fracture is the multiplier norm above which the joint breaks (+infinity: never).
+        /// A stiffnessAng of 0 disables the angle lock. fracture is the norm of the angular multiplier above which the joint breaks (+infinity: never).
         ///
         /// A finite <paramref name="yield"/> makes the joint plastic: when the angular multiplier is above it, the multiplier is held at it and the joint
         /// gives way, keeping the bend it ends up with (it does not spring back). That needs a hard angular row (stiffnessAng = +infinity) and
         /// buffers made with a plastic capacity. A finite <paramref name="bendLimit"/> (radians, up to pi) breaks a plastic joint once it has bent
         /// further than that from its original rest rotation. A fracture value above the yield value only catches loads that jump past it within one step.
+        ///
+        /// The linear row has the same three: <paramref name="fractureLinear"/> is the norm of the linear multiplier above which the joint breaks,
+        /// <paramref name="yieldLinear"/> the norm above which the linear row gives way (the multiplier is held at it and the joint keeps the stretch it ends
+        /// up with: the anchor on body A moves to the anchor on body B, so the joint does not pull the bodies back), and <paramref name="stretchLimit"/> the
+        /// meters the anchor on body A may move from where it started before such a joint breaks. They need a **hard linear row** (stiffnessLin = +infinity),
+        /// because only a hard row stores a multiplier to test: the multiplier of a soft row is always zero, and testing its spring force instead would add
+        /// work to every joint. A joint that needs a spring-like linear row and must also break or yield cannot have both; give it a hard row, or a spring
+        /// (<see cref="AddSpring"/>) next to the joint. Yielding needs buffers made with a plastic capacity, linear fracture does not.
         /// Returns the constraint index, or -1 if the buffers are full (or the plastic capacity is used up).
         /// </summary>
         public int AddJoint(
             BodyHandle bodyA, BodyHandle bodyB, float3 rA, float3 rB,
             float stiffnessLin = float.PositiveInfinity, float stiffnessAng = 0f, float fracture = float.PositiveInfinity,
-            float yield = float.PositiveInfinity, float bendLimit = float.PositiveInfinity)
+            float yield = float.PositiveInfinity, float bendLimit = float.PositiveInfinity,
+            float fractureLinear = float.PositiveInfinity, float yieldLinear = float.PositiveInfinity, float stretchLimit = float.PositiveInfinity)
         {
             ThrowIfDisposed();
             if (bodyA.IsValid && !bodies.IsAlive(bodyA)) throw new ArgumentException("bodyA is stale.", nameof(bodyA));
@@ -450,11 +463,14 @@ namespace McKrill.Avbd
             RequireStiffness(stiffnessAng, nameof(stiffnessAng));
             if (!(fracture >= 0f)) throw new ArgumentException("fracture must be zero or more, or +infinity.", nameof(fracture));
 
-            bool plastic = !float.IsPositiveInfinity(yield);
-            if (plastic)
+            if (!(fractureLinear >= 0f)) throw new ArgumentException("fractureLinear must be zero or more, or +infinity.", nameof(fractureLinear));
+            if (!float.IsPositiveInfinity(fractureLinear) && !float.IsPositiveInfinity(stiffnessLin))
+                throw new ArgumentException("A linear fracture value needs a hard linear row: stiffnessLin must be +infinity. A soft row has no multiplier to test.", nameof(fractureLinear));
+
+            bool plasticAngular = !float.IsPositiveInfinity(yield);
+            if (plasticAngular)
             {
                 if (!(yield > 0f)) throw new ArgumentException("yield must be above zero, or +infinity for a rigid joint.", nameof(yield));
-                if (plasticSlots == 0) throw new InvalidOperationException("The buffers were made without a plastic capacity (plasticCapacity), so no joint can yield.");
                 if (!float.IsPositiveInfinity(stiffnessAng)) throw new ArgumentException("A plastic joint needs a hard angular row: stiffnessAng must be +infinity.", nameof(stiffnessAng));
                 if (fracture <= yield && !warnedFractureBelowYield)
                 {
@@ -462,10 +478,28 @@ namespace McKrill.Avbd
                     Debug.LogWarning("AddJoint: fracture (" + fracture + ") is not above yield (" + yield + "): such a joint breaks before it can yield. Raise fracture or pass +infinity. (Shown once.)");
                 }
             }
+            bool plasticLinear = !float.IsPositiveInfinity(yieldLinear);
+            if (plasticLinear)
+            {
+                if (!(yieldLinear > 0f)) throw new ArgumentException("yieldLinear must be above zero, or +infinity for a rigid joint.", nameof(yieldLinear));
+                if (!float.IsPositiveInfinity(stiffnessLin)) throw new ArgumentException("A linearly plastic joint needs a hard linear row: stiffnessLin must be +infinity. A soft row has no multiplier to clamp.", nameof(stiffnessLin));
+                if (fractureLinear <= yieldLinear && !warnedFractureLinearBelowYield)
+                {
+                    warnedFractureLinearBelowYield = true;
+                    Debug.LogWarning("AddJoint: fractureLinear (" + fractureLinear + ") is not above yieldLinear (" + yieldLinear + "): such a joint breaks before it can yield. Raise fractureLinear or pass +infinity. (Shown once.)");
+                }
+            }
+            bool plastic = plasticAngular || plasticLinear;
+            if (plastic && plasticSlots == 0) throw new InvalidOperationException("The buffers were made without a plastic capacity (plasticCapacity), so no joint can yield.");
             if (!float.IsPositiveInfinity(bendLimit))
             {
-                if (!plastic) throw new ArgumentException("bendLimit needs a finite yield: only a plastic joint bends.", nameof(bendLimit));
+                if (!plasticAngular) throw new ArgumentException("bendLimit needs a finite yield: only a plastic joint bends.", nameof(bendLimit));
                 if (!(bendLimit > 0f && bendLimit <= math.PI)) throw new ArgumentException("bendLimit must be above 0 and at most pi radians, or +infinity.", nameof(bendLimit));
+            }
+            if (!float.IsPositiveInfinity(stretchLimit))
+            {
+                if (!plasticLinear) throw new ArgumentException("stretchLimit needs a finite yieldLinear: only a linearly plastic joint stretches.", nameof(stretchLimit));
+                if (!(stretchLimit > 0f) || !math.isfinite(stretchLimit)) throw new ArgumentException("stretchLimit must be above 0 and finite, or +infinity.", nameof(stretchLimit));
             }
             if (plastic && plasticReserved >= plasticSlots)
             {
@@ -485,6 +519,9 @@ namespace McKrill.Avbd
                 fractureOrRest = fracture,
                 yield = yield,
                 bendLimit = bendLimit,
+                fractureLinear = fractureLinear,
+                yieldLinear = yieldLinear,
+                stretchLimit = stretchLimit,
             });
             if (index >= 0 && plastic)
                 plasticReserved++;
@@ -518,6 +555,9 @@ namespace McKrill.Avbd
                 fractureOrRest = rest,
                 yield = float.PositiveInfinity,
                 bendLimit = float.PositiveInfinity,
+                fractureLinear = float.PositiveInfinity,
+                yieldLinear = float.PositiveInfinity,
+                stretchLimit = float.PositiveInfinity,
             });
         }
 
@@ -542,7 +582,7 @@ namespace McKrill.Avbd
         internal int AddRecord(in ConstraintRecord record, in PlasticRecord plastic)
         {
             ThrowIfDisposed();
-            if ((ConstraintFlagLayout.FlagsOf(record.ident.z) & ConstraintFlags.Plastic) == 0)
+            if ((ConstraintFlagLayout.FlagsOf(record.ident.z) & (ConstraintFlags.Plastic | ConstraintFlags.PlasticLinear)) == 0)
                 throw new ArgumentException("The record is not plastic.", nameof(record));
             if (plasticCount >= plasticSlots)
                 throw new InvalidOperationException("The plastic capacity is used up.");
@@ -596,13 +636,14 @@ namespace McKrill.Avbd
                     records[recordCount] = s.kind == ConstraintKind.Joint
                         ? ConstraintRecordFactory.Joint(
                             s.slotA, s.slotB, s.rA, s.rB, s.stiffnessLin, s.stiffnessAng, s.fractureOrRest,
-                            TorqueArm(shape, s.slotA, s.slotB))
+                            TorqueArm(shape, s.slotA, s.slotB), s.fractureLinear)
                         : ConstraintRecordFactory.Spring(
                             s.slotA, s.slotB, s.rA, s.rB, s.stiffnessLin,
                             s.fractureOrRest >= 0f ? s.fractureOrRest : CurrentDistance(state, s));
-                    if (s.kind == ConstraintKind.Joint && !float.IsPositiveInfinity(s.yield))
+                    if (s.kind == ConstraintKind.Joint && (!float.IsPositiveInfinity(s.yield) || !float.IsPositiveInfinity(s.yieldLinear)))
                     {
-                        plasticRecords[plasticCount] = ConstraintRecordFactory.MakePlastic(ref records[recordCount], (uint)plasticCount, s.yield, s.bendLimit);
+                        plasticRecords[plasticCount] = ConstraintRecordFactory.MakePlastic(
+                            ref records[recordCount], (uint)plasticCount, s.yield, s.bendLimit, s.yieldLinear, s.stretchLimit);
                         plasticCount++;
                     }
                     recordCount++;

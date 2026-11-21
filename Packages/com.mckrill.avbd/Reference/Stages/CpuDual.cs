@@ -31,11 +31,13 @@ namespace McKrill.Avbd.Reference
             quaternion rotB = new quaternion(bodies.State[c.ident.y].rotation);
             float3 anchorA = c.anchorA.xyz;
             quaternion rotA = quaternion.identity;
+            float3 posA = float3.zero;
             if (hasA)
             {
                 BodyStateRecord a = bodies.State[c.ident.x];
                 rotA = new quaternion(a.rotation);
-                anchorA = AvbdQuat.Transform(a.position.xyz, rotA, c.anchorA.xyz);
+                posA = a.position.xyz;
+                anchorA = AvbdQuat.Transform(posA, rotA, c.anchorA.xyz);
             }
             float3 anchorB = AvbdQuat.Transform(posB, rotB, c.anchorB.xyz);
 
@@ -47,12 +49,14 @@ namespace McKrill.Avbd.Reference
             bool isPlastic = (flags & ConstraintFlags.Plastic) != 0;
             PlasticRecord plasticRecord = default;
             quaternion rest = quaternion.identity;
-            if (isPlastic)
+            if ((flags & (ConstraintFlags.Plastic | ConstraintFlags.PlasticLinear)) != 0)
             {
                 plasticRecord = CpuPlastic.Of(plastic, c);
-                rest = new quaternion(plasticRecord.rest);
+                if (isPlastic)
+                    rest = new quaternion(plasticRecord.rest);
             }
             bool yielded = false;
+            bool yieldedLin = false;
 
             // Linear constraint
             if (math.lengthsq(penaltyLin) > 0f)
@@ -70,7 +74,22 @@ namespace McKrill.Avbd.Reference
                     cap = math.min(c.anchorA.w, settings.penaltyMax);
                 }
 
-                penaltyLin = math.min(penaltyLin + math.abs(C) * settings.betaLin, new float3(cap));
+                // Yield of the linear row: a multiplier above the yield value is clamped to it and the joint keeps the stretch it has (the anchor on
+                // body A moves below). A multiplier above the fracture threshold does not yield: the joint breaks.
+                if ((flags & ConstraintFlags.PlasticLinear) != 0)
+                {
+                    float force = math.length(lambdaLin);
+                    bool fractures = (flags & ConstraintFlags.FracturableLinear) != 0 && force > c.reserved.x;
+                    if (force > plasticRecord.limits.z && !fractures)
+                    {
+                        lambdaLin *= plasticRecord.limits.z / force;
+                        yieldedLin = true;
+                    }
+                }
+
+                // A yielding row does not ramp its penalty.
+                if (!yieldedLin)
+                    penaltyLin = math.min(penaltyLin + math.abs(C) * settings.betaLin, new float3(cap));
             }
 
             // Angular constraint
@@ -115,9 +134,22 @@ namespace McKrill.Avbd.Reference
                     bentOff = AvbdQuat.BendAngle(new quaternion(plasticRecord.restStart), rest) > plasticRecord.limits.y;
             }
 
-            // Fracture test, and the bend limit of a plastic joint
+            bool stretchedOff = false;
+            if (yieldedLin)
+            {
+                // The anchor on body A moves to where the anchor on body B is now (in the body space of A; a joint to the world keeps a world point).
+                float3 moved = hasA ? AvbdQuat.Rotate(math.conjugate(rotA), anchorB - posA) : anchorB;
+                c.anchorA = new float4(moved, c.anchorA.w);
+                if ((flags & ConstraintFlags.StretchBreak) != 0)
+                    stretchedOff = math.length(moved - plasticRecord.reserved.xyz) > plasticRecord.limits.w;
+                c.c0Lin = new float4(0f, 0f, 0f, c.c0Lin.w); // the stabilization reference of this step must not pull the stretch back
+            }
+
+            // Fracture tests of the two rows, and the bend and stretch limits of a plastic joint
             uint packed = c.ident.z;
-            if (bentOff || ((flags & ConstraintFlags.Fracturable) != 0 && math.lengthsq(lambdaAng) > c.c0Ang.w * c.c0Ang.w))
+            if (bentOff || stretchedOff
+                || ((flags & ConstraintFlags.Fracturable) != 0 && math.lengthsq(lambdaAng) > c.c0Ang.w * c.c0Ang.w)
+                || ((flags & ConstraintFlags.FracturableLinear) != 0 && math.lengthsq(lambdaLin) > c.reserved.x * c.reserved.x))
             {
                 penaltyLin = float3.zero;
                 penaltyAng = float3.zero;

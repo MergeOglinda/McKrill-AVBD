@@ -56,6 +56,7 @@ The click mode buttons (Shot, Explosion, Throw and Grab) and their shot, explosi
 | Voxel mass | 0.01 to 10 kg (log scale), default 0.25 kg like a block of the fracture wall. The mass of every voxel; the density of an object follows from it and the size of its voxels |
 | Rigid joints, Joint stiffness, Fracture threshold | As in the fracture wall demo (defaults: stiffness 5e3, threshold 40). **They are the wall's numbers, not tuned for voxels**: the multiplier a joint sees depends on the voxel size and mass, so if nothing breaks lower the threshold or shoot harder, and if an object falls apart by itself raise it |
 | Plastic yield, Yield threshold, Bend break, Bend limit | As in the fracture wall demo |
+| Linear fracture, Linear yield, Stretch break (and their thresholds) | As in the fracture wall demo. They need **Rigid joints**: only a rigid linear row has a multiplier to test, so they are greyed out and ignored while the joints are springs |
 
 ## Voxels and joints
 

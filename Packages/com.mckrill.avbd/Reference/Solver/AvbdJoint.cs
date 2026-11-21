@@ -6,7 +6,8 @@ namespace McKrill.Avbd.Reference
     /// Revolute (ball-socket) joint plus optional angle constraint between two bodies, with optional
     /// fracture. A port of upstream's Joint. If BodyA is null the joint pins BodyB to the world-space
     /// point rA.
-    /// With a finite <see cref="yield"/> the joint is plastic (an addition of this project, after three-avbd): see <see cref="yield"/>.
+    /// With a finite <see cref="yield"/> or <see cref="yieldLin"/> the joint is plastic (an addition of this project, after three-avbd): see <see cref="yield"/>
+    /// for the angular row and <see cref="yieldLin"/> for the linear row.
     /// </summary>
     public sealed class AvbdJoint : AvbdForce
     {
@@ -25,8 +26,23 @@ namespace McKrill.Avbd.Reference
         /// <summary>Angular stiffness. 0 disables the angle constraint; infinity makes it hard.</summary>
         public float stiffnessAng;
 
-        /// <summary>Multiplier norm above which the joint breaks. Infinity = never.</summary>
+        /// <summary>Angular multiplier norm above which the joint breaks. Infinity = never.</summary>
         public float fracture;
+
+        /// <summary>Linear multiplier norm above which the joint breaks. Infinity = never. Needs an infinite stiffnessLin: a soft row has no multiplier.</summary>
+        public float fractureLin = float.PositiveInfinity;
+
+        /// <summary>
+        /// Plastic joints: the linear multiplier norm above which the linear row yields. The multiplier is then held at this value and <see cref="rA"/> moves to
+        /// where the anchor on body B is, so the stretch stays. Needs an infinite stiffnessLin. Infinity = rigid.
+        /// </summary>
+        public float yieldLin = float.PositiveInfinity;
+
+        /// <summary>Meters <see cref="rA"/> may move from <see cref="rAStart"/> before a linearly plastic joint breaks. Infinity = no limit.</summary>
+        public float breakStretch = float.PositiveInfinity;
+
+        /// <summary>The anchor on body A at creation: the stretch of the joint is the distance from this to <see cref="rA"/>.</summary>
+        public float3 rAStart;
 
         /// <summary>
         /// Plastic joints: the angular multiplier norm above which the angular row yields. The multiplier is then held at this value and
@@ -49,12 +65,17 @@ namespace McKrill.Avbd.Reference
         public AvbdJoint(
             ReferenceSolver solver, AvbdBody bodyA, AvbdBody bodyB, float3 rA, float3 rB,
             float stiffnessLin = float.PositiveInfinity, float stiffnessAng = 0f, float fracture = float.PositiveInfinity,
-            float yield = float.PositiveInfinity, float breakBend = float.PositiveInfinity)
+            float yield = float.PositiveInfinity, float breakBend = float.PositiveInfinity,
+            float fractureLin = float.PositiveInfinity, float yieldLin = float.PositiveInfinity, float breakStretch = float.PositiveInfinity)
             : base(solver, bodyA, bodyB)
         {
             this.yield = yield;
             this.breakBend = breakBend;
+            this.fractureLin = fractureLin;
+            this.yieldLin = yieldLin;
+            this.breakStretch = breakStretch;
             this.rA = rA;
+            rAStart = rA;
             this.rB = rB;
             this.stiffnessLin = stiffnessLin;
             this.stiffnessAng = stiffnessAng;
@@ -176,6 +197,7 @@ namespace McKrill.Avbd.Reference
         {
             AvbdSolverParams p = Solver.Params;
             bool yielded = false;
+            bool yieldedLin = false;
 
             // Linear constraint
             if (math.lengthsq(penaltyLin) > 0f)
@@ -191,9 +213,23 @@ namespace McKrill.Avbd.Reference
                     lambdaLin = penaltyLin * C + lambdaLin;
                 }
 
-                // Ramp the penalty, clamped to the material stiffness (Eq. 16).
-                penaltyLin = math.min(penaltyLin + math.abs(C) * p.betaLin,
-                    new float3(math.min(stiffnessLin, AvbdSolverParams.PenaltyMax)));
+                // Yield of the linear row: a multiplier above the yield value is clamped to it and the joint keeps the stretch it has (rA moves
+                // below). A multiplier above the fracture threshold does not yield: the joint breaks.
+                if (!float.IsPositiveInfinity(yieldLin))
+                {
+                    float force = math.length(lambdaLin);
+                    bool fractures = !float.IsPositiveInfinity(fractureLin) && force > fractureLin;
+                    if (force > yieldLin && !fractures)
+                    {
+                        lambdaLin *= yieldLin / force;
+                        yieldedLin = true;
+                    }
+                }
+
+                // A yielding row does not ramp its penalty. Otherwise ramp it, clamped to the material stiffness (Eq. 16).
+                if (!yieldedLin)
+                    penaltyLin = math.min(penaltyLin + math.abs(C) * p.betaLin,
+                        new float3(math.min(stiffnessLin, AvbdSolverParams.PenaltyMax)));
             }
 
             // Angular constraint
@@ -235,8 +271,19 @@ namespace McKrill.Avbd.Reference
                 C0Ang = float3.zero; // the stabilization reference of this step must not pull the bend back
             }
 
-            // Fracture test, and the bend limit of a plastic joint
-            if (bentOff || math.lengthsq(lambdaAng) > fracture * fracture)
+            bool stretchedOff = false;
+            if (yieldedLin)
+            {
+                // rA moves to where the anchor on body B is now (in the body space of A; a joint to the world keeps a world point).
+                float3 anchorB = AnchorB();
+                rA = BodyA != null ? AvbdQuat.Rotate(math.conjugate(BodyA.PositionAng), anchorB - BodyA.PositionLin) : anchorB;
+                if (!float.IsPositiveInfinity(breakStretch))
+                    stretchedOff = math.length(rA - rAStart) > breakStretch;
+                C0Lin = float3.zero; // the stabilization reference of this step must not pull the stretch back
+            }
+
+            // Fracture tests of the two rows, and the bend and stretch limits of a plastic joint
+            if (bentOff || stretchedOff || math.lengthsq(lambdaAng) > fracture * fracture || math.lengthsq(lambdaLin) > fractureLin * fractureLin)
             {
                 penaltyLin = float3.zero;
                 penaltyAng = float3.zero;
