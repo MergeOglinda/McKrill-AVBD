@@ -13,6 +13,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voxelize_stl as vox  # noqa: E402
+import smooth_chunks as chunks_module  # noqa: E402
+import make_sample_meshes as samples  # noqa: E402
 
 
 # ---- meshes ----------------------------------------------------------------------------------------------------------
@@ -224,6 +226,212 @@ class VoxelizerTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()), redirect_stderr(missing):
                 self.assertEqual(vox.main([os.path.join(d, "nothing.stl"), "--resolution", "8"]), 1)
             self.assertIn("error", missing.getvalue())
+
+
+# ---- the smooth surface: chunks --------------------------------------------------------------------------------------
+
+SAMPLE_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Packages", "com.mckrill.avbd", "Samples~", "JsonMeshImportDemo", "Resources", "JsonMeshImportDemo")
+
+
+def bake(mesh, voxel_size, surface="center", crease=50.0):
+    solid, origin, size = vox.voxelize(mesh, voxel_size=voxel_size, surface=surface)
+    voxels, _ = vox.build_joints(solid, 6)
+    return chunks_module.bake(mesh, origin, size, solid, voxels, crease), voxels, size
+
+
+def chunk_arrays(chunks, i):
+    p = chunks.positions[chunks.vertex_start[i]:chunks.vertex_start[i + 1]]
+    n = chunks.normals[chunks.vertex_start[i]:chunks.vertex_start[i + 1]]
+    t = chunks.triangles[chunks.triangle_start[i]:chunks.triangle_start[i + 1]]
+    return p, n, t
+
+
+def volume_and_area_vector(chunks, i):
+    """The volume of the closed surface of chunk i (a sum of tetrahedra to the origin, the center of the voxel) and its area vector, which is zero for a closed surface."""
+    p, _, t = chunk_arrays(chunks, i)
+    a, b, c = p[t[:, 0]], p[t[:, 1]], p[t[:, 2]]
+    return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6.0), np.cross(b - a, c - a).sum(axis=0) / 2.0
+
+
+class SmoothChunkTests(unittest.TestCase):
+    def assert_closed_and_adds_up(self, mesh, voxel_size, surface="center", relative=2e-3, expected_volume=None):
+        chunks, voxels, size = bake(mesh, voxel_size, surface)
+        self.assertGreater(chunks.count, 0)
+        total = 0.0
+        for i in range(chunks.count):
+            volume, area_vector = volume_and_area_vector(chunks, i)
+            self.assertGreater(volume, 0.0, "chunk %d faces outward" % i)
+            # the cap is cut a hair (1e-4 of a cell) inside the cell, so the area vector is not exactly zero; a missing face would be about a tenth of a cell face
+            self.assertLess(np.linalg.norm(area_vector), 1e-3 * size ** 2, "chunk %d is closed (the area vector of a closed surface is zero)" % i)
+            total += volume
+        total += (len(voxels) - chunks.count) * size ** 3     # the voxels without a chunk are whole boxes
+        expected = vox.mesh_volume(mesh) if expected_volume is None else expected_volume
+        self.assertAlmostEqual(total / expected, 1.0, delta=relative, msg="the chunks and the boxes of the inside make up the mesh")
+        return chunks, voxels, size
+
+    def test_the_chunks_of_a_sphere_are_closed_and_make_up_the_mesh(self):
+        chunks, _, _ = self.assert_closed_and_adds_up(icosphere(1.0, 2), 0.25)
+        self.assertGreater(chunks.stats["outside_cells_given_to_a_voxel"], 0, "the mesh passes through cells whose center is outside")
+        self.assertEqual(chunks.stats["pieces_lost"], 0)
+        self.assertEqual(chunks.stats["cavity_triangles_left_out"], 0)
+
+    def test_it_also_works_when_every_cell_the_mesh_touches_is_a_voxel(self):
+        chunks, _, _ = self.assert_closed_and_adds_up(icosphere(1.0, 2), 0.25, surface="touch")
+        self.assertEqual(chunks.stats["outside_cells_given_to_a_voxel"], 0)
+
+    def test_a_box_of_whole_voxels_has_cubes_as_chunks(self):
+        chunks, voxels, size = self.assert_closed_and_adds_up(box_mesh((0, 0, 0), (1, 1, 1)), 0.25)
+        self.assertEqual(chunks.count, 64 - 8, "the 8 voxels in the middle have no surface")
+        for i in range(chunks.count):
+            self.assertAlmostEqual(volume_and_area_vector(chunks, i)[0] / size ** 3, 1.0, delta=2e-3)
+            p, _, _ = chunk_arrays(chunks, i)
+            self.assertLessEqual(np.abs(p).max(), 0.5 * size * (1 + 1e-3), "the chunk of a cell of the box does not leave its cell")
+
+    def test_a_cavity_is_not_a_hole_and_its_triangles_are_left_out(self):
+        mesh = np.concatenate([box_mesh((0, 0, 0), (3, 3, 3)), box_mesh((1, 1, 1), (2, 2, 2), inward=True)])
+        chunks, _, _ = self.assert_closed_and_adds_up(mesh, 0.5, expected_volume=27.0)   # the object is solid: the volume without the cavity
+        self.assertEqual(chunks.stats["cavity_triangles_left_out"], 12)
+
+    def test_the_winding_and_the_normals_agree_and_face_outward(self):
+        chunks, _, size = bake(icosphere(1.0, 2), 0.25)
+        for i in range(chunks.count):
+            p, n, t = chunk_arrays(chunks, i)
+            self.assertLess(abs(np.linalg.norm(n, axis=1) - 1.0).max(), 2e-3, "unit normals")
+            face = np.cross(p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]])
+            mean_normal = n[t].sum(axis=1)
+            self.assertTrue(np.all(np.einsum("ij,ij->i", face, mean_normal) > 0.0), "the winding agrees with the normals")
+
+    def test_the_winding_of_the_mesh_does_not_matter(self):
+        a, _, _ = bake(icosphere(1.0, 2), 0.25)
+        b, _, _ = bake(icosphere(1.0, 2)[:, ::-1], 0.25)
+        self.assertEqual(a.voxel_numbers, b.voxel_numbers)
+        self.assertEqual(a.stats["triangles"], b.stats["triangles"])
+        order_a = np.lexsort(np.round(a.positions * 1e5).T)
+        order_b = np.lexsort(np.round(b.positions * 1e5).T)
+        np.testing.assert_allclose(a.positions[order_a], b.positions[order_b], atol=2e-5)   # the same vertices, in another order
+
+    def test_a_chunk_reaches_out_of_its_cell_by_less_than_a_cell(self):
+        chunks, _, size = bake(icosphere(1.0, 2), 0.25)
+        for i in range(chunks.count):
+            self.assertLessEqual(np.abs(chunk_arrays(chunks, i)[0]).max(), 1.5 * size * (1 + 1e-3))
+
+    def test_a_torus_with_a_hole_works_too(self):
+        self.assert_closed_and_adds_up(samples.outward(samples.torus(1.2, 0.5, 24, 12)), 0.2, relative=5e-3)
+
+    def test_normals_are_smooth_on_a_sphere_and_sharp_on_a_box(self):
+        mesh = icosphere(1.0, 2)
+        smooth = chunks_module.corner_normals(mesh, 50.0)
+        corners = mesh.reshape(-1, 3)
+        np.testing.assert_allclose(smooth.reshape(-1, 3), corners / np.linalg.norm(corners, axis=1)[:, None], atol=0.06)  # about the normals of a sphere
+        sharp = chunks_module.corner_normals(box_mesh((0, 0, 0), (1, 1, 1)), 50.0)
+        face = np.cross(box_mesh((0, 0, 0), (1, 1, 1))[:, 1] - box_mesh((0, 0, 0), (1, 1, 1))[:, 0], box_mesh((0, 0, 0), (1, 1, 1))[:, 2] - box_mesh((0, 0, 0), (1, 1, 1))[:, 0])
+        face /= np.linalg.norm(face, axis=1)[:, None]
+        np.testing.assert_allclose(sharp, np.repeat(face[:, None, :], 3, axis=1), atol=1e-9)   # the corners of a box keep the normal of their face
+
+    def test_the_inside_test_for_points(self):
+        mesh = chunks_module.to_cell_units(icosphere(1.0, 2), np.array([-1.0, -1.0, -1.0]), 0.25, (8, 8, 8))
+        parity = chunks_module.PointParity(mesh)
+        self.assertTrue(parity.inside([4.0, 4.0, 4.0]))
+        self.assertTrue(parity.inside([4.0, 4.0, 6.5]))
+        self.assertTrue(parity.inside([4.0, 4.0, 7.9]))    # the sphere has a radius of 4 cells
+        self.assertFalse(parity.inside([4.0, 4.0, 8.3]))
+        self.assertFalse(parity.inside([0.2, 0.2, 4.0]))
+
+    def test_caps(self):
+        full = chunks_module.cap_polygons([], 0.0, 1.0, 0.0, 1.0, lambda u, v: True)
+        self.assertAlmostEqual(sum(0.5 * ((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[1][1] - t[0][1]) * (t[2][0] - t[0][0])) for t in full), 1.0)
+        self.assertEqual(len(full), 2)
+        self.assertEqual(chunks_module.cap_polygons([], 0.0, 1.0, 0.0, 1.0, lambda u, v: False), [])
+
+        def area(triangles):
+            return sum(0.5 * ((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[1][1] - t[0][1]) * (t[2][0] - t[0][0])) for t in triangles)
+
+        # a bent cut from the left edge to the top edge: the inside is below it, or above it
+        cut = [((0.0, 0.5), (0.4, 0.6)), ((0.4, 0.6), (0.7, 1.0))]
+        below = lambda u, v: v < (0.5 + 0.25 * u if u < 0.4 else 0.6 + (u - 0.4) / 0.3 * 0.4)
+        lower = chunks_module.cap_polygons(cut, 0.0, 1.0, 0.0, 1.0, below)
+        upper = chunks_module.cap_polygons(cut, 0.0, 1.0, 0.0, 1.0, lambda u, v: not below(u, v))
+        self.assertAlmostEqual(area(lower) + area(upper), 1.0, places=9)
+        self.assertAlmostEqual(area(upper), 0.5 * 0.7 * 0.5 + 0.5 * 0.4 * 0.1 * 0 + 0.0, delta=1.0)   # the two parts are not empty, and they are counterclockwise
+        self.assertTrue(all(((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[1][1] - t[0][1]) * (t[2][0] - t[0][0])) > 0 for t in lower + upper))
+        self.assertLess(len(lower) + len(upper), 12, "the polygons are cut into few triangles")
+        # a square hole in the middle (a closed loop): the slabs; the inside is everything but the hole
+        hole = [((0.4, 0.4), (0.6, 0.4)), ((0.6, 0.4), (0.6, 0.6)), ((0.6, 0.6), (0.4, 0.6)), ((0.4, 0.6), (0.4, 0.4))]
+        outside_hole = chunks_module.cap_polygons(hole, 0.0, 1.0, 0.0, 1.0, lambda u, v: not (0.4 < u < 0.6 and 0.4 < v < 0.6))
+        self.assertAlmostEqual(area(outside_hole), 1.0 - 0.04, places=9)
+        island = chunks_module.cap_polygons(hole, 0.0, 1.0, 0.0, 1.0, lambda u, v: 0.4 < u < 0.6 and 0.4 < v < 0.6)
+        self.assertAlmostEqual(area(island), 0.04, places=9)
+
+    def test_ear_clipping_of_a_concave_polygon(self):
+        points = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (1.0, 0.5), (0.0, 2.0)]   # an arrow head pointing down: concave at (1, 0.5)
+        triangles = chunks_module.triangulate_polygon(points)
+        self.assertEqual(len(triangles), 3)
+        total = sum(0.5 * ((points[b][0] - points[a][0]) * (points[c][1] - points[a][1]) - (points[b][1] - points[a][1]) * (points[c][0] - points[a][0])) for a, b, c in triangles)
+        self.assertAlmostEqual(total, 4.0 - 1.5, places=9)
+
+    def test_the_command_line_with_smooth_writes_chunks_that_agree_with_the_voxels(self):
+        mesh = icosphere(1.0, 2).astype(np.float32).astype(np.float64)
+        with tempfile.TemporaryDirectory() as d:
+            stl = os.path.join(d, "ball.stl")
+            plain = os.path.join(d, "plain.json")
+            smooth = os.path.join(d, "smooth.json")
+            write_binary(stl, mesh)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(vox.main([stl, "-o", plain, "--voxel-size", "0.2"]), 0)
+                self.assertEqual(vox.main([stl, "-o", smooth, "--voxel-size", "0.2", "--smooth"]), 0)
+            with open(plain) as f:
+                a = json.load(f)
+            with open(smooth) as f:
+                b = json.load(f)
+            self.assertNotIn("chunkCount", a, "without --smooth the file is as before")
+            for key in a:
+                self.assertEqual(a[key], b[key], key + " is the same with and without --smooth")
+            count = b["chunkCount"]
+            self.assertGreater(count, 0)
+            self.assertEqual(len(b["chunkVoxels"]), count)
+            self.assertEqual(len(b["chunkVertexStart"]), count + 1)
+            self.assertEqual(len(b["chunkTriangleStart"]), count + 1)
+            vertex_start, triangle_start = np.array(b["chunkVertexStart"]), np.array(b["chunkTriangleStart"])
+            self.assertEqual(vertex_start[0], 0)
+            self.assertEqual(triangle_start[0], 0)
+            self.assertTrue(np.all(np.diff(vertex_start) > 0) and np.all(np.diff(triangle_start) > 0))
+            self.assertEqual(len(b["chunkPositions"]), 3 * vertex_start[-1])
+            self.assertEqual(len(b["chunkNormals"]), 3 * vertex_start[-1])
+            self.assertEqual(len(b["chunkTriangles"]), 3 * triangle_start[-1])
+            voxel_numbers = np.array(b["chunkVoxels"])
+            self.assertTrue(np.all(np.diff(voxel_numbers) > 0), "ascending and without repeats")
+            self.assertTrue(voxel_numbers.min() >= 0 and voxel_numbers.max() < b["voxelCount"])
+            triangles = np.array(b["chunkTriangles"]).reshape(-1, 3)
+            for i in range(count):
+                local = triangles[triangle_start[i]:triangle_start[i + 1]]
+                self.assertTrue(local.min() >= 0 and local.max() < vertex_start[i + 1] - vertex_start[i], "the indices of a chunk count from its first vertex")
+
+    def test_the_command_line_says_so_when_a_part_is_thinner_than_a_voxel(self):
+        # a flat plate much thinner than a voxel, in a cell no voxel is next to: the voxelizer leaves it out and so does the baking, without failing
+        plate = box_mesh((0, 0, 0), (1, 1, 0.01))
+        with tempfile.TemporaryDirectory() as d:
+            stl = os.path.join(d, "plate.stl")
+            write_ascii(stl, np.concatenate([plate, box_mesh((5, 0, 0), (7, 2, 2))]))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(vox.main([stl, "-o", os.path.join(d, "p.json"), "--voxel-size", "0.5", "--smooth"]), 0)
+
+    def test_the_shipped_samples_are_what_the_generated_meshes_give(self):
+        # the files of the JSON Mesh Import Demo were baked from make_sample_meshes.py: the voxels and joints are the ones the meshes give, and the chunks are in them
+        for name, size, zup in (("Sphere", 0.25, True), ("Torus", 0.2, True), ("Cube", 0.25, False)):
+            path = os.path.join(SAMPLE_FOLDER, name + ".json")
+            if not os.path.exists(path):
+                self.skipTest("the sample folder is not next to the tools")
+            with open(path) as f:
+                shipped = json.load(f)
+            mesh = vox.transform(samples.sample_meshes()[name].astype(np.float32).astype(np.float64), 1.0, zup)
+            solid, origin, voxel_size = vox.voxelize(mesh, voxel_size=size)
+            voxels, joints = vox.build_joints(solid, 6)
+            self.assertEqual(shipped["voxels"], voxels.reshape(-1).tolist(), name)
+            self.assertEqual(shipped["joints"], joints.reshape(-1).tolist(), name)
+            baked = chunks_module.bake(mesh, origin, voxel_size, solid, voxels)
+            self.assertEqual(shipped.get("chunkCount"), baked.count, name + ": re-run the voxelizer with --smooth (see README.md)")
+            self.assertEqual(shipped["chunkVoxels"], baked.voxel_numbers, name)
+            self.assertEqual(len(shipped["chunkTriangles"]), 3 * baked.stats["triangles"], name)
 
 
 if __name__ == "__main__":

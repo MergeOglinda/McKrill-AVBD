@@ -26,6 +26,7 @@ namespace McKrill.Avbd
         [SerializeField] ComputeShader raycast;
         [SerializeField] ComputeShader groupLabel;
         [SerializeField] Shader instancedBoxes;
+        [SerializeField] Shader blockChunks;
 
         /// <summary>Trivial kernel that writes a known pattern into a buffer. Proves the toolchain.</summary>
         public ComputeShader Smoke => smoke;
@@ -68,6 +69,12 @@ namespace McKrill.Avbd
         /// Not a compute shader: it is for rendering only, and the solver does not use it.
         /// </summary>
         public Shader InstancedBoxes => instancedBoxes;
+
+        /// <summary>
+        /// Draw shader for the smooth surface pieces of blocks (<c>Shaders/Rendering/AvbdBlockChunks.shader</c>): the vertices of every piece are relative to its block,
+        /// and the shader moves them with the block's pose read from the body state buffer. Rendering only, like <see cref="InstancedBoxes"/>.
+        /// </summary>
+        public Shader BlockChunks => blockChunks;
 
         /// <summary>Loads the shader set, or returns null if the asset is missing.</summary>
         public static AvbdShaderSet Load()

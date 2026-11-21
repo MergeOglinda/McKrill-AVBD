@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace McKrill.Avbd.Samples
 {
@@ -15,6 +16,10 @@ namespace McKrill.Avbd.Samples
     ///
     /// The simulation runs entirely through the package's public API (<see cref="AvbdBodyBuffers"/>, <see cref="AvbdConstraintBuffers"/>,
     /// <see cref="AvbdSolver.Step"/>), and drawing is one instanced draw call that reads the poses from the solver's buffer, as in the Fracture Wall Demo.
+    ///
+    /// With <c>smoothSurface</c> on, the blocks on the surface of an object are drawn as the pieces of the smooth surface that the voxelizer baked for them (a file
+    /// written with <c>--smooth</c>): one mesh for all pieces, each moved rigidly with its block by the vertex shader, in one more draw call. Intact, the object
+    /// looks smooth. A block that breaks off still is a block: its curved outside and its flat cut faces. The physics does not change, the bodies are the same boxes.
     /// The scene is y-up, so solver positions and rotations are used as Unity world positions and rotations. Input is read through IMGUI events, so it works
     /// with the Input Manager and with the Input System package.
     /// </summary>
@@ -55,6 +60,15 @@ namespace McKrill.Avbd.Samples
             public float size;
         }
 
+        // One vertex of the mesh of all chunks (mirrors the vertex shader of AvbdBlockChunks.shader): position and normal relative to the block, and the number
+        // of the block's record in the chunk instance buffer.
+        struct ChunkVertex
+        {
+            public float3 position;
+            public float3 normal;
+            public uint block;
+        }
+
         // A voxel file that was read, with where it stands in the scene.
         sealed class VoxelObject
         {
@@ -65,6 +79,8 @@ namespace McKrill.Avbd.Samples
         }
 
         [Header("Objects (applied on Reset)")]
+        [Tooltip("Draw the blocks on the surface of an object as pieces of its smooth surface (needs a file written with the voxelizer's --smooth; a file without chunks is drawn as cubes). Only the drawing changes: the bodies are the same boxes.")]
+        [SerializeField] bool smoothSurface = true;
         [Tooltip("Mass of one voxel in kg. The density of an object follows from it and the size of its voxels, so a finer file has the same mass per voxel. A block of the Fracture Wall Demo weighs 0.25 kg.")]
         [SerializeField, Min(0.001f)] float voxelMass = 0.25f;
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
@@ -142,7 +158,12 @@ namespace McKrill.Avbd.Samples
         readonly List<VoxelObject> objects = new List<VoxelObject>();            // the files that were read
         readonly List<string> objectLines = new List<string>();                  // one line per file of the folder for the panel: what was read, or why not
         Material boxMaterial;
+        Material chunkMaterial;
         Mesh cubeMesh;
+        // The smooth pieces: one record (slot, color) for each block that is drawn as a chunk, and one mesh of all the chunks.
+        GraphicsBuffer chunkInstanceBuffer;
+        Mesh chunkMesh;
+        int chunkBlockCount;
         GameObject meshSource;
 
         Camera cam;
@@ -192,6 +213,13 @@ namespace McKrill.Avbd.Samples
             }
             boxMaterial = new Material(boxShader) { hideFlags = HideFlags.HideAndDontSave };
 
+            // Optional: without the chunk shader (or where it is not supported) every block is a cube.
+            Shader chunkShader = AvbdShaderSet.Load()?.BlockChunks;
+            if (chunkShader != null && chunkShader.isSupported)
+                chunkMaterial = new Material(chunkShader) { hideFlags = HideFlags.HideAndDontSave };
+            else
+                Debug.LogWarning("JSON Mesh Import Demo: the package's block chunk shader is missing or not supported on this device, so every block is drawn as a cube.");
+
             // The cube mesh comes from a primitive that is destroyed again: it keeps the demo free of mesh assets.
             meshSource = GameObject.CreatePrimitive(PrimitiveType.Cube);
             cubeMesh = meshSource.GetComponent<MeshFilter>().sharedMesh;
@@ -210,6 +238,8 @@ namespace McKrill.Avbd.Samples
             cubeMesh = null;
             if (boxMaterial != null) Destroy(boxMaterial);
             boxMaterial = null;
+            if (chunkMaterial != null) Destroy(chunkMaterial);
+            chunkMaterial = null;
 
             if (createdLight != null) Destroy(createdLight);
             createdLight = null;
@@ -362,7 +392,8 @@ namespace McKrill.Avbd.Samples
                 objects.Add(item);
                 voxelTotal += data.voxelCount;
                 objectLines.Add(name + ": " + data.voxelCount + " voxels, " + data.jointCount + " joints, "
-                    + item.extent.x.ToString("0.0") + " x " + item.extent.y.ToString("0.0") + " x " + item.extent.z.ToString("0.0") + " m");
+                    + item.extent.x.ToString("0.0") + " x " + item.extent.y.ToString("0.0") + " x " + item.extent.z.ToString("0.0") + " m"
+                    + (data.HasChunks ? ", " + data.chunkCount + " smooth blocks" : ", no smooth surface in the file"));
                 if (item.extent.x > ObjectSpacing || item.extent.z > ObjectSpacing)
                     Debug.LogWarning("JSON Mesh Import Demo: \"" + name + "\" is wider than the " + ObjectSpacing + " m between the objects and will overlap its neighbor.");
             }
@@ -447,8 +478,27 @@ namespace McKrill.Avbd.Samples
             }
             var spawned = new BodyHandle[descriptors.Count];
             bodies.SpawnBatch(descriptors, spawned, zCurveOrder);
+
+            // The blocks that are drawn as chunks (those of a file with chunks, with the smooth surface on) are not cubes in the instance list: they get a record in
+            // the chunk instance buffer instead. Index in the list of descriptors: 1 + the voxel's number in the whole scene.
+            bool[] drawnAsChunk = new bool[spawned.Length];
+            bool chunksWanted = smoothSurface && chunkMaterial != null;
+            if (chunksWanted)
+            {
+                first = 0;
+                foreach (VoxelObject o in objects)
+                {
+                    if (o.data.HasChunks)
+                        for (int c = 0; c < o.data.chunkCount; c++)
+                            drawnAsChunk[1 + first + o.data.chunkVoxels[c]] = spawned[1 + first + o.data.chunkVoxels[c]].IsValid;
+                    first += o.data.voxelCount;
+                }
+            }
             for (int i = 0; i < spawned.Length; i++)
-                AddStaticInstance(spawned[i], instanceSizes[i], instanceColors[i]);
+                if (!drawnAsChunk[i])
+                    AddStaticInstance(spawned[i], instanceSizes[i], instanceColors[i]);
+            if (chunksWanted)
+                CreateChunkMesh(spawned, drawnAsChunk, instanceColors);
 
             // Joints: one for every pair of the file.
             jointCount = 0;
@@ -470,6 +520,61 @@ namespace McKrill.Avbd.Samples
 
             accumulator = 0f;
             stepMs = 0f;
+        }
+
+        // The mesh of all chunks, and the record of each (the body slot and the color of its block). The chunks of a file are stored one after the other, so the
+        // vertices of chunk c of an object are the file's vertices chunkVertexStart[c] up to chunkVertexStart[c + 1] - 1, and the vertex number of a triangle's
+        // corner is counted from the first of them. Positions and normals are relative to the block: the vertex shader moves them with the block's pose.
+        void CreateChunkMesh(BodyHandle[] spawned, bool[] drawnAsChunk, List<Color> colors)
+        {
+            var blocks = new List<InstanceData>();
+            var vertices = new List<ChunkVertex>();
+            var indices = new List<int>();
+            int first = 0;
+            foreach (VoxelObject o in objects)
+            {
+                VoxelMeshData data = o.data;
+                for (int c = 0; data.HasChunks && c < data.chunkCount; c++)
+                {
+                    int descriptorIndex = 1 + first + data.chunkVoxels[c];
+                    if (!drawnAsChunk[descriptorIndex])
+                        continue;
+                    uint block = (uint)blocks.Count;
+                    blocks.Add(MakeInstance(spawned[descriptorIndex], float3.zero, colors[descriptorIndex]));
+
+                    int vertexBase = vertices.Count;
+                    for (int v = data.chunkVertexStart[c]; v < data.chunkVertexStart[c + 1]; v++)
+                        vertices.Add(new ChunkVertex
+                        {
+                            position = new float3(data.chunkPositions[3 * v], data.chunkPositions[3 * v + 1], data.chunkPositions[3 * v + 2]),
+                            normal = new float3(data.chunkNormals[3 * v], data.chunkNormals[3 * v + 1], data.chunkNormals[3 * v + 2]),
+                            block = block,
+                        });
+                    for (int m = 3 * data.chunkTriangleStart[c]; m < 3 * data.chunkTriangleStart[c + 1]; m++)
+                        indices.Add(vertexBase + data.chunkTriangles[m]);
+                }
+                first += data.voxelCount;
+            }
+
+            chunkBlockCount = blocks.Count;
+            if (chunkBlockCount == 0)
+                return;
+
+            chunkMesh = new Mesh { name = "AVBD block chunks", indexFormat = IndexFormat.UInt32, hideFlags = HideFlags.HideAndDontSave };
+            chunkMesh.SetVertexBufferParams(vertices.Count,
+                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3),
+                new VertexAttributeDescriptor(VertexAttribute.Normal, VertexAttributeFormat.Float32, 3),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.UInt32, 1));
+            chunkMesh.SetVertexBufferData(vertices, 0, 0, vertices.Count, 0, MeshUpdateFlags.DontRecalculateBounds);
+            chunkMesh.SetIndexBufferParams(indices.Count, IndexFormat.UInt32);
+            chunkMesh.SetIndexBufferData(indices, 0, 0, indices.Count, MeshUpdateFlags.DontRecalculateBounds);
+            chunkMesh.SetSubMesh(0, new SubMeshDescriptor(0, indices.Count), MeshUpdateFlags.DontRecalculateBounds);
+            chunkMesh.bounds = new Bounds(Vector3.zero, new Vector3(100000f, 100000f, 100000f)); // the blocks move on the GPU
+
+            chunkInstanceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, blocks.Count, UnsafeUtility.SizeOf<InstanceData>());
+            chunkInstanceBuffer.SetData(blocks);
+            chunkMaterial.SetBuffer("_Poses", bodies.State);
+            chunkMaterial.SetBuffer("_Instances", chunkInstanceBuffer);
         }
 
         // A ball-socket joint at the middle between the two voxels (the middle of the face they share, for neighbors by a face), with a rigid angle lock.
@@ -530,6 +635,11 @@ namespace McKrill.Avbd.Samples
             instanceBuffer = null;
             instances = null;
             staticCount = 0;
+            if (chunkInstanceBuffer != null) chunkInstanceBuffer.Release();
+            chunkInstanceBuffer = null;
+            if (chunkMesh != null) Destroy(chunkMesh);
+            chunkMesh = null;
+            chunkBlockCount = 0;
             if (raycaster != null) raycaster.Dispose();
             raycaster = null;
             if (solver != null) solver.Dispose();
@@ -658,6 +768,16 @@ namespace McKrill.Avbd.Samples
                 layer = gameObject.layer,
             };
             Graphics.RenderMeshPrimitives(renderParams, cubeMesh, 0, staticCount + shots.Count);
+
+            // The smooth pieces of the blocks on the surface: the same light, one more draw call for all of them.
+            if (chunkMesh != null)
+            {
+                chunkMaterial.SetVector("_LightDirection", toLight);
+                chunkMaterial.SetColor("_LightColor", lightColor);
+                chunkMaterial.SetColor("_AmbientColor", new Color(0.35f, 0.37f, 0.40f));
+                renderParams.material = chunkMaterial;
+                Graphics.RenderMeshPrimitives(renderParams, chunkMesh, 0, 1);
+            }
         }
 
         // ---- camera and light --------------------------------------------------------------------------
@@ -820,6 +940,8 @@ namespace McKrill.Avbd.Samples
             GUILayout.EndHorizontal();
 
             // Mass, stiffness and the threshold on log scales.
+            smoothSurface = GUILayout.Toggle(smoothSurface, "Smooth surface (needs chunks in the file, see the objects)");
+
             GUILayout.Label("Voxel mass: " + voxelMass.ToString(voxelMass < 1f ? "0.000" : "0.0") + " kg");
             voxelMass = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(voxelMass), -2f, 1f)), 0.01f, 10f);
 
@@ -845,7 +967,7 @@ namespace McKrill.Avbd.Samples
             bendBreakDegrees = Mathf.Round(GUILayout.HorizontalSlider(bendBreakDegrees, 1f, 180f));
             GUI.enabled = wasEnabled;
             GUILayout.Space(4f);
-            GUILayout.Label("bodies " + (staticCount + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
+            GUILayout.Label("bodies " + (staticCount + chunkBlockCount + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
             GUILayout.Label("joints broken " + (constraints != null ? constraints.BrokenCount : 0) + " / " + jointCount);
             GUILayout.Label("step " + stepMs.ToString("0.00") + " ms (CPU side)   frame " + frameMs.ToString("0.0") + " ms");
             if (behindRealTime)

@@ -20,6 +20,10 @@ Each voxel is a box of voxel-size edges, and every voxel is linked to its immedi
 the ones that share an edge; 26 the ones that share a corner) by one ball-socket joint, once per pair. The joint's anchor is the middle between the two
 voxel centers, which is where the faces meet for the 6-neighborhood.
 
+With --smooth the script also bakes the smooth surface of the mesh into the blocks (see smooth_chunks.py): for every voxel on the surface, the piece of the mesh
+that belongs to it, closed into a solid of its own with flat faces where it touches its neighbors. The demo draws these chunks instead of the boxes, so an object looks
+like the mesh while it is whole, and a block that breaks off is still a block (with the curved outside of the mesh). It makes the file much larger.
+
 Output (JSON, see README.md for the format): the grid (origin, voxel size, dimensions), the voxel indices as one flat list of (i, j, k) triples, and the
 joints as one flat list of pairs of voxel numbers (positions in the voxel list). The center of voxel (i, j, k) is origin + (i + 0.5, j + 0.5, k + 0.5) * voxelSize.
 
@@ -36,11 +40,13 @@ import sys
 import numpy as np
 
 FORMAT_NAME = "mckrill-avbd-voxels"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 1   # the chunk arrays of --smooth are optional additions: a reader that does not know them reads the file as before
 
 PAD = 2          # empty cells around the grid for the flood fill
 ALIGNMENT_SHIFT = np.array([1.0e-3, 7.07e-4, 5.77e-4])  # in voxels, see voxelize()
 TOUCH_EPS = 1e-6  # in voxels: a triangle that only grazes a voxel counts as touching it
+POSITION_DECIMALS = 5  # decimals of the positions of a chunk's vertices, in the units of the output
+NORMAL_DECIMALS = 3
 MAX_ELEMS = 300_000  # cells of a batch (triangles x cells of their boxes) in the vectorized loops
 
 
@@ -357,7 +363,16 @@ def _flat(array):
     return "[" + ",".join(map(str, array.reshape(-1).tolist())) + "]"
 
 
-def write_json(path, source, origin, voxel_size, dims, voxels, joints, connectivity, surface):
+def _flat_floats(array, decimals):
+    """A flat JSON list of floats with at most `decimals` decimals (trailing zeros left out)."""
+    text = []
+    for x in np.round(array.reshape(-1), decimals).tolist():
+        t = ("%.*f" % (decimals, x)).rstrip("0").rstrip(".")
+        text.append("0" if t in ("", "-0") else t)
+    return "[" + ",".join(text) + "]"
+
+
+def write_json(path, source, origin, voxel_size, dims, voxels, joints, connectivity, surface, chunks=None):
     header = {
         "format": FORMAT_NAME,
         "version": FORMAT_VERSION,
@@ -375,8 +390,20 @@ def write_json(path, source, origin, voxel_size, dims, voxels, joints, connectiv
         for key, value in header.items():
             f.write("  %s: %s,\n" % (json.dumps(key), json.dumps(value)))
         f.write('  "voxels": ' + _flat(voxels) + ",\n")
-        f.write('  "joints": ' + _flat(joints) + "\n")
-        f.write("}\n")
+        f.write('  "joints": ' + _flat(joints))
+        if chunks is not None and chunks.count > 0:
+            # Optional: the baked chunks. Chunk i belongs to voxel chunkVoxels[i]; its vertices are chunkPositions / chunkNormals [3 * chunkVertexStart[i] ...
+            # 3 * chunkVertexStart[i + 1]) and its triangles chunkTriangles [3 * chunkTriangleStart[i] ... 3 * chunkTriangleStart[i + 1]), indices counted
+            # from the first vertex of the chunk. Positions are relative to the center of the voxel, in the units of the output.
+            f.write(",\n")
+            f.write('  "chunkCount": %d,\n' % chunks.count)
+            f.write('  "chunkVoxels": ' + _flat(np.array(chunks.voxel_numbers)) + ",\n")
+            f.write('  "chunkVertexStart": ' + _flat(np.array(chunks.vertex_start)) + ",\n")
+            f.write('  "chunkTriangleStart": ' + _flat(np.array(chunks.triangle_start)) + ",\n")
+            f.write('  "chunkPositions": ' + _flat_floats(chunks.positions, POSITION_DECIMALS) + ",\n")
+            f.write('  "chunkNormals": ' + _flat_floats(chunks.normals, NORMAL_DECIMALS) + ",\n")
+            f.write('  "chunkTriangles": ' + _flat(chunks.triangles))
+        f.write("\n}\n")
 
 
 # ---- command line --------------------------------------------------------------------------------------------------
@@ -392,6 +419,8 @@ def main(argv=None):
     p.add_argument("--connectivity", type=int, choices=(6, 18, 26), default=6, help="neighbors that are joined: 6 (faces, default), 18 (+ edges), 26 (+ corners)")
     p.add_argument("--scale", type=float, default=1.0, help="factor applied to the mesh first (for example 0.001 for an STL in millimeters, to get meters)")
     p.add_argument("--zup-to-yup", action="store_true", help="rotate the mesh from a z-up tool's frame into Unity's y-up frame: (x, y, z) -> (x, z, -y)")
+    p.add_argument("--smooth", action="store_true", help="also bake the smooth surface of the mesh into the blocks on the surface (a chunk each, see smooth_chunks.py); larger files")
+    p.add_argument("--crease", type=float, default=50.0, help="with --smooth: the angle in degrees up to which the normals of neighboring triangles are smoothed (default 50)")
     p.add_argument("--max-cells", type=int, default=200_000_000, help="refuse a grid with more cells than this (with a margin), default 200 million")
     args = p.parse_args(argv)
 
@@ -403,6 +432,10 @@ def main(argv=None):
         open_edges = open_edge_count(triangles)
         solid, origin, voxel_size = voxelize(triangles, args.voxel_size, args.resolution, args.surface, args.max_cells)
         voxels, joints = build_joints(solid, args.connectivity)
+        chunks = None
+        if args.smooth and len(voxels):
+            import smooth_chunks
+            chunks = smooth_chunks.bake(triangles, origin, voxel_size, solid, voxels, args.crease)
     except (ValueError, OSError) as error:
         print("error: %s" % error, file=sys.stderr)
         return 1
@@ -413,13 +446,23 @@ def main(argv=None):
     if len(voxels) == 0:
         print("warning: no voxel is solid: the voxel size is too large for this mesh (try a smaller one, or --surface touch)", file=sys.stderr)
 
-    write_json(output, args.stl, origin, voxel_size, solid.shape, voxels, joints, args.connectivity, args.surface)
+    write_json(output, args.stl, origin, voxel_size, solid.shape, voxels, joints, args.connectivity, args.surface, chunks)
 
     mesh_vol = mesh_volume(triangles)
     voxel_vol = len(voxels) * voxel_size ** 3
     print("%s: %d triangles, grid %d x %d x %d, voxel size %.6g" % (os.path.basename(args.stl), len(triangles), *solid.shape, voxel_size))
     print("%d voxels, %d joints (%d-neighborhood); voxel volume %.6g, mesh volume %.6g%s" % (
         len(voxels), len(joints), args.connectivity, voxel_vol, mesh_vol, " (%.1f%%)" % (100.0 * voxel_vol / mesh_vol) if mesh_vol > 0 else ""))
+    if chunks is not None:
+        st = chunks.stats
+        print("smooth surface: %d chunks (the other %d voxels are plain boxes), %d vertices, %d triangles (%d of them caps, %.1f per chunk)" % (
+            st["chunks"], len(voxels) - st["chunks"], st["vertices"], st["triangles"], st["cap_triangles"], st["triangles"] / max(st["chunks"], 1)))
+        if st["outside_cells_given_to_a_voxel"]:
+            print("  %d cells that are not voxels but have mesh in them were given to the nearest voxel" % st["outside_cells_given_to_a_voxel"])
+        if st["pieces_lost"]:
+            print("warning: the mesh has %d pieces in cells with no voxel around them (a part thinner than a voxel); they are not drawn" % st["pieces_lost"], file=sys.stderr)
+        if st["cavity_triangles_left_out"]:
+            print("  %d triangles of closed cavities were left out (the object is solid)" % st["cavity_triangles_left_out"])
     print("written to %s" % output)
     return 0
 

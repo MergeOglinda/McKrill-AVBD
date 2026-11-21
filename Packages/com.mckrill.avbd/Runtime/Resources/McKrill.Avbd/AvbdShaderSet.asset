@@ -25,3 +25,4 @@ MonoBehaviour:
   raycast: {fileID: 7200000, guid: d2ab5d3aa0494763a0e4055598ceb776, type: 3}
   groupLabel: {fileID: 7200000, guid: f484bcfcd80944ee8b6d5ec4ab421398, type: 3}
   instancedBoxes: {fileID: 4800000, guid: ea27341be0f647339dddd29ff595a504, type: 3}
+  blockChunks: {fileID: 4800000, guid: 7c3b1e0a5d9f4a2e8b6c4d1f9a0e3b52, type: 3}
