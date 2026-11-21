@@ -115,6 +115,8 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Range(0f, 3f)] float grabDamping = 1f;
         [Tooltip("How much the force grows with the distance of the grabbed blocks from the center of the screen, per meter: the stiffness is Force times (1 + gain times the distance in meters of the blocks from the line of sight through the held point). 0 is a constant stiffness.")]
         [SerializeField, Range(0f, 5f)] float grabOffsetGain = 0.5f;
+        [Tooltip("Off: the grabbed blocks are pulled with a spring force (Force, Damping ratio and Offset gain). On: each block is placed directly, every frame, at its own place relative to the held point (the point at the center of the screen, at the distance the ray hit) and gets the velocity of that point, so it can be thrown. No force acts, and their mass and inertia are not touched (AvbdGroupMover).")]
+        [SerializeField] bool grabDirect = false;
 
         [Header("View")]
         [Tooltip("Fly camera: right drag to look, W A S D to move, Q and E for down and up, Shift for faster, mouse wheel to dolly.")]
@@ -201,7 +203,16 @@ namespace McKrill.Avbd.Samples
         // bodies within the radius of the hit get the group mask bit GrabGroup (AvbdGroupLabeler, on the GPU) and a spring force field for GrabGroup pulls their
         // centroid to a point in front of the camera, at the distance the ray hit. The blocks move together and keep their arrangement; the joints between
         // them and the rest of the wall stretch and break. Letting go removes the field and the labels.
+        // With grabDirect no force field is made: once a frame, before the steps, every labelled body is placed on its own (AvbdGroupMover.Hold, on the GPU) at its offset from
+        // the held point (remembered when the grab began) plus the held point, and gets the velocity of the held point. The place is absolute, so what the steps did to a body
+        // (gravity, contacts, the joints to the rest of the wall) is undone every frame: the group does not sink and keeps its arrangement, and it follows the camera whatever
+        // the number of steps in a frame. Let go, the blocks keep the velocity of the point and fly on. Their mass and moments of inertia are not touched.
         AvbdGroupLabeler labeler;
+        AvbdGroupMover mover;
+        int requestGrabDirect = -1;    // 1 or 0 to switch the grab style, or -1 (applied in Update, like the mode)
+        bool grabIsDirect;             // the style of the grab that is active (the setting can change while it is held: it ends the grab)
+        float3 grabLastTarget;         // direct grab: where the held point was at the last frame
+        bool grabFirstMove;            // direct grab: the next UpdateGrab only begins the hold (remembers where each block is relative to the held point)
         bool grabHeld;                 // the button is down (set in OnGUI)
         bool grabActive;               // the bodies are labelled and the field exists
         int grabToken;                 // changes at every start and end, so that the answer of a ray cast of a grab that is over is dropped
@@ -292,6 +303,13 @@ namespace McKrill.Avbd.Samples
                     EndGrab();
                 clickMode = (ClickMode)requestMode;
                 requestMode = -1;
+            }
+            if (requestGrabDirect >= 0)
+            {
+                EndGrab(); // a grab keeps the style it started with; the next click uses the new one
+                grabToken++; // and the answer of a ray cast that is on its way, made for the old style, is dropped
+                grabDirect = requestGrabDirect == 1;
+                requestGrabDirect = -1;
             }
             if (requestGrabStart)
             {
@@ -404,6 +422,7 @@ namespace McKrill.Avbd.Samples
             solver = new AvbdSolver(bodies, settings, null, constraints);
             raycaster = new AvbdRaycaster(bodies);
             labeler = new AvbdGroupLabeler(bodies);
+            mover = new AvbdGroupMover(bodies);
             simulationVersion++;
 
             // The ground and every block go in one batch (the ground is element 0, then the blocks wall by wall, row by row, column by column), so that
@@ -540,6 +559,8 @@ namespace McKrill.Avbd.Samples
             grabStatus = "";
             if (labeler != null) labeler.Dispose();
             labeler = null;
+            if (mover != null) mover.Dispose();
+            mover = null;
             shots.Clear();
             staticInstances.Clear();
             if (instanceBuffer != null) instanceBuffer.Release();
@@ -679,6 +700,7 @@ namespace McKrill.Avbd.Samples
             float radius = grabRadius;
             int version = simulationVersion;
             int token = ++grabToken;
+            bool direct = grabDirect;
 
             grabStatus = "Casting the ray...";
             raycaster.Cast(origin, direction, RayMaxDistance, (hit, distance) =>
@@ -695,6 +717,16 @@ namespace McKrill.Avbd.Samples
                 labeler.Label(point, radius, GrabGroup, 0u);
 
                 grabDistance = distance;
+                if (direct)
+                {
+                    // No field: the next UpdateGrab begins the hold and takes the point the camera holds then as the start, so the blocks do not jump by the way the
+                    // camera moved while the ray was on its way.
+                    grabIsDirect = true;
+                    grabFirstMove = true;
+                    grabActive = true;
+                    grabStatus = "";
+                    return;
+                }
                 ForceFieldHandle field = solver.AddForceField(GrabSpring(origin, direction));
                 if (!field.IsValid)
                 {
@@ -703,6 +735,7 @@ namespace McKrill.Avbd.Samples
                     return;
                 }
                 grabField = field;
+                grabIsDirect = false;
                 grabActive = true;
                 grabStatus = "";
             });
@@ -715,7 +748,28 @@ namespace McKrill.Avbd.Samples
                 return;
 
             GetCameraRay(out float3 origin, out float3 direction);
-            solver.UpdateForceField(grabField, GrabSpring(origin, direction));
+            if (!grabIsDirect)
+            {
+                solver.UpdateForceField(grabField, GrabSpring(origin, direction));
+                return;
+            }
+
+            // Direct: the held point is where the camera looks, at the distance of the grab. The first frame remembers where every block is relative to it (the point of
+            // the first frame, so the blocks do not jump by the way the camera moved while the ray was on its way). Every later frame puts every block at the point plus its own
+            // offset, with the velocity of the point (its move over the time of the frame, the time the solver advances in a frame on average): the blocks follow the camera
+            // exactly, and a block that is let go keeps that velocity. Paused, they follow the camera at rest. The velocity uses the real frame time, so a very short frame
+            // is taken as 4 ms.
+            float3 target = origin + math.normalizesafe(direction) * grabDistance;
+            if (grabFirstMove)
+            {
+                grabLastTarget = target;
+                grabFirstMove = false;
+                mover.BeginHold(GrabGroup, target);
+                return;
+            }
+            float3 velocity = paused ? float3.zero : (target - grabLastTarget) / Mathf.Max(Time.deltaTime, 0.004f);
+            grabLastTarget = target;
+            mover.Hold(GrabGroup, target, velocity);
         }
 
         void EndGrab()
@@ -724,7 +778,7 @@ namespace McKrill.Avbd.Samples
                 return;
             grabToken++;
             grabActive = false;
-            if (solver != null)
+            if (solver != null && !grabIsDirect)
                 solver.RemoveForceField(grabField);
             grabField = ForceFieldHandle.Invalid;
             if (labeler != null)
@@ -880,6 +934,7 @@ namespace McKrill.Avbd.Samples
             const float margin = 8f;
             const float width = 340f;
             float scale = Mathf.Clamp(Screen.height / 800f, 1f, 2.5f);
+            bool wasEnabled = GUI.enabled;
 
             Matrix4x4 oldMatrix = GUI.matrix;
             GUI.matrix = Matrix4x4.Scale(new Vector3(scale, scale, 1f));
@@ -933,6 +988,13 @@ namespace McKrill.Avbd.Samples
                 GUILayout.Label("Radius: " + grabRadius.ToString("0.0") + " m   (blocks around the point the ray hits)");
                 grabRadius = GUILayout.HorizontalSlider(grabRadius, 0.1f, 10f);
 
+                // How the blocks are grabbed. The toggle only asks (the style changes in Update). The sliders of the force are always drawn and greyed out in the
+                // direct style: a control that comes and goes while the panel is drawn is an IMGUI error.
+                if (GUILayout.Toggle(grabDirect, "Direct: move the blocks, no force (mass and inertia unchanged)") != grabDirect)
+                    requestGrabDirect = grabDirect ? 0 : 1;
+
+                GUI.enabled = wasEnabled && !grabDirect;
+
                 // Stiffness on a log scale: 10 to 2000 N/m. Each block gets this times the distance of the group from the held point, in newtons.
                 GUILayout.Label("Force: " + grabForce.ToString("0") + " N/m   (a pull of this many N per meter the blocks are from the held point)");
                 grabForce = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(grabForce), 1f, Mathf.Log10(2000f))), 10f, 2000f);
@@ -942,6 +1004,8 @@ namespace McKrill.Avbd.Samples
 
                 GUILayout.Label("Offset gain: " + grabOffsetGain.ToString("0.00") + " per m   (the force grows with the distance of the blocks from the center of the screen)");
                 grabOffsetGain = GUILayout.HorizontalSlider(grabOffsetGain, 0f, 5f);
+
+                GUI.enabled = wasEnabled;
 
                 GUILayout.Label(grabActive ? "Holding at " + grabDistance.ToString("0.0") + " m from the camera" : grabStatus);
             }
@@ -982,7 +1046,6 @@ namespace McKrill.Avbd.Samples
             // is being laid out is an IMGUI error, and a click on the toggle changes the state in the middle of an event.
             GUILayout.Space(4f);
             plasticJoints = GUILayout.Toggle(plasticJoints, "Plastic yield: joints give way and keep the bend");
-            bool wasEnabled = GUI.enabled;
             GUI.enabled = wasEnabled && plasticJoints;
             GUILayout.Label("Yield threshold: " + yieldThreshold.ToString(yieldThreshold < 10f ? "0.0" : "0")
                 + (yieldThreshold >= fractureThreshold ? "   (not below the fracture threshold: joints break first)" : ""));

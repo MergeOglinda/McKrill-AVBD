@@ -1,0 +1,125 @@
+// Moves every body of a group directly, on the GPU, so the CPU never reads the bodies: adds a translation to their position and/or sets their velocity.
+// Used by AvbdGroupMover. Nothing else of a body is touched: mass, moments, shape, friction, flags and the group mask stay, so the bodies keep their
+// inertia (a push by force or by making them kinematic would change how they respond). Free slots and static bodies (mass 0) are skipped; kinematic
+// bodies are moved. A position edit is a teleport like the SetPose edit: the step-start pose follows, so the solver does not take the jump for a motion.
+// A velocity edit is like SetVelocity: the previous linear velocity follows, so the adaptive warm start sees no acceleration.
+// Semantics are mirrored by Reference/Stages/CpuGroupMove.cs.
+//
+// Hold (HoldCapture, HoldApply): places every body of a group at its own place relative to a moving point, and gives them the velocity of the point (a direct
+// grab). Move by a distance adds, it does not hold: a body that a step pulled or pushed (gravity moves a body by g dt^2 in a step even from rest) stays where the step
+// left it, so a group that is moved by the camera's distance every frame sinks. The hold is absolute and per body: HoldCapture stores, for every body of the group, its offset from
+// the held point (one float4 per slot, w = 1 if the body was in the group), and HoldApply puts each body at the held point plus its own offset, as many times as
+// it is called, whatever the steps did to the body in between.
+
+#pragma kernel Move
+#pragma kernel HoldCapture
+#pragma kernel HoldApply
+
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
+
+#define AVBD_MOVE_POSITION         1u
+#define AVBD_MOVE_LINEAR_VELOCITY  2u
+#define AVBD_MOVE_ANGULAR_VELOCITY 4u
+
+RWStructuredBuffer<BodyStateRecord>  _BodyState;
+RWStructuredBuffer<BodyMotionRecord> _BodyMotion;
+StructuredBuffer<BodyMassRecord>     _BodyMass;
+StructuredBuffer<BodyMetaRecord>     _BodyMeta;
+
+float4 _MoveTranslation; // xyz: added to the position (with AVBD_MOVE_POSITION)
+float4 _MoveLinear;      // xyz: the new linear velocity (with AVBD_MOVE_LINEAR_VELOCITY)
+float4 _MoveAngular;     // xyz: the new angular velocity (with AVBD_MOVE_ANGULAR_VELOCITY)
+uint4  _MoveControl;     // x: group mask, y: fields (AVBD_MOVE_*)
+
+RWStructuredBuffer<float4> _HoldOffsets; // per slot: xyz the offset of the body from the held point when HoldCapture ran, w = 1 if it was held then (else 0)
+float4 _HoldPoint;                       // xyz: the held point (HoldCapture: where it is at the capture; HoldApply: where it is now). _MoveLinear: the velocity (HoldApply)
+
+uint _Base;
+uint _Count; // slots to process: [0, _Count)
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Move(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    BodyMetaRecord meta = _BodyMeta[slot];
+    if (meta.ident.x & AVBD_BODY_FLAG_FREE)
+        return;
+    if ((meta.ident.y & _MoveControl.x) == 0u)
+        return;
+    if (!(_BodyMass[slot].momentMass.w > 0.0))
+        return;
+
+    uint fields = _MoveControl.y;
+    if (fields & AVBD_MOVE_POSITION)
+    {
+        BodyStateRecord s = _BodyState[slot];
+        s.position.xyz += _MoveTranslation.xyz;
+        s.startPosition = s.position;
+        s.startRotation = s.rotation;
+        _BodyState[slot] = s;
+    }
+
+    if (fields & (AVBD_MOVE_LINEAR_VELOCITY | AVBD_MOVE_ANGULAR_VELOCITY))
+    {
+        BodyMotionRecord v = _BodyMotion[slot];
+        if (fields & AVBD_MOVE_LINEAR_VELOCITY)
+        {
+            v.linearVel.xyz = _MoveLinear.xyz;
+            v.prevLinearVel.xyz = _MoveLinear.xyz;
+        }
+        if (fields & AVBD_MOVE_ANGULAR_VELOCITY)
+            v.angularVel.xyz = _MoveAngular.xyz;
+        _BodyMotion[slot] = v;
+    }
+}
+
+// The bodies a hold acts on: the ones Move would move.
+bool HoldMember(uint slot)
+{
+    BodyMetaRecord meta = _BodyMeta[slot];
+    if (meta.ident.x & AVBD_BODY_FLAG_FREE)
+        return false;
+    if ((meta.ident.y & _MoveControl.x) == 0u)
+        return false;
+    return _BodyMass[slot].momentMass.w > 0.0;
+}
+
+// Dispatched over every slot of the buffers (not only up to the high-water mark), so that no offset of an earlier capture is left.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void HoldCapture(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    _HoldOffsets[slot] = HoldMember(slot) ? float4(_BodyState[slot].position.xyz - _HoldPoint.xyz, 1.0) : float4(0.0, 0.0, 0.0, 0.0);
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void HoldApply(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count || !HoldMember(slot))
+        return;
+
+    float4 held = _HoldOffsets[slot];
+    if (held.w == 0.0)
+        return; // it joined the group after the capture
+
+    // A teleport, like Move with a position: the step-start pose follows. The velocity is the one of the held point, so that a body that is let go flies on (the
+    // previous velocity follows, as in Move). Nothing else changes.
+    BodyStateRecord s = _BodyState[slot];
+    s.position.xyz = _HoldPoint.xyz + held.xyz;
+    s.startPosition = s.position;
+    s.startRotation = s.rotation;
+    _BodyState[slot] = s;
+
+    BodyMotionRecord v = _BodyMotion[slot];
+    v.linearVel.xyz = _MoveLinear.xyz;
+    v.prevLinearVel.xyz = _MoveLinear.xyz;
+    _BodyMotion[slot] = v;
+}
