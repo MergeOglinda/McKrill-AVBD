@@ -115,7 +115,7 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Range(0f, 3f)] float grabDamping = 1f;
         [Tooltip("How much the force grows with the distance of the grabbed blocks from the center of the screen, per meter: the stiffness is Force times (1 + gain times the distance in meters of the blocks from the line of sight through the held point). 0 is a constant stiffness.")]
         [SerializeField, Range(0f, 5f)] float grabOffsetGain = 0.5f;
-        [Tooltip("Off: the grabbed blocks are pulled with a spring force (Force, Damping ratio and Offset gain). On: they are held directly: before every step their velocity is set to zero and the group is moved so that its center stays at the held point (the point at the center of the screen, at the distance the ray hit), the way it was grabbed. No force acts, and their mass and inertia are not touched (AvbdGroupMover).")]
+        [Tooltip("Off: the grabbed blocks are pulled with a spring force (Force, Damping ratio and Offset gain). On: each block is placed directly, every frame, at its own place relative to the held point (the point at the center of the screen, at the distance the ray hit) and gets the velocity of that point, so it can be thrown. No force acts, and their mass and inertia are not touched (AvbdGroupMover).")]
         [SerializeField] bool grabDirect = false;
 
         [Header("View")]
@@ -203,18 +203,16 @@ namespace McKrill.Avbd.Samples
         // bodies within the radius of the hit get the group mask bit GrabGroup (AvbdGroupLabeler, on the GPU) and a spring force field for GrabGroup pulls their
         // centroid to a point in front of the camera, at the distance the ray hit. The blocks move together and keep their arrangement; the joints between
         // them and the rest of the wall stretch and break. Letting go removes the field and the labels.
-        // With grabDirect no force field is made: the labelled bodies are held (AvbdGroupMover.Hold, on the GPU) before every solver step and once more after the steps
-        // of a frame: their velocity is set to zero and their centroid is put at where it was when the grab began plus how far the held point has moved since. The target
-        // is absolute, so what a step does to the group (gravity, contacts, the joints to the rest of the wall) is undone before the next one: it does not sink or lag, however
-        // many steps a frame runs. Their mass and moments of inertia are not touched, and let go they fall from rest.
+        // With grabDirect no force field is made: once a frame, before the steps, every labelled body is placed on its own (AvbdGroupMover.Hold, on the GPU) at its offset from
+        // the held point (remembered when the grab began) plus the held point, and gets the velocity of the held point. The place is absolute, so what the steps did to a body
+        // (gravity, contacts, the joints to the rest of the wall) is undone every frame: the group does not sink and keeps its arrangement, and it follows the camera whatever
+        // the number of steps in a frame. Let go, the blocks keep the velocity of the point and fly on. Their mass and moments of inertia are not touched.
         AvbdGroupLabeler labeler;
         AvbdGroupMover mover;
         int requestGrabDirect = -1;    // 1 or 0 to switch the grab style, or -1 (applied in Update, like the mode)
         bool grabIsDirect;             // the style of the grab that is active (the setting can change while it is held: it ends the grab)
-        float3 grabPoint;              // direct grab: where the ray hit (the reference point of the hold)
-        float3 grabStartTarget;        // direct grab: where the held point was when the hold began
-        float3 grabHoldOffset;         // direct grab: how far the held point has moved since then (this frame's value, used by every step of the frame)
-        bool grabFirstMove;            // direct grab: the next UpdateGrab only begins the hold (takes the centroid of the group and the starting point)
+        float3 grabLastTarget;         // direct grab: where the held point was at the last frame
+        bool grabFirstMove;            // direct grab: the next UpdateGrab only begins the hold (remembers where each block is relative to the held point)
         bool grabHeld;                 // the button is down (set in OnGUI)
         bool grabActive;               // the bodies are labelled and the field exists
         int grabToken;                 // changes at every start and end, so that the answer of a ray cast of a grab that is over is dropped
@@ -378,7 +376,6 @@ namespace McKrill.Avbd.Samples
                     accumulator = 0f;
             }
 
-            HoldGrab();
             DrawBodies();
         }
 
@@ -724,7 +721,6 @@ namespace McKrill.Avbd.Samples
                 {
                     // No field: the next UpdateGrab begins the hold and takes the point the camera holds then as the start, so the blocks do not jump by the way the
                     // camera moved while the ray was on its way.
-                    grabPoint = point;
                     grabIsDirect = true;
                     grabFirstMove = true;
                     grabActive = true;
@@ -758,26 +754,22 @@ namespace McKrill.Avbd.Samples
                 return;
             }
 
-            // Direct: the blocks are held where the held point is, relative to where the group was when the grab began. This only takes the camera's pose of this frame;
-            // the blocks are put there by HoldGrab, before every step (the camera moves once a frame and the solver may run none, one or two steps).
+            // Direct: the held point is where the camera looks, at the distance of the grab. The first frame remembers where every block is relative to it (the point of
+            // the first frame, so the blocks do not jump by the way the camera moved while the ray was on its way). Every later frame puts every block at the point plus its own
+            // offset, with the velocity of the point (its move over the time of the frame, the time the solver advances in a frame on average): the blocks follow the camera
+            // exactly, and a block that is let go keeps that velocity. Paused, they follow the camera at rest. The velocity uses the real frame time, so a very short frame
+            // is taken as 4 ms.
             float3 target = origin + math.normalizesafe(direction) * grabDistance;
             if (grabFirstMove)
             {
-                grabStartTarget = target;
-                grabHoldOffset = float3.zero;
+                grabLastTarget = target;
                 grabFirstMove = false;
-                mover.BeginHold(GrabGroup, grabPoint);
+                mover.BeginHold(GrabGroup, target);
                 return;
             }
-            grabHoldOffset = target - grabStartTarget;
-        }
-
-        // Direct grab: set the velocity of the held blocks to zero and put their centroid at the held point (AvbdGroupMover.Hold, on the GPU). Called before every step
-        // and after the steps of a frame, so the blocks are held also when no step runs (paused) and drawn where the camera holds them.
-        void HoldGrab()
-        {
-            if (grabActive && grabIsDirect && !grabFirstMove && mover != null)
-                mover.Hold(GrabGroup, grabPoint, grabHoldOffset);
+            float3 velocity = paused ? float3.zero : (target - grabLastTarget) / Mathf.Max(Time.deltaTime, 0.004f);
+            grabLastTarget = target;
+            mover.Hold(GrabGroup, target, velocity);
         }
 
         void EndGrab()
@@ -809,7 +801,6 @@ namespace McKrill.Avbd.Samples
 
         void StepOnce()
         {
-            HoldGrab();
             var watch = System.Diagnostics.Stopwatch.StartNew();
             solver.Step();
             watch.Stop();

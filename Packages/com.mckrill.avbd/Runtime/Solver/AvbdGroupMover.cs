@@ -28,31 +28,25 @@ namespace McKrill.Avbd
     /// This is neither a force nor a kinematic body: no force or impulse acts, and nothing but the pose and the velocity of a body changes. Its mass, moments
     /// of inertia, shape, friction and flags stay the same, so it keeps responding to contacts and joints as the same body. The step after the move starts from the
     /// new pose and velocity. Moving by a distance and setting the velocity that goes with it (the distance over the time of the step) makes the bodies keep
-    /// moving the way they were moved. To keep a group where the user holds it, whatever the steps do to it (gravity, contacts, joints), use
-    /// <see cref="BeginHold"/> and <see cref="Hold"/>: they put the centroid of the group at a point and set the velocities to zero, so that calling Hold before every step
-    /// does not let the group sink. For a single body, <see cref="AvbdBodyBuffers.SetPose"/> and <see cref="AvbdBodyBuffers.SetVelocity"/> set absolute values from the CPU.
+    /// moving the way they were moved. To keep every body of a group at its own place relative to a point that moves (a direct grab), whatever the steps do to it (gravity,
+    /// contacts, joints), use <see cref="BeginHold"/> and <see cref="Hold"/>: they set absolute positions, so they do not let the group sink. For a single body, <see cref="AvbdBodyBuffers.SetPose"/> and <see cref="AvbdBodyBuffers.SetVelocity"/> set absolute values from the CPU.
     /// </summary>
     public sealed class AvbdGroupMover : IDisposable
     {
         readonly AvbdBodyBuffers bodies;
         readonly ComputeShader shader;
         readonly int moveKernel;
-        readonly int holdClearKernel;
-        readonly int holdAccumulateKernel;
         readonly int holdCaptureKernel;
         readonly int holdApplyKernel;
-        GraphicsBuffer holdAccum;  // 4 words: the sums of the offsets of the group from the reference (3, fixed point) and its number of bodies
-        GraphicsBuffer holdAnchor; // 1 float4: the centroid captured by BeginHold
+        GraphicsBuffer holdOffsets; // one float4 per slot of the body buffers: the offset of the body from the held point, w = 1 if it is held
         bool disposed;
 
         static readonly int MoveTranslationId = Shader.PropertyToID("_MoveTranslation");
         static readonly int MoveLinearId = Shader.PropertyToID("_MoveLinear");
         static readonly int MoveAngularId = Shader.PropertyToID("_MoveAngular");
         static readonly int MoveControlId = Shader.PropertyToID("_MoveControl");
-        static readonly int HoldAccumId = Shader.PropertyToID("_HoldAccum");
-        static readonly int HoldAnchorId = Shader.PropertyToID("_HoldAnchor");
-        static readonly int HoldReferenceId = Shader.PropertyToID("_HoldReference");
-        static readonly int HoldOffsetId = Shader.PropertyToID("_HoldOffset");
+        static readonly int HoldOffsetsId = Shader.PropertyToID("_HoldOffsets");
+        static readonly int HoldPointId = Shader.PropertyToID("_HoldPoint");
 
         public AvbdGroupMover(AvbdBodyBuffers bodies, AvbdShaderSet shaderSet = null)
         {
@@ -62,8 +56,6 @@ namespace McKrill.Avbd
                 throw new InvalidOperationException("The AvbdShaderSet asset was not found.");
             shader = shaders.GroupMove != null ? shaders.GroupMove : throw new InvalidOperationException("The AvbdShaderSet has no group move shader.");
             moveKernel = shader.FindKernel("Move");
-            holdClearKernel = shader.FindKernel("HoldClear");
-            holdAccumulateKernel = shader.FindKernel("HoldAccumulate");
             holdCaptureKernel = shader.FindKernel("HoldCapture");
             holdApplyKernel = shader.FindKernel("HoldApply");
         }
@@ -120,85 +112,71 @@ namespace McKrill.Avbd
         }
 
         /// <summary>
-        /// Takes the centroid of the bodies of the group as the anchor of a hold (<see cref="Hold"/>), on the GPU: nothing is read back. The group is the bodies whose group
-        /// mask shares a bit with <paramref name="groupMask"/>, that are not static (mass 0) or free; kinematic bodies count. Nothing moves. Call it again to take a new anchor.
+        /// Remembers where every body of the group is relative to <paramref name="point"/>, on the GPU (nothing is read back), for <see cref="Hold"/>: one offset per body,
+        /// in a buffer of one float4 per slot of the body buffers. The group is the bodies whose group mask shares a bit with <paramref name="groupMask"/>, that are not
+        /// static (mass 0) or free; kinematic bodies count. Nothing moves. Call it again to remember a new arrangement; a body that joins the group later is not held.
         /// </summary>
         /// <param name="groupMask">The bodies that are held.</param>
-        /// <param name="reference">A point near the group (the offsets of the bodies from it are summed as integers in 1/1024 m, so a reference far from the group, or a group
-        /// of more than about 2 million m of summed offsets, overflows). The grab point is a good one.</param>
-        public void BeginHold(uint groupMask, float3 reference)
-        {
-            CheckHold(groupMask, reference);
-            if (groupMask == 0u)
-                return;
-            SumOffsets(groupMask, reference);
-            shader.SetBuffer(holdCaptureKernel, HoldAccumId, holdAccum);
-            shader.SetBuffer(holdCaptureKernel, HoldAnchorId, holdAnchor);
-            shader.SetVector(HoldReferenceId, new Vector4(reference.x, reference.y, reference.z, 0f));
-            shader.Dispatch(holdCaptureKernel, 1, 1, 1);
-        }
-
-        /// <summary>
-        /// Holds the group: moves every body of it by the same translation so that the centroid of the group is at the anchor of <see cref="BeginHold"/> plus
-        /// <paramref name="offset"/>, and sets their linear (also the previous one) and angular velocity to zero. Nothing else changes: not the rotations, mass, moments, shape,
-        /// friction, flags or group masks, so the bodies keep responding to contacts and joints as the same body, and the group keeps its arrangement. It is a teleport like
-        /// <see cref="Move"/> with a position (the step-start pose follows). Because the target is absolute, a body that the step before pulled or pushed away is put back, so
-        /// calling it before every step holds the group, and with its velocities at zero the step starts from rest. Does nothing if <see cref="BeginHold"/> found no body.
-        /// </summary>
-        /// <param name="groupMask">The bodies that are held (the mask of <see cref="BeginHold"/>).</param>
-        /// <param name="reference">The reference point of <see cref="BeginHold"/>.</param>
-        /// <param name="offset">In m: where the centroid is to be, relative to the anchor.</param>
-        public void Hold(uint groupMask, float3 reference, float3 offset)
-        {
-            CheckHold(groupMask, reference);
-            if (!math.all(math.isfinite(offset)))
-                throw new ArgumentException("The offset must be finite.", nameof(offset));
-            if (groupMask == 0u || holdAnchor == null)
-                return;
-            SumOffsets(groupMask, reference);
-            shader.SetBuffer(holdApplyKernel, HoldAccumId, holdAccum);
-            shader.SetBuffer(holdApplyKernel, HoldAnchorId, holdAnchor);
-            shader.SetVector(HoldReferenceId, new Vector4(reference.x, reference.y, reference.z, 0f));
-            shader.SetVector(HoldOffsetId, new Vector4(offset.x, offset.y, offset.z, 0f));
-            bodies.BindTo(shader, holdApplyKernel);
-            AvbdDispatch.Linear(shader, holdApplyKernel, bodies.HighWaterMark);
-        }
-
-        void CheckHold(uint groupMask, float3 reference)
+        /// <param name="point">The held point, in m: where the point that the group will follow is now.</param>
+        public void BeginHold(uint groupMask, float3 point)
         {
             if (disposed)
                 throw new ObjectDisposedException(nameof(AvbdGroupMover));
-            if (!math.all(math.isfinite(reference)))
-                throw new ArgumentException("The reference must be finite.", nameof(reference));
+            if (!math.all(math.isfinite(point)))
+                throw new ArgumentException("The point must be finite.", nameof(point));
+            if (groupMask == 0u)
+                return;
+
+            bodies.ApplyEdits();
+            if (holdOffsets == null)
+            {
+                holdOffsets = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodies.Capacity, 4 * sizeof(float));
+                holdOffsets.SetData(new Vector4[bodies.Capacity]); // nobody is held yet
+            }
+            shader.SetVector(HoldPointId, new Vector4(point.x, point.y, point.z, 0f));
+            shader.SetInts(MoveControlId, (int)groupMask, 0, 0, 0);
+            shader.SetBuffer(holdCaptureKernel, HoldOffsetsId, holdOffsets);
+            bodies.BindTo(shader, holdCaptureKernel);
+            AvbdDispatch.Linear(shader, holdCaptureKernel, bodies.Capacity);
         }
 
-        // Clears the sums and adds the offsets of the bodies of the group from the reference.
-        void SumOffsets(uint groupMask, float3 reference)
+        /// <summary>
+        /// Puts every body that <see cref="BeginHold"/> remembered (and that is still in the group) at <paramref name="point"/> plus its own offset, and sets its linear
+        /// velocity (also the previous one) to <paramref name="linearVelocity"/>. Each body is placed on its own, so the group keeps the arrangement it had when it was
+        /// remembered, whatever the steps did to the bodies since. The position is absolute: what a step did (gravity, a push) is undone by the next call, so a group that is
+        /// held every frame does not sink or lag. The velocity is the one of the point, so that the bodies that are let go keep moving the way they were moved (and a throw
+        /// is possible); the angular velocity and the rotation are not changed. Nothing else changes either: mass, moments of inertia, shape, friction, flags and the group
+        /// mask stay, so the bodies keep responding to contacts and joints as the same body. It is a teleport like <see cref="Move"/> with a position (the step-start pose
+        /// follows). Does nothing before <see cref="BeginHold"/>.
+        /// </summary>
+        /// <param name="groupMask">The bodies that are held (the mask of <see cref="BeginHold"/>).</param>
+        /// <param name="point">The held point now, in m.</param>
+        /// <param name="linearVelocity">The velocity of the held point, in m/s.</param>
+        public void Hold(uint groupMask, float3 point, float3 linearVelocity)
         {
-            bodies.ApplyEdits();
-            if (holdAccum == null)
-            {
-                holdAccum = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 4, sizeof(uint));
-                holdAnchor = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, 4 * sizeof(float));
-                holdAnchor.SetData(new Vector4[1]); // no anchor yet
-            }
-            shader.SetBuffer(holdClearKernel, HoldAccumId, holdAccum);
-            shader.Dispatch(holdClearKernel, 1, 1, 1);
+            if (disposed)
+                throw new ObjectDisposedException(nameof(AvbdGroupMover));
+            if (!math.all(math.isfinite(point)))
+                throw new ArgumentException("The point must be finite.", nameof(point));
+            if (!math.all(math.isfinite(linearVelocity)))
+                throw new ArgumentException("The linear velocity must be finite.", nameof(linearVelocity));
+            if (groupMask == 0u || holdOffsets == null)
+                return;
 
-            shader.SetVector(HoldReferenceId, new Vector4(reference.x, reference.y, reference.z, 0f));
+            bodies.ApplyEdits();
+            shader.SetVector(HoldPointId, new Vector4(point.x, point.y, point.z, 0f));
+            shader.SetVector(MoveLinearId, new Vector4(linearVelocity.x, linearVelocity.y, linearVelocity.z, 0f));
             shader.SetInts(MoveControlId, (int)groupMask, 0, 0, 0);
-            shader.SetBuffer(holdAccumulateKernel, HoldAccumId, holdAccum);
-            bodies.BindTo(shader, holdAccumulateKernel);
-            AvbdDispatch.Linear(shader, holdAccumulateKernel, bodies.HighWaterMark);
+            shader.SetBuffer(holdApplyKernel, HoldOffsetsId, holdOffsets);
+            bodies.BindTo(shader, holdApplyKernel);
+            AvbdDispatch.Linear(shader, holdApplyKernel, bodies.HighWaterMark);
         }
 
         public void Dispose()
         {
             disposed = true;
-            if (holdAccum != null) holdAccum.Release();
-            holdAccum = null;
-            if (holdAnchor != null) holdAnchor.Release();
-            holdAnchor = null;
+            if (holdOffsets != null) holdOffsets.Release();
+            holdOffsets = null;
         }
     }
 }
