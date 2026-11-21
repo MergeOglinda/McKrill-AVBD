@@ -17,7 +17,7 @@ The project needs a render pipeline that draws a `Universal Render Pipeline/Lit`
 
 | Input | Action |
 | --- | --- |
-| Left click (outside the panel) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits; in grab mode, hold the button to grab the blocks around the point the ray hits and drag them (see Grab) |
+| Left click (outside the panel) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits; in grab mode, hold the button to grab the blocks around the point the ray hits and drag them (see Grab); in throw mode, click to select a block and the blocks joined to it, click again to throw them (see Throw) |
 | Right drag | Look around |
 | `W` `A` `S` `D`, `Q` `E` | Move, down and up. `Shift` is three times faster |
 | Mouse wheel | Move forward and back |
@@ -31,7 +31,7 @@ The click mode button, the shot's speed, size and mass (or the explosion's radiu
 
 | Control | What it does |
 | --- | --- |
-| Explosion, Shot and Grab buttons | Switch what the left click does. The panel shows the Speed, Size and Mass of the shot, the Radius, Force and Depth of the explosion, or the Radius and Force of the grab, for the mode that is on (the other values are kept) |
+| Explosion, Shot, Grab and Throw buttons | Switch what the left click does. The panel shows the Speed, Size and Mass of the shot, the Radius, Force and Depth of the explosion, the Radius and Force of the grab, or the Speed of the throw, for the mode that is on (the other values are kept) |
 | Radius | 1 to 50 m. A block whose center is farther from the explosion than this is not touched |
 | Force | 0.1 to 1000 N s (log scale): the impulse at the center of the explosion. A body's velocity changes by this times a falloff `(1 - r/radius)^2` divided by its mass. The label shows the speed a default block (0.25 kg) at the center would get |
 | Depth | 0 to 20 m: how far behind the surface the camera ray hits the explosion goes off, along the ray. 0 is on the surface |
@@ -53,6 +53,14 @@ The panel also shows how many joints have broken, out of all. Plastic yield, the
 In explosion mode a left click casts a ray from the center of the camera. The ray is cast on the GPU (`AvbdRaycaster`), against the ground, the blocks and the shots where they are, so the CPU never reads the poses; only the distance of the nearest hit comes back, a few frames after the click. The explosion goes off at the nearest hit plus *Depth* meters along the ray. If the ray hits nothing, nothing happens and the panel says so.
 
 The physics is `AvbdSolver.Explode`: a radial impulse applied in the next step's predict stage, so the joints and contacts resist it in the same step. The push falls off to zero at the radius, is radial (no upward bias and no shock shell), and has a small off-center angular kick, hashed from the body's slot, that makes the blocks tumble. The immobile bottom row and the ground do not move. The explosion has no visual or audio effect. While the simulation is paused, the explosion waits for the next step (**Step** or **Space**). At most 16 explosions are applied per step.
+
+## Throw
+
+In throw mode the first left click casts a ray from the center of the camera, on the GPU, like an explosion. When the hit is back, the demo finds the block whose box is at the hit point and selects it, and with it every block that is joined to it by joints that have not fractured (it reads the intact joints back once, `AvbdConstraintBuffers.ReadIntactJointLinks`, and walks the joint graph on the CPU). The selection is drawn in green. The status line under the Speed slider says how many blocks are selected. A shot that is hit is selected on its own.
+
+The next left click throws the selection: every selected body is put in front of the camera (the whole group keeps its arrangement and the rotation of every block, and its farthest block is at least 0.6 m ahead of the camera, like a shot) and gets the velocity *Speed* (5 to 200 m/s) along the line of sight. Another click selects again. Leaving the mode, a Reset or removing the selected shot drops the selection.
+
+An immobile block (the ground, the bottom row of a wall) is never selected, and the search does not go through it. A group that is still joined to one of them is selected, but it cannot be thrown: the joints would pull it back, so the click says so. A piece that has broken off the wall can be thrown. With the group so far from where it was, it may start inside other blocks (a wall behind it, for example), which then push it apart.
 
 ## Grab
 

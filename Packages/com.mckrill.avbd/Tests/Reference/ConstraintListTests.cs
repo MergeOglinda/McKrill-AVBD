@@ -81,6 +81,37 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void Gpu_ReadIntactJointLinks_ListsTheIntactJointsOfTwoBodiesOnly()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 8))
+            {
+                BodyHandle a = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 0f, 0f)));
+                BodyHandle b = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(1.5f, 0f, 0f)));
+                BodyHandle c = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(3f, 0f, 0f)));
+
+                ConstraintRecord ab = ConstraintRecordFactory.Joint(
+                    (uint)a.Slot, (uint)b.Slot, float3.zero, float3.zero, float.PositiveInfinity, 0f, float.PositiveInfinity, 1f);
+                ConstraintRecord bc = ConstraintRecordFactory.Joint(
+                    (uint)b.Slot, (uint)c.Slot, float3.zero, float3.zero, float.PositiveInfinity, 0f, float.PositiveInfinity, 1f);
+                ConstraintRecord broken = ConstraintRecordFactory.Joint(
+                    (uint)a.Slot, (uint)c.Slot, float3.zero, float3.zero, float.PositiveInfinity, 0f, float.PositiveInfinity, 1f);
+                broken.ident.z |= (uint)ConstraintFlags.Broken;
+                constraints.AddRecord(ab);
+                constraints.AddRecord(broken);
+                constraints.AddRecord(bc);
+                constraints.AddJoint(BodyHandle.Invalid, a, new float3(0f, 0f, 2f), float3.zero); // to the world: not a link between bodies
+                constraints.AddSpring(a, c, float3.zero, float3.zero, 10f);                        // a spring is not a joint
+
+                var links = new System.Collections.Generic.List<int2>();
+                Assert.AreEqual(2, constraints.ReadIntactJointLinks(links), "the joints added since the last Rebuild are uploaded first");
+                Assert.AreEqual(new int2(a.Slot, b.Slot), links[0]);
+                Assert.AreEqual(new int2(b.Slot, c.Slot), links[1]);
+            }
+        }
+
+        [Test]
         public void Gpu_Lists_WithContacts_MatchTheOracle_EveryStep()
         {
             RequireCompute();
