@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Turns an STL mesh into a solid set of voxels and writes them, with the joints between neighboring voxels, as JSON for Unity and the AVBD package.
+"""Turns an STL or OBJ mesh into a solid set of voxels and writes them, with the joints between neighboring voxels, as JSON for Unity and the AVBD package.
 
     python3 Tools/Voxelize/voxelize_stl.py model.stl -o model.voxels.json --voxel-size 0.1
     python3 Tools/Voxelize/voxelize_stl.py model.stl -o model.voxels.json --resolution 64 --zup-to-yup
+    python3 Tools/Voxelize/voxelize_stl.py model.obj -o model.voxels.json --voxel-size 0.1
+
+The input is a binary or ASCII STL, or a Wavefront OBJ; the file extension (.obj, otherwise STL) tells which.
 
 The grid is given either by the edge length of a voxel (--voxel-size, in the units of the output, that is of the STL times --scale) or by the number of
 voxels along the longest side of the mesh (--resolution). The grid starts at the minimum corner of the mesh.
@@ -23,7 +26,8 @@ voxel centers, which is where the faces meet for the 6-neighborhood.
 Output (JSON, see README.md for the format): the grid (origin, voxel size, dimensions), the voxel indices as one flat list of (i, j, k) triples, and the
 joints as one flat list of pairs of voxel numbers (positions in the voxel list). The center of voxel (i, j, k) is origin + (i + 0.5, j + 0.5, k + 0.5) * voxelSize.
 
-Needs Python 3 and numpy. Reads binary and ASCII STL.
+Needs Python 3 and numpy. Reads binary and ASCII STL and Wavefront OBJ (vertices and faces only: polygons are split into triangles as a fan, which is right for
+the usual triangles and convex quads; normals, texture coordinates, materials, groups and objects are ignored, so all objects of a file become one mesh).
 """
 import argparse
 import json
@@ -63,6 +67,56 @@ def read_stl(path):
     if len(numbers) % 3 != 0:
         raise ValueError(path + ": the number of vertices is not a multiple of 3")
     return np.array(numbers, dtype=np.float64).reshape(-1, 3, 3)
+
+
+def read_obj(path):
+    """Returns the triangles of a Wavefront OBJ file as a float64 array of shape (T, 3, 3): triangle, vertex, xyz.
+
+    Only the vertices (v) and the faces (f; lines, points, normals, texture coordinates and the rest are skipped) are read. A face vertex is `v`, `v/vt`, `v//vn` or `v/vt/vn`; an
+    index is 1-based, or negative to count back from the last vertex defined so far. A polygon with more than three corners is split into a fan.
+    """
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    text = text.replace("\\\r\n", " ").replace("\\\n", " ")  # a line that ends with a backslash goes on in the next one
+
+    vertices = []
+    triangles = []
+    for number, line in enumerate(text.splitlines(), 1):
+        line = line.split("#", 1)[0].split()
+        if not line:
+            continue
+        if line[0] == "v":
+            if len(line) < 4:
+                raise ValueError("%s, line %d: a vertex needs three numbers" % (path, number))
+            try:
+                vertices.append([float(line[1]), float(line[2]), float(line[3])])
+            except ValueError:
+                raise ValueError("%s, line %d: a vertex has a coordinate that is not a number" % (path, number))
+        elif line[0] == "f":
+            if len(line) < 4:
+                raise ValueError("%s, line %d: a face needs at least three vertices" % (path, number))
+            corners = []
+            for token in line[1:]:
+                try:
+                    index = int(token.split("/", 1)[0])
+                except ValueError:
+                    raise ValueError("%s, line %d: '%s' is not a vertex index" % (path, number, token))
+                index = index - 1 if index > 0 else len(vertices) + index
+                if index < 0 or index >= len(vertices):
+                    raise ValueError("%s, line %d: the face refers to vertex %s, which is not defined (yet)" % (path, number, token.split("/", 1)[0]))
+                corners.append(index)
+            for k in range(1, len(corners) - 1):
+                triangles.append((corners[0], corners[k], corners[k + 1]))
+    if not triangles:
+        raise ValueError(path + ": no faces found (not an OBJ file, or one without faces)")
+    return np.array(vertices, dtype=np.float64)[np.array(triangles, dtype=np.int64)]
+
+
+def read_mesh(path):
+    """Reads the triangles of a mesh file: a Wavefront OBJ if the name ends with .obj (any case), otherwise an STL (binary or ASCII)."""
+    if os.path.splitext(path)[1].lower() == ".obj":
+        return read_obj(path)
+    return read_stl(path)
 
 
 def transform(triangles, scale, zup_to_yup):
@@ -383,21 +437,21 @@ def write_json(path, source, origin, voxel_size, dims, voxels, joints, connectiv
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__.split("\n", 1)[1])
-    p.add_argument("stl", help="the STL file (binary or ASCII)")
-    p.add_argument("-o", "--output", help="the JSON file to write (default: the STL's name with .voxels.json)")
+    p.add_argument("mesh", help="the mesh file: an STL (binary or ASCII) or a Wavefront OBJ (.obj)")
+    p.add_argument("-o", "--output", help="the JSON file to write (default: the mesh file's name with .voxels.json)")
     size = p.add_mutually_exclusive_group(required=True)
     size.add_argument("--voxel-size", type=float, help="edge length of a voxel, in the output units")
     size.add_argument("--resolution", type=int, help="number of voxels along the longest side of the mesh")
     p.add_argument("--surface", choices=("center", "touch"), default="center", help="solid voxels: center inside the mesh (default), or touching or inside it")
     p.add_argument("--connectivity", type=int, choices=(6, 18, 26), default=6, help="neighbors that are joined: 6 (faces, default), 18 (+ edges), 26 (+ corners)")
-    p.add_argument("--scale", type=float, default=1.0, help="factor applied to the mesh first (for example 0.001 for an STL in millimeters, to get meters)")
+    p.add_argument("--scale", type=float, default=1.0, help="factor applied to the mesh first (for example 0.001 for a mesh in millimeters, to get meters)")
     p.add_argument("--zup-to-yup", action="store_true", help="rotate the mesh from a z-up tool's frame into Unity's y-up frame: (x, y, z) -> (x, z, -y)")
     p.add_argument("--max-cells", type=int, default=200_000_000, help="refuse a grid with more cells than this (with a margin), default 200 million")
     args = p.parse_args(argv)
 
-    output = args.output or os.path.splitext(args.stl)[0] + ".voxels.json"
+    output = args.output or os.path.splitext(args.mesh)[0] + ".voxels.json"
     try:
-        triangles = transform(read_stl(args.stl), args.scale, args.zup_to_yup)
+        triangles = transform(read_mesh(args.mesh), args.scale, args.zup_to_yup)
         if not np.all(np.isfinite(triangles)):
             raise ValueError("the mesh has vertices that are not finite numbers")
         open_edges = open_edge_count(triangles)
@@ -413,11 +467,11 @@ def main(argv=None):
     if len(voxels) == 0:
         print("warning: no voxel is solid: the voxel size is too large for this mesh (try a smaller one, or --surface touch)", file=sys.stderr)
 
-    write_json(output, args.stl, origin, voxel_size, solid.shape, voxels, joints, args.connectivity, args.surface)
+    write_json(output, args.mesh, origin, voxel_size, solid.shape, voxels, joints, args.connectivity, args.surface)
 
     mesh_vol = mesh_volume(triangles)
     voxel_vol = len(voxels) * voxel_size ** 3
-    print("%s: %d triangles, grid %d x %d x %d, voxel size %.6g" % (os.path.basename(args.stl), len(triangles), *solid.shape, voxel_size))
+    print("%s: %d triangles, grid %d x %d x %d, voxel size %.6g" % (os.path.basename(args.mesh), len(triangles), *solid.shape, voxel_size))
     print("%d voxels, %d joints (%d-neighborhood); voxel volume %.6g, mesh volume %.6g%s" % (
         len(voxels), len(joints), args.connectivity, voxel_vol, mesh_vol, " (%.1f%%)" % (100.0 * voxel_vol / mesh_vol) if mesh_vol > 0 else ""))
     print("written to %s" % output)

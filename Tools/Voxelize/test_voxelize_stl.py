@@ -67,6 +67,16 @@ def write_ascii(path, triangles):
         f.write("endsolid test\n")
 
 
+def write_obj(path, triangles):
+    with open(path, "w") as f:
+        f.write("# test\n")
+        for t in triangles:
+            for v in t:
+                f.write("v %.17g %.17g %.17g\n" % tuple(v))
+        for n in range(len(triangles)):
+            f.write("f %d %d %d\n" % (3 * n + 1, 3 * n + 2, 3 * n + 3))
+
+
 class VoxelizerTests(unittest.TestCase):
     def test_reads_binary_and_ascii_alike(self):
         mesh = icosphere(1.0, 1).astype(np.float32).astype(np.float64)
@@ -224,6 +234,68 @@ class VoxelizerTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()), redirect_stderr(missing):
                 self.assertEqual(vox.main([os.path.join(d, "nothing.stl"), "--resolution", "8"]), 1)
             self.assertIn("error", missing.getvalue())
+
+    # ---- OBJ input ----
+
+    def test_reads_an_obj_with_the_face_forms_comments_quads_and_negative_indices(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.obj")
+            with open(path, "w") as f:
+                f.write("# a comment\nmtllib m.mtl\no thing\nv 0 0 0\nv 1 0 0 1.0\nv 1 1 0\nv 0 1 0 # trailing comment\nvt 0 0\nvn 0 0 1\ng part\ns off\n"
+                        "f 1/1/1 2/1/1 3/1/1 4/1/1\n"   # a quad: two triangles
+                        "f -4//1 -3//1 \\\n -2//1\n"    # negative indices, v//vn, a line that goes on
+                        "l 1 2\np 3\nusemtl x\n")
+            tris = vox.read_obj(path)
+            self.assertEqual(tris.shape, (3, 3, 3))
+            np.testing.assert_array_equal(tris[0], [[0, 0, 0], [1, 0, 0], [1, 1, 0]])
+            np.testing.assert_array_equal(tris[1], [[0, 0, 0], [1, 1, 0], [0, 1, 0]])
+            np.testing.assert_array_equal(tris[2], [[0, 0, 0], [1, 0, 0], [1, 1, 0]])
+
+    def test_an_obj_is_read_when_the_name_ends_with_obj_in_any_case_and_an_stl_otherwise(self):
+        mesh = box_mesh((0, 0, 0), (1, 2, 3))
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("a.obj", "b.OBJ"):
+                write_obj(os.path.join(d, name), mesh)
+                np.testing.assert_allclose(vox.read_mesh(os.path.join(d, name)), mesh, atol=1e-9)
+            write_binary(os.path.join(d, "c.stl"), mesh)
+            np.testing.assert_allclose(vox.read_mesh(os.path.join(d, "c.stl")), mesh, atol=1e-6)
+
+    def test_an_obj_and_an_stl_of_the_same_mesh_give_the_same_voxels(self):
+        mesh = icosphere(1.0, 2).astype(np.float32).astype(np.float64)
+        with tempfile.TemporaryDirectory() as d:
+            write_obj(os.path.join(d, "ball.obj"), mesh)
+            write_binary(os.path.join(d, "ball.stl"), mesh)
+            from_obj = vox.voxelize(vox.read_mesh(os.path.join(d, "ball.obj")), voxel_size=0.2)
+            from_stl = vox.voxelize(vox.read_mesh(os.path.join(d, "ball.stl")), voxel_size=0.2)
+            np.testing.assert_array_equal(from_obj[0], from_stl[0])
+            np.testing.assert_allclose(from_obj[1], from_stl[1], atol=1e-6)
+
+    def test_a_bad_obj_is_refused_with_the_line_number(self):
+        with tempfile.TemporaryDirectory() as d:
+            for text, expected in (("v 0 0 0\nv 1 0 0\nf 1 2 3\n", "line 3"),          # vertex 3 does not exist
+                                   ("v 0 0 0\nv 1 0\n", "line 2"),                      # a vertex with two numbers
+                                   ("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 x\n", "line 4"),  # not an index
+                                   ("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2\n", "line 4"),    # two corners
+                                   ("v 0 0 0\nv 1 0 0\nv 0 1 0\n", "no faces")):
+                path = os.path.join(d, "bad.obj")
+                with open(path, "w") as f:
+                    f.write(text)
+                with self.assertRaises(ValueError) as caught:
+                    vox.read_obj(path)
+                self.assertIn(expected, str(caught.exception))
+
+    def test_the_command_line_voxelizes_an_obj(self):
+        mesh = box_mesh((0, 0, 0), (1, 1, 1))
+        with tempfile.TemporaryDirectory() as d:
+            obj = os.path.join(d, "box.obj")
+            write_obj(obj, mesh)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(vox.main([obj, "--voxel-size", "0.25"]), 0)
+            with open(os.path.join(d, "box.voxels.json")) as f:
+                data = json.load(f)
+            self.assertEqual(data["voxelCount"], 64)
+            self.assertEqual(data["gridDimensions"], [4, 4, 4])
+            self.assertEqual(data["source"], "box.obj")
 
 
 if __name__ == "__main__":
