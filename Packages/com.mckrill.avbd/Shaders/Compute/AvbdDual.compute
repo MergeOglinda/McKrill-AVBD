@@ -13,7 +13,7 @@
 //                 because only a hard row stores a multiplier.
 //
 // One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
-// ordering, coloring or atomics are needed. Springs have no state and are skipped.
+// ordering, coloring or atomics are needed. Springs have no state and are skipped. Dual stores only the words of the record that it changed.
 // DualContact is the dual update of the contacts, one thread per slot of the manifold pool that has ever been used (below the pool's high-water
 // mark; see ContactLayout), which updates the points of its pair: a free slot skips. It is dispatched indirectly with arguments the narrow phase
 // wrote, so the host never needs the number of manifolds. A contact's warm start is part of the narrow phase (AvbdNarrowphase.compute).
@@ -149,13 +149,15 @@ void Dual(uint3 id : SV_DispatchThreadID)
 
     float4 rest = float4(0.0, 0.0, 0.0, 1.0);
 #if defined(AVBD_PLASTIC_JOINTS)
-    PlasticRecord plastic = (PlasticRecord)0;
+    // Of the 64 B plastic record only the limits (every plastic joint) and the rest rotation (an angular one) are read here: restStart and the anchor origin
+    // (reserved) are read in the branches that need them, which a joint takes only in the step it breaks or yields, so most calls read half the record.
+    float4 limits = float4(0.0, 0.0, 0.0, 0.0); // x = angular yield, y = bend limit, z = linear yield, w = stretch limit
     bool isPlastic = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) != 0u;
     if (flags & (AVBD_CONSTRAINT_FLAG_PLASTIC | AVBD_CONSTRAINT_FLAG_PLASTIC_LIN))
     {
-        plastic = _Plastic[c.ident.w];
+        limits = _Plastic[c.ident.w].limits;
         if (isPlastic)
-            rest = plastic.rest;
+            rest = _Plastic[c.ident.w].rest;
     }
     bool yielded = false;
     bool yieldedLin = false;
@@ -185,11 +187,12 @@ void Dual(uint3 id : SV_DispatchThreadID)
         // moves below). A multiplier above the fracture threshold does not yield: the joint breaks.
         if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC_LIN)
         {
-            float force = length(lambdaLin);
-            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && force > c.reserved.x;
-            if (force > plastic.limits.z && !fractures)
+            // Squared norms: no square root unless the row yields.
+            float forceSq = dot(lambdaLin, lambdaLin);
+            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && forceSq > c.reserved.x * c.reserved.x;
+            if (forceSq > limits.z * limits.z && !fractures)
             {
-                lambdaLin *= plastic.limits.z / force;
+                lambdaLin *= limits.z * rsqrt(forceSq);
                 yieldedLin = true;
             }
         }
@@ -221,11 +224,11 @@ void Dual(uint3 id : SV_DispatchThreadID)
         // A multiplier above the fracture threshold does not yield: the joint breaks.
         if (isPlastic)
         {
-            float force = length(lambdaAng);
-            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && force > c.c0Ang.w;
-            if (force > plastic.limits.x && !fractures)
+            float forceSq = dot(lambdaAng, lambdaAng);
+            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && forceSq > c.c0Ang.w * c.c0Ang.w;
+            if (forceSq > limits.x * limits.x && !fractures)
             {
-                lambdaAng *= plastic.limits.x / force;
+                lambdaAng *= limits.x * rsqrt(forceSq);
                 yielded = true;
             }
         }
@@ -242,7 +245,7 @@ void Dual(uint3 id : SV_DispatchThreadID)
     {
         rest = AvbdJointRestFromPose(rotA, rotB);
         if (flags & AVBD_CONSTRAINT_FLAG_BEND_BREAK)
-            bentOff = AvbdJointBend(plastic.restStart, rest) > plastic.limits.y;
+            bentOff = AvbdJointBend(_Plastic[c.ident.w].restStart, rest) > limits.y;
     }
     if (yieldedLin)
     {
@@ -251,15 +254,16 @@ void Dual(uint3 id : SV_DispatchThreadID)
         float3 moved = hasA ? AvbdQuatRotate(AvbdQuatConjugate(rotA), anchorB - posA) : anchorB;
         c.anchorA = float4(moved, c.anchorA.w);
         if (flags & AVBD_CONSTRAINT_FLAG_STRETCH_BREAK)
-            stretchedOff = length(moved - plastic.reserved.xyz) > plastic.limits.w;
+            stretchedOff = length(moved - _Plastic[c.ident.w].reserved.xyz) > limits.w;
         c.c0Lin = float4(0.0, 0.0, 0.0, c.c0Lin.w); // the stabilization reference of this step must not pull the stretch back (the torque arm stays)
     }
 #endif
 
     // Fracture tests of the two rows, and the bend and stretch limits of a plastic joint
-    if (bentOff || stretchedOff
+    bool breaks = bentOff || stretchedOff
         || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && dot(lambdaAng, lambdaAng) > c.c0Ang.w * c.c0Ang.w)
-        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && dot(lambdaLin, lambdaLin) > c.reserved.x * c.reserved.x))
+        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && dot(lambdaLin, lambdaLin) > c.reserved.x * c.reserved.x);
+    if (breaks)
     {
         penaltyLin = float3(0.0, 0.0, 0.0);
         penaltyAng = float3(0.0, 0.0, 0.0);
@@ -277,11 +281,29 @@ void Dual(uint3 id : SV_DispatchThreadID)
     }
 #endif
 
+    // Write back only what this stage can have changed. The four state words (the penalties and multipliers, which are next to each other in the record)
+    // change in every call; the others only in the call in which a joint breaks (the flags), yields in its angle (C0 of the angular row) or yields in its
+    // stretch (the anchor on A and C0 of the linear row). Storing the whole 160 B record would write the six unchanged words again on every call of every
+    // joint, which is more than half of what this kernel writes.
     c.penaltyLin.xyz = penaltyLin;
     c.penaltyAng.xyz = penaltyAng;
     c.lambdaLin.xyz = lambdaLin;
     c.lambdaAng.xyz = lambdaAng;
-    _Constraints[index] = c;
+    _Constraints[index].penaltyLin = c.penaltyLin;
+    _Constraints[index].penaltyAng = c.penaltyAng;
+    _Constraints[index].lambdaLin = c.lambdaLin;
+    _Constraints[index].lambdaAng = c.lambdaAng;
+    if (breaks)
+        _Constraints[index].ident.z = c.ident.z;
+#if defined(AVBD_PLASTIC_JOINTS)
+    if (yielded)
+        _Constraints[index].c0Ang = c.c0Ang;
+    if (yieldedLin)
+    {
+        _Constraints[index].anchorA = c.anchorA;
+        _Constraints[index].c0Lin = c.c0Lin;
+    }
+#endif
 }
 
 // Dual update of a manifold (the reference solver's Manifold.UpdateDual): one thread per manifold slot, which walks the points of its pair. It
