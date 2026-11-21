@@ -11,6 +11,9 @@ namespace McKrill.Avbd.Samples
     ///
     /// Voxel <c>n</c> is the box of edge <see cref="voxelSize"/> centered at <c>origin + (i + 0.5, j + 0.5, k + 0.5) * voxelSize</c>, where <c>(i, j, k)</c> are
     /// the three integers at <c>voxels[3 * n]</c>. A joint is a pair of voxel numbers at <c>joints[2 * m]</c>.
+    ///
+    /// A file made from a mesh with colors also has the colors of the voxels on the surface: <see cref="colorVoxels"/> lists their voxel numbers, and
+    /// <see cref="colors"/> has their red, green and blue (0 to 255, sRGB) as three integers each, in the same order. The voxels that are not listed have no color.
     /// </summary>
     [Serializable]
     public sealed class VoxelMeshData
@@ -30,6 +33,31 @@ namespace McKrill.Avbd.Samples
         public int jointCount;
         public int[] voxels;
         public int[] joints;
+        public int colorCount;      // 0 if the file has no colors (the three fields are then absent)
+        public int[] colorVoxels;   // the voxel numbers of the colored voxels, ascending
+        public int[] colors;        // 3 * colorCount integers, 0 to 255
+
+        /// <summary>True if the file has colors for some of its voxels.</summary>
+        public bool HasColors => colorCount > 0 && colorVoxels != null && colors != null;
+
+        /// <summary>The color (sRGB) of the <paramref name="k"/>-th colored voxel, the voxel with the number <c>colorVoxels[k]</c>.</summary>
+        public Color32 ColorAt(int k)
+        {
+            return new Color32((byte)colors[3 * k], (byte)colors[3 * k + 1], (byte)colors[3 * k + 2], 255);
+        }
+
+        /// <summary>For every voxel, the index k of its color (see <see cref="ColorAt"/>), or -1 if it has none. Null if the file has no colors.</summary>
+        public int[] ColorIndexOfVoxels()
+        {
+            if (!HasColors)
+                return null;
+            var index = new int[voxelCount];
+            for (int n = 0; n < index.Length; n++)
+                index[n] = -1;
+            for (int k = 0; k < colorCount; k++)
+                index[colorVoxels[k]] = k;
+            return index;
+        }
 
         /// <summary>Center of voxel <paramref name="number"/> in the file's own frame.</summary>
         public float3 VoxelCenter(int number)
@@ -133,6 +161,22 @@ namespace McKrill.Avbd.Samples
             for (int m = 0; m < 2 * jointCount; m++)
                 if (joints[m] < 0 || joints[m] >= voxelCount)
                     return "joint " + m / 2 + " refers to a voxel that does not exist";
+
+            if (colorCount < 0 || colorCount > voxelCount)
+                return "the color count is not between 0 and the number of voxels";
+            if (colorCount > 0)
+            {
+                if (colorVoxels == null || colorVoxels.Length != colorCount)
+                    return "the colorVoxels array does not have colorCount (" + colorCount + ") integers";
+                if (colors == null || colors.Length != 3 * colorCount)
+                    return "the colors array does not have 3 * colorCount (" + 3 * colorCount + ") integers";
+                for (int k = 0; k < colorCount; k++)
+                    if (colorVoxels[k] < 0 || colorVoxels[k] >= voxelCount)
+                        return "color " + k + " belongs to a voxel that does not exist";
+                for (int m = 0; m < 3 * colorCount; m++)
+                    if (colors[m] < 0 || colors[m] > 255)
+                        return "color " + m / 3 + " has a value outside 0 to 255";
+            }
             return null;
         }
     }

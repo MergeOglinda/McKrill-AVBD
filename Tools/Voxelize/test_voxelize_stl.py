@@ -11,6 +11,11 @@ from contextlib import redirect_stderr, redirect_stdout
 
 import numpy as np
 
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voxelize_stl as vox  # noqa: E402
 
@@ -296,6 +301,195 @@ class VoxelizerTests(unittest.TestCase):
             self.assertEqual(data["voxelCount"], 64)
             self.assertEqual(data["gridDimensions"], [4, 4, 4])
             self.assertEqual(data["source"], "box.obj")
+
+    # ---- colors ----
+
+    def run_cli(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = vox.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def load(self, path):
+        with open(path) as f:
+            return json.load(f)
+
+    def test_the_closest_point_of_a_triangle_agrees_with_a_dense_sampling(self):
+        rng = np.random.default_rng(7)
+        a, b, c, p = (rng.normal(size=(150, 3)) for _ in range(4))
+        bary, dist = vox.closest_barycentric(p, a, b, c)
+        np.testing.assert_allclose(bary.sum(axis=1), 1.0, atol=1e-12)
+        self.assertTrue(np.all(bary >= -1e-12))
+        grid = np.array([(x / 50.0, y / 50.0) for x in range(51) for y in range(51 - x)])
+        for i in range(len(a)):
+            pts = a[i] + grid[:, :1] * (b[i] - a[i]) + grid[:, 1:] * (c[i] - a[i])
+            self.assertLessEqual(dist[i], ((pts - p[i]) ** 2).sum(axis=1).min() + 1e-12)
+
+    def test_vertex_colors_color_the_surface_voxels_only(self):
+        mesh = box_mesh((0, 0, 0), (1, 1, 1))
+        with tempfile.TemporaryDirectory() as d:
+            obj = os.path.join(d, "box.obj")
+            with open(obj, "w") as f:   # a color per face direction: +x red, -x green, the others gray
+                for t in mesh:
+                    n = np.cross(t[1] - t[0], t[2] - t[0])
+                    color = (1, 0, 0) if n[0] > 0.5 else (0, 1, 0) if n[0] < -0.5 else (0.5, 0.5, 0.5)
+                    for v in t:
+                        f.write("v %.9g %.9g %.9g %g %g %g\n" % (*v, *color))
+                for n in range(len(mesh)):
+                    f.write("f %d %d %d\n" % (3 * n + 1, 3 * n + 2, 3 * n + 3))
+            out = os.path.join(d, "box.json")
+            code, stdout, _ = self.run_cli(obj, "-o", out, "--voxel-size", "0.25")
+            self.assertEqual(code, 0)
+            self.assertIn("56 surface voxels have a color", stdout)   # 4 x 4 x 4 voxels, of which 2 x 2 x 2 are inside
+            data = self.load(out)
+            self.assertEqual(data["colorCount"], 56)
+            numbers = np.array(data["colorVoxels"])
+            rgb = np.array(data["colors"]).reshape(-1, 3)
+            voxels = np.array(data["voxels"]).reshape(-1, 3)
+            self.assertEqual(len(numbers), len(rgb))
+            self.assertTrue(np.all(np.diff(numbers) > 0))
+            colored = voxels[numbers]
+            on_surface = np.any((colored == 0) | (colored == 3), axis=1)
+            self.assertTrue(on_surface.all(), "a voxel below the surface got a color")
+            inner = set(map(tuple, voxels[[n for n in range(len(voxels)) if n not in set(numbers.tolist())]].tolist()))
+            self.assertEqual(inner, {(i, j, k) for i in (1, 2) for j in (1, 2) for k in (1, 2)})
+            color_of = {tuple(v): tuple(c) for v, c in zip(colored.tolist(), rgb.tolist())}
+            self.assertEqual(color_of[(3, 1, 1)], (255, 0, 0))
+            self.assertEqual(color_of[(0, 2, 1)], (0, 255, 0))
+            self.assertEqual(color_of[(1, 3, 1)], (128, 128, 128))
+
+    def test_a_material_color_is_the_color_of_its_faces(self):
+        mesh = box_mesh((0, 0, 0), (1, 1, 1))
+        with tempfile.TemporaryDirectory() as d:
+            write_obj(os.path.join(d, "box.obj"), mesh)
+            with open(os.path.join(d, "box.obj")) as f:
+                text = f.read()
+            with open(os.path.join(d, "box.obj"), "w") as f:
+                f.write("mtllib box.mtl\nusemtl orange\n" + text)
+            with open(os.path.join(d, "box.mtl"), "w") as f:
+                f.write("newmtl orange\nKa 0 0 0\nKd 1.0 0.5 0.0\nmap_Bump nothing.png\n")
+            out = os.path.join(d, "box.json")
+            self.assertEqual(self.run_cli(os.path.join(d, "box.obj"), "-o", out, "--voxel-size", "0.25")[0], 0)
+            data = self.load(out)
+            self.assertEqual(data["colorCount"], 56)
+            self.assertEqual({tuple(c) for c in np.array(data["colors"]).reshape(-1, 3).tolist()}, {(255, 128, 0)})
+
+    def test_faces_without_a_material_have_no_color_and_the_rest_keep_theirs(self):
+        mesh = box_mesh((0, 0, 0), (1, 1, 1))
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "box.obj"), "w") as f:
+                f.write("mtllib box.mtl\n")
+                for t in mesh:
+                    for v in t:
+                        f.write("v %.9g %.9g %.9g\n" % tuple(v))
+                for n, t in enumerate(mesh):
+                    if np.cross(t[1] - t[0], t[2] - t[0])[0] > 0.5:   # only the +x face has a material
+                        f.write("usemtl red\n")
+                    else:
+                        f.write("usemtl none\n")
+                    f.write("f %d %d %d\n" % (3 * n + 1, 3 * n + 2, 3 * n + 3))
+            with open(os.path.join(d, "box.mtl"), "w") as f:
+                f.write("newmtl red\nKd 1 0 0\nnewmtl none\nKa 0 0 0\n")   # a material without a diffuse color
+            out = os.path.join(d, "box.json")
+            self.assertEqual(self.run_cli(os.path.join(d, "box.obj"), "-o", out, "--voxel-size", "0.25")[0], 0)
+            data = self.load(out)
+            voxels = np.array(data["voxels"]).reshape(-1, 3)[np.array(data["colorVoxels"])]
+            self.assertTrue(np.all(voxels[:, 0] == 3))             # only voxels on the +x face (and its edges, if they are closest to it)
+            self.assertIn((3, 1, 1), set(map(tuple, voxels.tolist())))
+            self.assertLess(data["colorCount"], 56)
+
+    @unittest.skipIf(Image is None, "needs Pillow")
+    def test_a_texture_is_sampled_at_the_closest_point_of_the_surface(self):
+        mesh = box_mesh((0, 0, 0), (1, 1, 1))
+        with tempfile.TemporaryDirectory() as d:
+            texture = np.zeros((4, 4, 3), dtype=np.uint8)     # quadrants: top left red, top right green, bottom left blue, bottom right white
+            texture[:2, :2] = (255, 0, 0)
+            texture[:2, 2:] = (0, 255, 0)
+            texture[2:, :2] = (0, 0, 255)
+            texture[2:, 2:] = (255, 255, 255)
+            Image.fromarray(texture).save(os.path.join(d, "tex.png"))
+            with open(os.path.join(d, "box.mtl"), "w") as f:
+                f.write("newmtl tex\nKd 0.2 0.2 0.2\nmap_Kd tex.png\n")
+            with open(os.path.join(d, "box.obj"), "w") as f:
+                f.write("mtllib box.mtl\nusemtl tex\n")
+                for t in mesh:
+                    for v in t:
+                        f.write("v %.9g %.9g %.9g\n" % tuple(v))
+                faces = []
+                uv_count = 0
+                for n, t in enumerate(mesh):
+                    if np.all(t[:, 0] > 0.999):                    # the +x face: u = y, v = z
+                        for v in t:
+                            f.write("vt %.9g %.9g\n" % (v[1], v[2]))
+                        faces.append("f %d/%d %d/%d %d/%d\n" % (3 * n + 1, uv_count + 1, 3 * n + 2, uv_count + 2, 3 * n + 3, uv_count + 3))
+                        uv_count += 3
+                    else:
+                        faces.append("f %d %d %d\n" % (3 * n + 1, 3 * n + 2, 3 * n + 3))
+                f.writelines(faces)
+            out = os.path.join(d, "box.json")
+            self.assertEqual(self.run_cli(os.path.join(d, "box.obj"), "-o", out, "--voxel-size", "0.25")[0], 0)
+            data = self.load(out)
+            voxels = np.array(data["voxels"]).reshape(-1, 3)[np.array(data["colorVoxels"])]
+            color_of = {tuple(v): tuple(c) for v, c in zip(voxels.tolist(), np.array(data["colors"]).reshape(-1, 3).tolist())}
+            self.assertEqual(color_of[(3, 1, 1)], (0, 0, 255))      # y, z small: bottom left of the image
+            self.assertEqual(color_of[(3, 2, 1)], (255, 255, 255))  # y large, z small: bottom right
+            self.assertEqual(color_of[(3, 1, 2)], (255, 0, 0))      # z large: the top of the image
+            self.assertEqual(color_of[(3, 2, 2)], (0, 255, 0))
+            # the faces that have no texture coordinates use the diffuse color of the material
+            self.assertEqual(color_of[(0, 1, 1)], (51, 51, 51))
+
+    def test_a_missing_texture_or_material_file_is_reported_and_the_diffuse_color_is_used(self):
+        mesh = box_mesh((0, 0, 0), (1, 1, 1))
+        with tempfile.TemporaryDirectory() as d:
+            write_obj(os.path.join(d, "box.obj"), mesh)
+            with open(os.path.join(d, "box.obj")) as f:
+                text = f.read()
+            with open(os.path.join(d, "box.obj"), "w") as f:
+                f.write("mtllib box.mtl other.mtl\nusemtl a\n" + text)
+            with open(os.path.join(d, "box.mtl"), "w") as f:
+                f.write("newmtl a\nKd 0 0 1\nmap_Kd gone.png\n")
+            out = os.path.join(d, "box.json")
+            code, _, err = self.run_cli(os.path.join(d, "box.obj"), "-o", out, "--voxel-size", "0.25")
+            self.assertEqual(code, 0)
+            self.assertIn("other.mtl", err)
+            self.assertIn("gone.png", err)
+            self.assertEqual({tuple(c) for c in np.array(self.load(out)["colors"]).reshape(-1, 3).tolist()}, {(0, 0, 255)})
+
+    def test_no_colors_without_color_in_the_file_or_with_no_colors(self):
+        mesh = box_mesh((0, 0, 0), (1, 1, 1))
+        with tempfile.TemporaryDirectory() as d:
+            write_obj(os.path.join(d, "plain.obj"), mesh)
+            write_binary(os.path.join(d, "plain.stl"), mesh)
+            for name in ("plain.obj", "plain.stl"):
+                out = os.path.join(d, name + ".json")
+                self.assertEqual(self.run_cli(os.path.join(d, name), "-o", out, "--voxel-size", "0.25")[0], 0)
+                data = self.load(out)
+                self.assertNotIn("colors", data)
+                self.assertNotIn("colorCount", data)
+            with open(os.path.join(d, "plain.obj")) as f:
+                plain = f.read()
+            with open(os.path.join(d, "red.obj"), "w") as f:
+                f.write("mtllib red.mtl\nusemtl r\n" + plain)
+            with open(os.path.join(d, "red.mtl"), "w") as f:
+                f.write("newmtl r\nKd 1 0 0\n")
+            out = os.path.join(d, "red.json")
+            self.assertEqual(self.run_cli(os.path.join(d, "red.obj"), "-o", out, "--voxel-size", "0.25", "--no-colors")[0], 0)
+            self.assertNotIn("colors", self.load(out))
+            self.assertEqual(self.run_cli(os.path.join(d, "red.obj"), "-o", out, "--voxel-size", "0.25")[0], 0)
+            self.assertIn("colors", self.load(out))
+
+    def test_vertex_colors_in_0_to_255_are_scaled(self):
+        with tempfile.TemporaryDirectory() as d:
+            mesh = box_mesh((0, 0, 0), (1, 1, 1))
+            with open(os.path.join(d, "b.obj"), "w") as f:
+                for t in mesh:
+                    for v in t:
+                        f.write("v %.9g %.9g %.9g 255 128 0\n" % tuple(v))
+                for n in range(len(mesh)):
+                    f.write("f %d %d %d\n" % (3 * n + 1, 3 * n + 2, 3 * n + 3))
+            out = os.path.join(d, "b.json")
+            self.assertEqual(self.run_cli(os.path.join(d, "b.obj"), "-o", out, "--voxel-size", "0.5")[0], 0)
+            self.assertEqual({tuple(c) for c in np.array(self.load(out)["colors"]).reshape(-1, 3).tolist()}, {(255, 128, 0)})
 
 
 if __name__ == "__main__":
