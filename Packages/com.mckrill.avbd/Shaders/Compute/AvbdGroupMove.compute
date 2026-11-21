@@ -4,8 +4,19 @@
 // bodies are moved. A position edit is a teleport like the SetPose edit: the step-start pose follows, so the solver does not take the jump for a motion.
 // A velocity edit is like SetVelocity: the previous linear velocity follows, so the adaptive warm start sees no acceleration.
 // Semantics are mirrored by Reference/Stages/CpuGroupMove.cs.
+//
+// Hold (HoldClear, HoldAccumulate, HoldCapture, HoldApply): keeps the centroid of a group at a point and the group's velocity at zero, again and again (a direct
+// grab). Move by a distance adds, it does not hold: a body that falls or is pushed during a step stays where the step left it, so a group that is moved by
+// the camera's distance every step sinks by gravity (g dt^2 a step). The hold takes the centroid of the group (the sum of the offsets from a reference point, as integers
+// in 1/1024 m, as the spring force fields do, so the sum does not depend on the order of the threads), captures it once (HoldCapture) and then moves every body of the
+// group by the same translation, so that the centroid is at anchor + offset, and sets the linear (also the previous) and the angular velocity to zero (HoldApply).
+// The group keeps its arrangement: all bodies get the same translation.
 
 #pragma kernel Move
+#pragma kernel HoldClear
+#pragma kernel HoldAccumulate
+#pragma kernel HoldCapture
+#pragma kernel HoldApply
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
@@ -13,6 +24,7 @@
 #define AVBD_MOVE_POSITION         1u
 #define AVBD_MOVE_LINEAR_VELOCITY  2u
 #define AVBD_MOVE_ANGULAR_VELOCITY 4u
+#define AVBD_HOLD_FIXED_POINT      1024
 
 RWStructuredBuffer<BodyStateRecord>  _BodyState;
 RWStructuredBuffer<BodyMotionRecord> _BodyMotion;
@@ -23,6 +35,11 @@ float4 _MoveTranslation; // xyz: added to the position (with AVBD_MOVE_POSITION)
 float4 _MoveLinear;      // xyz: the new linear velocity (with AVBD_MOVE_LINEAR_VELOCITY)
 float4 _MoveAngular;     // xyz: the new angular velocity (with AVBD_MOVE_ANGULAR_VELOCITY)
 uint4  _MoveControl;     // x: group mask, y: fields (AVBD_MOVE_*)
+
+RWStructuredBuffer<uint>   _HoldAccum;  // words 0..2: sum of (position - reference) in 1/AVBD_HOLD_FIXED_POINT m, as int; word 3: the number of bodies
+RWStructuredBuffer<float4> _HoldAnchor; // [0]: xyz the centroid that HoldCapture took, w = 1 if there was a group then (else 0)
+float4 _HoldReference; // xyz: the point the offsets are summed from (near the group, so that the sums stay small)
+float4 _HoldOffset;    // xyz: where the centroid is to be, relative to the anchor
 
 uint _Base;
 uint _Count; // slots to process: [0, _Count)
@@ -64,4 +81,81 @@ void Move(uint3 id : SV_DispatchThreadID)
             v.angularVel.xyz = _MoveAngular.xyz;
         _BodyMotion[slot] = v;
     }
+}
+
+// The bodies a hold acts on: the ones Move would move.
+bool HoldMember(uint slot)
+{
+    BodyMetaRecord meta = _BodyMeta[slot];
+    if (meta.ident.x & AVBD_BODY_FLAG_FREE)
+        return false;
+    if ((meta.ident.y & _MoveControl.x) == 0u)
+        return false;
+    return _BodyMass[slot].momentMass.w > 0.0;
+}
+
+[numthreads(1, 1, 1)]
+void HoldClear(uint3 id : SV_DispatchThreadID)
+{
+    _HoldAccum[0] = 0u;
+    _HoldAccum[1] = 0u;
+    _HoldAccum[2] = 0u;
+    _HoldAccum[3] = 0u;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void HoldAccumulate(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count || !HoldMember(slot))
+        return;
+
+    int3 offset = (int3)floor((_BodyState[slot].position.xyz - _HoldReference.xyz) * (float)AVBD_HOLD_FIXED_POINT + 0.5);
+    InterlockedAdd(_HoldAccum[0], asuint(offset.x));
+    InterlockedAdd(_HoldAccum[1], asuint(offset.y));
+    InterlockedAdd(_HoldAccum[2], asuint(offset.z));
+    InterlockedAdd(_HoldAccum[3], 1u);
+}
+
+[numthreads(1, 1, 1)]
+void HoldCapture(uint3 id : SV_DispatchThreadID)
+{
+    uint members = _HoldAccum[3];
+    if (members == 0u)
+    {
+        _HoldAnchor[0] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    float3 sum = float3(asint(_HoldAccum[0]), asint(_HoldAccum[1]), asint(_HoldAccum[2]));
+    _HoldAnchor[0] = float4(_HoldReference.xyz + sum / ((float)AVBD_HOLD_FIXED_POINT * (float)members), 1.0);
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void HoldApply(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count || !HoldMember(slot))
+        return;
+
+    uint members = _HoldAccum[3];
+    float4 anchor = _HoldAnchor[0];
+    if (members == 0u || anchor.w == 0.0)
+        return;
+
+    float3 sum = float3(asint(_HoldAccum[0]), asint(_HoldAccum[1]), asint(_HoldAccum[2]));
+    float3 centroid = _HoldReference.xyz + sum / ((float)AVBD_HOLD_FIXED_POINT * (float)members);
+    float3 translation = anchor.xyz + _HoldOffset.xyz - centroid;
+
+    // A teleport, like Move with a position: the step-start pose follows.
+    BodyStateRecord s = _BodyState[slot];
+    s.position.xyz += translation;
+    s.startPosition = s.position;
+    s.startRotation = s.rotation;
+    _BodyState[slot] = s;
+
+    BodyMotionRecord v = _BodyMotion[slot];
+    v.linearVel.xyz = float3(0.0, 0.0, 0.0);
+    v.prevLinearVel.xyz = float3(0.0, 0.0, 0.0);
+    v.angularVel.xyz = float3(0.0, 0.0, 0.0);
+    _BodyMotion[slot] = v;
 }
