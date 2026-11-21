@@ -37,7 +37,7 @@ The same as in the *GPU Fracture Wall Demo*, except for the volley (there is no 
 
 | Input | Action |
 | --- | --- |
-| Left click (outside the panels) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits; in grab mode, **hold** to grab the blocks around the point the ray hits and move them (the point stays at the center of the screen at the distance where it was grabbed) |
+| Left click (outside the panels) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits; in throw mode, click to select a voxel and every voxel joined to it, click again to throw them; in grab mode, **hold** to grab the blocks around the point the ray hits and move them (the point stays at the center of the screen at the distance where it was grabbed) |
 | Right drag | Look around |
 | `W` `A` `S` `D`, `Q` `E` | Move, down and up. `Shift` is three times faster |
 | Mouse wheel | Move forward and back |
@@ -46,12 +46,12 @@ The same as in the *GPU Fracture Wall Demo*, except for the volley (there is no 
 
 ## The panel
 
-The click mode buttons and their shot, explosion and grab settings, the solver's iterations and the joint settings are as in the fracture wall demo. The object and joint settings take effect on **Reset**, because the package cannot change a joint after it was added.
+The click mode buttons (Shot, Explosion, Throw and Grab) and their shot, explosion, throw and grab settings, the solver's iterations and the joint settings are as in the fracture wall demo. The object and joint settings take effect on **Reset**, because the package cannot change a joint after it was added.
 
 | Control | What it does |
 | --- | --- |
 | Objects (a panel of its own, top right of the screen) | One line for each file of the `Resources/JsonMeshImportDemo` folder: the number of voxels and joints, the size of the object and whether the file has a smooth surface, or why it was not loaded |
-| Explosion, Shot, Grab | The click mode. Grab has Radius (blocks around the hit point), Force (spring stiffness), Damping ratio and Offset gain, as in the fracture wall demo |
+| Shot, Explosion, Throw, Grab | The click mode. Grab has Radius (blocks around the hit point), the **Direct** toggle (place each block every frame at its own spot relative to the held point, with that point's velocity, so it can be thrown; no force, mass and inertia untouched) and, without Direct, Force (spring stiffness), Damping ratio and Offset gain, as in the fracture wall demo |
 | Smooth surface | Draw the surface blocks as their baked smooth pieces (takes effect on **Reset**). A file made without `--smooth` has no pieces and is drawn as cubes, which the objects list says ("no smooth surface in the file"). Only the drawing changes: the bodies, joints and collisions are the boxes either way |
 | Voxel mass | 0.01 to 10 kg (log scale), default 0.25 kg like a block of the fracture wall. The mass of every voxel; the density of an object follows from it and the size of its voxels |
 | Rigid joints, Joint stiffness, Fracture threshold | As in the fracture wall demo (defaults: stiffness 5e3, threshold 40). **They are the wall's numbers, not tuned for voxels**: the multiplier a joint sees depends on the voxel size and mass, so if nothing breaks lower the threshold or shoot harder, and if an object falls apart by itself raise it |
@@ -68,5 +68,9 @@ The click mode buttons and their shot, explosion and grab settings, the solver's
 - Every voxel is a body: the files that ship have 500 to 900 voxels each, and a finer grid grows with the cube of the resolution. The package's limits on bodies, joints and contact manifolds apply (the demo sizes its buffers from the files).
 - The shot size slider goes up to 2 m and shots are cubes.
 - Drawing is instanced and has **no shadows**, as in the fracture wall demo.
-- The smooth pieces are drawn at the size of the cell, the boxes are 1 cm smaller (at most 5%): neighbors of a broken-off block can overlap it visually by half a centimeter. A block's color is the same with and without the smooth surface, so the checker brightness of the voxels also shows on the smooth skin. The pieces cost triangles (about 40 to 50 per surface block in the shipped files; it follows the STL's resolution) and one more draw call; the file is larger (see `Tools/Voxelize/README.md`).
+- The smooth pieces are drawn at the size of the cell, the boxes are 1 cm smaller (at most 5%): neighbors of a broken-off block can overlap it visually by half a centimeter. The cube of a block that is drawn as a piece is still in the cube draw call with size 0 (it draws nothing; Throw's selection works on it and turns its piece green). A block's color is the same with and without the smooth surface, so the checker brightness of the voxels also shows on the smooth skin. The pieces cost triangles (about 40 to 50 per surface block in the shipped files; it follows the STL's resolution) and one more draw call; the file is larger (see `Tools/Voxelize/README.md`).
 - Written without a Unity editor: not compiled, not run, not measured.
+
+## Throw
+
+In throw mode the first left click casts a ray from the center of the camera on the GPU and selects the voxel it hits and every voxel joined to it by joints that have not fractured: a whole object while it is intact, one piece of it after it has broken. The selection is drawn in green. The next click throws it: the voxels are put in front of the camera, keeping their arrangement and rotation, and get the velocity of the *Speed* slider (5 to 200 m/s) along the line of sight. It works as in the fracture wall demo (see its README); the objects here are not joined to the ground, so any object can be thrown. Grab (below the other modes) is the fracture wall demo's, with its Direct style.

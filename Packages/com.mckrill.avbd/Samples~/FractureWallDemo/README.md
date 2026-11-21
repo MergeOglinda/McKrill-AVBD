@@ -17,7 +17,7 @@ The project needs a render pipeline that draws a `Universal Render Pipeline/Lit`
 
 | Input | Action |
 | --- | --- |
-| Left click (outside the panel) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits; in grab mode, hold the button to grab the blocks around the point the ray hits and drag them (see Grab) |
+| Left click (outside the panel) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits; in grab mode, hold the button to grab the blocks around the point the ray hits and drag them (see Grab); in throw mode, click to select a block and the blocks joined to it, click again to throw them (see Throw) |
 | Right drag | Look around |
 | `W` `A` `S` `D`, `Q` `E` | Move, down and up. `Shift` is three times faster |
 | Mouse wheel | Move forward and back |
@@ -31,7 +31,7 @@ The click mode button, the shot's speed, size and mass (or the explosion's radiu
 
 | Control | What it does |
 | --- | --- |
-| Explosion, Shot and Grab buttons | Switch what the left click does. The panel shows the Speed, Size and Mass of the shot, the Radius, Force and Depth of the explosion, or the Radius and Force of the grab, for the mode that is on (the other values are kept) |
+| Explosion, Shot, Grab and Throw buttons | Switch what the left click does. The panel shows the Speed, Size and Mass of the shot, the Radius, Force and Depth of the explosion, the Radius and Force of the grab, or the Speed of the throw, for the mode that is on (the other values are kept) |
 | Radius | 1 to 50 m. A block whose center is farther from the explosion than this is not touched |
 | Force | 0.1 to 1000 N s (log scale): the impulse at the center of the explosion. A body's velocity changes by this times a falloff `(1 - r/radius)^2` divided by its mass. The label shows the speed a default block (0.25 kg) at the center would get |
 | Depth | 0 to 20 m: how far behind the surface the camera ray hits the explosion goes off, along the ray. 0 is on the surface |
@@ -54,9 +54,19 @@ In explosion mode a left click casts a ray from the center of the camera. The ra
 
 The physics is `AvbdSolver.Explode`: a radial impulse applied in the next step's predict stage, so the joints and contacts resist it in the same step. The push falls off to zero at the radius, is radial (no upward bias and no shock shell), and has a small off-center angular kick, hashed from the body's slot, that makes the blocks tumble. The immobile bottom row and the ground do not move. The explosion has no visual or audio effect. While the simulation is paused, the explosion waits for the next step (**Step** or **Space**). At most 16 explosions are applied per step.
 
+## Throw
+
+In throw mode the first left click casts a ray from the center of the camera, on the GPU, like an explosion. When the hit is back, the demo finds the block whose box is at the hit point and selects it, and with it every block that is joined to it by joints that have not fractured (it reads the intact joints back once, `AvbdConstraintBuffers.ReadIntactJointLinks`, and walks the joint graph on the CPU). The selection is drawn in green. The status line under the Speed slider says how many blocks are selected. A shot that is hit is selected on its own.
+
+The next left click throws the selection: every selected body is put in front of the camera (the whole group keeps its arrangement and the rotation of every block, and its farthest block is at least 0.6 m ahead of the camera, like a shot) and gets the velocity *Speed* (5 to 200 m/s) along the line of sight. Another click selects again. Leaving the mode, a Reset or removing the selected shot drops the selection.
+
+An immobile block (the ground, the bottom row of a wall) is never selected, and the search does not go through it. A group that is still joined to one of them is selected, but it cannot be thrown: the joints would pull it back, so the click says so. A piece that has broken off the wall can be thrown. With the group so far from where it was, it may start inside other blocks (a wall behind it, for example), which then push it apart.
+
 ## Grab
 
 In grab mode, holding the left button casts a ray from the center of the camera, on the GPU, like an explosion. When the hit is back (a few frames), every body whose box is within *Radius* (0.1 to 10 m) of the hit point is labelled, on the GPU (`AvbdGroupLabeler`: it sets bit 2 of the group mask), and a spring force field (`ForceFieldDescriptor.Spring`) for that bit pulls the centroid of the labelled blocks to a point in front of the camera, at the distance the ray hit. Move or turn the camera to drag them. Every block gets the same force, so the group moves as one and keeps its arrangement, while the joints between it and the rest of the wall stretch and break. Letting go, switching the mode and Reset remove the field and the labels. A small radius grabs one block; a large one a whole patch. The immobile bottom row cannot be moved.
+
+**Direct** (a toggle under Radius, off by default): the blocks are not pulled by a force. When the ray's hit is back, the demo remembers, on the GPU (`AvbdGroupMover.BeginHold`), where each labelled block is relative to the held point (the point at the center of the screen, at the distance the ray hit). Every frame, before the solver steps, each block is placed on its own at the held point plus its own offset (`AvbdGroupMover.Hold`), and gets the velocity of the held point (its move over the time of the frame). The positions are absolute, so what the steps did to a block (gravity, contacts, the joints to the rest of the wall) is undone every frame: the blocks follow the camera exactly, keep their arrangement, do not sink and do not lag, whatever the number of steps in a frame. No force acts and their mass and inertia are not touched; the joints to the rest of the wall and the contacts still act on the blocks during the steps, so they stretch and push. Let go while moving the camera and the blocks keep the velocity of the point and fly on: they can be thrown. Force, Damping ratio and Offset gain do nothing then and are greyed out. Switching the style ends the grab in progress. Static blocks (the bottom row, the ground) are never moved.
 
 The panel has four sliders for the grab:
 

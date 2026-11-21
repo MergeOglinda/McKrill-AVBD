@@ -25,6 +25,7 @@ namespace McKrill.Avbd
         [SerializeField] ComputeShader lists;
         [SerializeField] ComputeShader raycast;
         [SerializeField] ComputeShader groupLabel;
+        [SerializeField] ComputeShader groupMove;
         [SerializeField] Shader instancedBoxes;
         [SerializeField] Shader blockChunks;
 
@@ -63,6 +64,9 @@ namespace McKrill.Avbd
 
         /// <summary>Changes the group mask of the bodies near a point (<see cref="AvbdGroupLabeler"/>).</summary>
         public ComputeShader GroupLabel => groupLabel;
+
+        /// <summary>Moves the bodies of a group directly (<see cref="AvbdGroupMover"/>).</summary>
+        public ComputeShader GroupMove => groupMove;
 
         /// <summary>
         /// Draw shader for boxes read straight from the body state buffer, one instance per box (<c>Shaders/Rendering/AvbdInstancedBoxes.shader</c>).
