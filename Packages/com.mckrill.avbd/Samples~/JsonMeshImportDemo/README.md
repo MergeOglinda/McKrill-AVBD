@@ -1,6 +1,6 @@
 # JSON Mesh Import Demo
 
-Spawns the objects of a list of voxel files on the GPU solver. A voxel file is the JSON that `Tools/Voxelize/voxelize_stl.py` writes from an STL mesh (see `Tools/Voxelize/README.md` for the script and the file format). Every voxel becomes a box body and every joint of the file becomes a ball-socket joint with a hard angle lock between two neighboring boxes, at the middle between their centers. The joints fracture like those of the *GPU Fracture Wall Demo*, which this demo is based on: shoot boxes at the objects, or blow them up.
+Spawns the objects of every voxel file in a folder on the GPU solver. A voxel file is the JSON that `Tools/Voxelize/voxelize_stl.py` writes from an STL mesh (see `Tools/Voxelize/README.md` for the script and the file format). Every voxel becomes a box body and every joint of the file becomes a ball-socket joint with a hard angle lock between two neighboring boxes, at the middle between their centers. The joints fracture like those of the *GPU Fracture Wall Demo*, which this demo is based on: shoot boxes at the objects, or blow them up.
 
 The objects stand on the ground in a row along x, **5 m apart** (center to center), the row centered on x = 0. Each object is placed so that the middle of its bounding box is on its spot in x and z and its lowest voxel rests on the ground.
 
@@ -13,31 +13,19 @@ The demo uses only the package's public API (`AvbdBodyBuffers`, `AvbdConstraintB
 
 The project needs a render pipeline that draws a `Universal Render Pipeline/Lit` or `Standard` material, and compute shader support.
 
-## The list of files
+## The files
 
-The files are listed in the code, in `JsonMeshImportDemo.VoxelFiles` (a `static readonly string[]`):
+There is no list of files. The demo spawns **every file in the `Resources/JsonMeshImportDemo` folder**, one object each, in the order of the file names (ordinal, so `Cube`, `Sphere`, `Torus`). In the imported sample that is `Assets/Samples/McKrill AVBD/<version>/JSON Mesh Import Demo/Resources/JsonMeshImportDemo`; any `Resources/JsonMeshImportDemo` folder in the project counts, and all of them are read together. The folder ships with three files: a sphere, a torus lying flat and a cube. The cube was made from an STL that is hollow (a surface for the outside and another, facing inward, for a cavity), to show that the script fills the inside.
 
-```csharp
-static readonly string[] VoxelFiles =
-{
-    "JsonMeshImportDemo/Sphere",
-    "JsonMeshImportDemo/Torus",
-    "JsonMeshImportDemo/Cube",
-};
-```
-
-An entry is read one of two ways:
-
-- **A full path** (for example `"C:/models/engine.voxels.json"` or `"/home/me/engine.voxels.json"`) is read from disk. This works in the editor and in standalone players.
-- **Anything else** is the name of a text asset in a `Resources` folder, without the extension. The three entries above are the files in this sample's `Resources/JsonMeshImportDemo` folder: a sphere, a torus lying flat and a cube. The cube was made from an STL that is hollow (a surface for the outside and another, facing inward, for a cavity), to show that the script fills the inside.
-
-To use your own mesh, run the script, then either put its output in a `Resources` folder of the project and add its name to the list, or add its full path.
+To use your own mesh, run the script and put its output (a `.json` file) in that folder:
 
 ```
 python3 Tools/Voxelize/voxelize_stl.py engine.stl -o engine.voxels.json --voxel-size 0.25 --zup-to-yup
 ```
 
-A file that cannot be read (missing, not a voxel file, wrong version, inconsistent arrays) is reported in the console and in the panel and is left out; the other files are still spawned. **Reset** reads the files again, so you can change a file and press `R`. Editing the list itself takes a recompile.
+To leave an object out, remove its file from the folder (or move it out of any `Resources` folder). There is nothing to edit in the code.
+
+Every text asset in the folder is read as a voxel file, so keep other text files out of it. A file that cannot be read (not a voxel file, wrong version, inconsistent arrays) is reported in the console and in the panel and is left out; the other files are still spawned. If the folder has no files, the console says so and the scene has only the ground. **Reset** reads the folder again, so a file you changed or added while playing is picked up with `R` (in the editor the asset must be imported first, which happens when the editor window regains focus). Objects are placed 5 m apart along x, centered on x = 0.
 
 An object wider than 5 m in x or z overlaps its neighbor: the demo warns in the console, and the two objects then collide.
 
@@ -60,7 +48,7 @@ The click mode button and its shot and explosion settings, the solver's iteratio
 
 | Control | What it does |
 | --- | --- |
-| Objects | One line for each entry of the list: the number of voxels and joints and the size of the object, or why it was not loaded |
+| Objects | One line for each file of the `Resources/JsonMeshImportDemo` folder: the number of voxels and joints and the size of the object, or why it was not loaded |
 | Voxel mass | 0.01 to 10 kg (log scale), default 0.25 kg like a block of the fracture wall. The mass of every voxel; the density of an object follows from it and the size of its voxels |
 | Rigid joints, Joint stiffness, Fracture threshold | As in the fracture wall demo (defaults: stiffness 5e3, threshold 40). **They are the wall's numbers, not tuned for voxels**: the multiplier a joint sees depends on the voxel size and mass, so if nothing breaks lower the threshold or shoot harder, and if an object falls apart by itself raise it |
 | Plastic yield, Yield threshold, Bend break, Bend limit | As in the fracture wall demo |

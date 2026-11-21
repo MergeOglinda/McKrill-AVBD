@@ -6,12 +6,12 @@ using UnityEngine;
 namespace McKrill.Avbd.Samples
 {
     /// <summary>
-    /// Spawns the objects of a list of voxel files (JSON written by <c>Tools/Voxelize/voxelize_stl.py</c> from an STL mesh) on the GPU solver. Every voxel is a box
+    /// Spawns the objects of every voxel file in the <c>JsonMeshImportDemo</c> folder under <c>Resources</c> (JSON written by <c>Tools/Voxelize/voxelize_stl.py</c> from an STL mesh) on the GPU solver. Every voxel is a box
     /// body and every joint of the file is a ball-socket joint with a hard angle lock between two neighboring boxes, at the middle between their centers, that
     /// fractures like the joints of the GPU Fracture Wall Demo. The objects stand on the ground 5 m apart (center to center, along x); you shoot boxes at them
     /// or blow them up.
     ///
-    /// The list of files is <see cref="VoxelFiles"/>, in the code. Reset reads the files again.
+    /// The files are not listed anywhere: every text asset in a <c>Resources/JsonMeshImportDemo</c> folder is spawned, in the order of their names. Reset reads them again.
     ///
     /// The simulation runs entirely through the package's public API (<see cref="AvbdBodyBuffers"/>, <see cref="AvbdConstraintBuffers"/>,
     /// <see cref="AvbdSolver.Step"/>), and drawing is one instanced draw call that reads the poses from the solver's buffer, as in the Fracture Wall Demo.
@@ -23,15 +23,10 @@ namespace McKrill.Avbd.Samples
     public sealed class JsonMeshImportDemo : MonoBehaviour
     {
         /// <summary>
-        /// The voxel files to spawn, one object each, in this order. An entry that is a full path (for example <c>C:/models/engine.voxels.json</c>) is read from disk.
-        /// Any other entry is the name of a text asset in a <c>Resources</c> folder, without the extension: the three objects below ship with the sample.
+        /// The folder, inside any <c>Resources</c> folder of the project, whose files are spawned: one object per text asset (<c>.json</c>), in the order of their names.
+        /// The sample ships a sphere, a torus and a cube in it; add a file there and it is spawned the next time the demo builds the scene (Play or Reset).
         /// </summary>
-        static readonly string[] VoxelFiles =
-        {
-            "JsonMeshImportDemo/Sphere",
-            "JsonMeshImportDemo/Torus",
-            "JsonMeshImportDemo/Cube",
-        };
+        const string VoxelFolder = "JsonMeshImportDemo";
 
         /// <summary>Distance between the centers of two neighboring objects, along x, in meters.</summary>
         const float ObjectSpacing = 5f;
@@ -145,7 +140,7 @@ namespace McKrill.Avbd.Samples
         readonly List<InstanceData> staticInstances = new List<InstanceData>(); // ground and voxels
         readonly List<Shot> shots = new List<Shot>();                            // oldest first
         readonly List<VoxelObject> objects = new List<VoxelObject>();            // the files that were read
-        readonly List<string> objectLines = new List<string>();                  // one line per entry of VoxelFiles for the panel: what was read, or why not
+        readonly List<string> objectLines = new List<string>();                  // one line per file of the folder for the panel: what was read, or why not
         Material boxMaterial;
         Mesh cubeMesh;
         GameObject meshSource;
@@ -317,19 +312,28 @@ namespace McKrill.Avbd.Samples
 
         // ---- loading -----------------------------------------------------------------------------------
 
-        // Reads every file of VoxelFiles. A file that cannot be read is reported (log and panel) and left out; the rest is still spawned.
+        // Reads every file of the Resources folder VoxelFolder, in the order of their names (Resources.LoadAll does not promise an order). A file that cannot be read
+        // is reported (log and panel) and left out; the rest is still spawned.
         void LoadObjects()
         {
             objects.Clear();
             objectLines.Clear();
             voxelTotal = 0;
 
-            foreach (string entry in VoxelFiles)
+            TextAsset[] files = Resources.LoadAll<TextAsset>(VoxelFolder);
+            System.Array.Sort(files, (a, b) => string.CompareOrdinal(a.name, b.name));
+            if (files.Length == 0)
             {
-                string name = DisplayName(entry);
-                if (!VoxelMeshData.TryLoad(entry, out VoxelMeshData data, out string error))
+                Debug.LogError("JSON Mesh Import Demo: there are no voxel files in a Resources/" + VoxelFolder + " folder, so there is nothing to spawn.");
+                objectLines.Add("no voxel files in Resources/" + VoxelFolder);
+            }
+
+            foreach (TextAsset file in files)
+            {
+                string name = DisplayName(file.name);
+                if (!VoxelMeshData.TryParse(file.text, out VoxelMeshData data, out string error))
                 {
-                    Debug.LogError("JSON Mesh Import Demo: \"" + entry + "\" was not loaded: " + error);
+                    Debug.LogError("JSON Mesh Import Demo: \"" + file.name + "\" in Resources/" + VoxelFolder + " was not loaded: " + error);
                     objectLines.Add(name + ": not loaded, " + error);
                     continue;
                 }
@@ -367,11 +371,10 @@ namespace McKrill.Avbd.Samples
                 objects[i].offset.x += (i - (objects.Count - 1) * 0.5f) * ObjectSpacing;
         }
 
-        // The name shown in the panel: the file name without the folder and without ".json" or ".voxels.json".
-        static string DisplayName(string entry)
+        // The name shown in the panel: the asset name (Unity leaves out the ".json" of the file) without a ".voxels" from "engine.voxels.json".
+        static string DisplayName(string assetName)
         {
-            string name = entry.Replace('\\', '/');
-            name = name.Substring(name.LastIndexOf('/') + 1);
+            string name = assetName;
             if (name.EndsWith(".json", System.StringComparison.OrdinalIgnoreCase))
                 name = name.Substring(0, name.Length - ".json".Length);
             if (name.EndsWith(".voxels", System.StringComparison.OrdinalIgnoreCase))
