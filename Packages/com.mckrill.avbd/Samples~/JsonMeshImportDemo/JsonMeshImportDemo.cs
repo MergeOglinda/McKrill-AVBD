@@ -79,22 +79,19 @@ namespace McKrill.Avbd.Samples
         }
 
         [Header("Objects (applied on Reset)")]
-        [Tooltip("Draw the blocks on the surface of an object as pieces of its smooth surface (needs a file written with the voxelizer's --smooth; a file without chunks is drawn as cubes). Only the drawing changes: the bodies are the same boxes.")]
         [SerializeField] bool smoothSurface = true;
-        [Tooltip("Mass of one voxel in kg. The density of an object follows from it and the size of its voxels, so a finer file has the same mass per voxel. A block of the Fracture Wall Demo weighs 0.25 kg.")]
+        [Tooltip("Mass of one voxel in kg.")]
         [SerializeField, Min(0.001f)] float voxelMass = 0.25f;
-        [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
-        [SerializeField] bool rigidJoints = false;
+        [SerializeField] bool rigidJoints = true;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
         [SerializeField, Min(1f)] float jointStiffness = 5e3f;
         [Tooltip("A joint breaks when the norm of its angular multiplier is above this.")]
-        [SerializeField, Min(0.01f)] float fractureThreshold = 40f;
+        [SerializeField, Min(0.01f)] float fractureThreshold = 330f;
 
         [Header("Plastic joints (applied on Reset)")]
-        [Tooltip("Joints yield instead of holding: above the yield threshold the angle lock gives way and the joint keeps the bend. Off: the joints are rigid up to the fracture threshold, and the package runs without any plastic code or buffer.")]
-        [SerializeField] bool plasticJoints = false;
+        [SerializeField] bool plasticJoints = true;
         [Tooltip("A plastic joint yields when the norm of its angular multiplier is above this. Keep it below the fracture threshold: a joint breaks before it can yield otherwise.")]
-        [SerializeField, Min(0.1f)] float yieldThreshold = 8f;
+        [SerializeField, Min(0.1f)] float yieldThreshold = 110f;
         [Tooltip("A plastic joint that has yielded breaks once it is bent further than the angle below from where it started.")]
         [SerializeField] bool bendBreak = true;
         [Tooltip("The bend, in degrees, above which a plastic joint breaks (with bend break on).")]
@@ -102,11 +99,10 @@ namespace McKrill.Avbd.Samples
 
         [Header("Solver")]
         [SerializeField, Range(1, 30)] int iterations = 10;
-        [Tooltip("Upper bound on solver steps per rendered frame. If the GPU cannot keep up, the simulation runs slower than real time instead of stalling.")]
         [SerializeField, Range(1, 4)] int maxStepsPerFrame = 2;
 
         [Header("Throw")]
-        [Tooltip("Speed in meters per second of the voxels that Throw lets fly. They leave from the middle of the screen, the way the camera looks.")]
+        [Tooltip("Speed in meters per second of the voxels that Throw lets fly.")]
         [SerializeField, Range(5f, 200f)] float throwSpeed = 30f;
 
         [Header("Shots")]
@@ -120,24 +116,19 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(1)] int maxShots = 100;
 
         [Header("Explosion")]
-        [Tooltip("Reach of an explosion in meters: a voxel whose center is farther from the explosion is not touched, and the push falls off to zero at this distance.")]
         [SerializeField, Range(1f, 50f)] float explosionRadius = 5f;
-        [Tooltip("Impulse in N s that a body at the center of the explosion would receive. A body's velocity changes by this times a falloff (1 at the center, 0 at the radius, squared) divided by its mass.")]
         [SerializeField, Range(0.1f, 1000f)] float explosionForce = 10f;
-        [Tooltip("Meters behind the surface that the camera ray hits, along the ray, where the explosion goes off: 0 on the surface, more to go inside.")]
         [SerializeField, Range(0f, 20f)] float explosionDepth = 0.5f;
 
         [Header("Grab")]
-        [Tooltip("Meters around the point the camera ray hits: every body whose box is this close to the point is grabbed (the nearest block alone for a small radius, a group of blocks for a large one).")]
         [SerializeField, Range(0.1f, 10f)] float grabRadius = 1.5f;
-        [Tooltip("Stiffness in N/m of the spring that pulls the grabbed blocks (as one group, by their centroid) to the point at the center of the screen: each block gets this times how far the centroid is from that point, in newtons. It grows with the distance of the blocks from the center of the screen (see Offset gain).")]
         [SerializeField, Range(10f, 2000f)] float grabForce = 100f;
         [Tooltip("Damping ratio of the velocity of each grabbed block. 0 is a spring that swings, 1 is critical damping.")]
         [SerializeField, Range(0f, 3f)] float grabDamping = 1f;
         [Tooltip("How much the force grows with the distance of the grabbed blocks from the center of the screen, per meter: the stiffness is Force times (1 + gain times the distance in meters of the blocks from the line of sight through the held point). 0 is a constant stiffness.")]
         [SerializeField, Range(0f, 5f)] float grabOffsetGain = 0.5f;
 
-        [Tooltip("Off: the grabbed blocks are pulled with a spring force (Force, Damping ratio and Offset gain). On: each block is placed directly, every frame, at its own place relative to the held point (the point at the center of the screen, at the distance the ray hit) and gets the velocity of that point, so it can be thrown. No force acts, and their mass and inertia are not touched (AvbdGroupMover).")]
+        [Tooltip("Off: the grabbed blocks are pulled with a spring force (Force, Damping ratio and Offset gain). On: each block is placed directly, every frame, at its own place relative to the held point.")]
         [SerializeField] bool grabDirect = false;
 
         [Header("View")]
@@ -536,6 +527,7 @@ namespace McKrill.Avbd.Samples
             staticInstances.Clear();
 
             AvbdSolverSettings settings = AvbdSolverSettings.Default; // 60 Hz, gravity (0, -10, 0): Unity's y-up
+            settings.penaltyMin = 2000f
             settings.iterations = iterations;
             // Manifold slots: a voxel touches up to 26 others, but at rest only the joined ones (which make no manifold) and a few more; a shot can lie on or
             // inside a dozen. A pair that finds no slot just gets no contacts until one is free.
