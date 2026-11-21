@@ -261,6 +261,38 @@ namespace McKrill.Avbd
             }
         }
 
+        /// <summary>
+        /// The joints that are still intact, as pairs of body slots (<see cref="BodyHandle.Slot"/>): every joint (springs do not count) that has not
+        /// fractured and joins two bodies. Joints to the world are left out. <paramref name="links"/> is cleared first; it gets one entry per joint, x
+        /// and y being the slots of its two bodies. It reads the constraint records back, so it waits for the GPU and costs a copy of every
+        /// constraint: use it for a click, not every frame. Joints added since the last <see cref="Rebuild"/> are uploaded first. Returns the number of joints.
+        /// </summary>
+        /// <remarks>With the slots of the bodies a caller can walk the joint graph on the CPU, for example to find every body that is held to another one.</remarks>
+        public int ReadIntactJointLinks(List<int2> links)
+        {
+            ThrowIfDisposed();
+            if (links == null)
+                throw new ArgumentNullException(nameof(links));
+            links.Clear();
+            if (pending.Count > 0)
+                Rebuild();
+            if (uploadedCount == 0)
+                return 0;
+
+            var all = new ConstraintRecord[uploadedCount];
+            recordBuffer.GetData(all, 0, 0, uploadedCount);
+            for (int i = 0; i < all.Length; i++)
+            {
+                ConstraintRecord r = all[i];
+                if (ConstraintFlagLayout.KindOf(r.ident.z) != ConstraintKind.Joint || (ConstraintFlagLayout.FlagsOf(r.ident.z) & ConstraintFlags.Broken) != 0)
+                    continue;
+                if (r.ident.x == AvbdConst.Invalid || r.ident.y == AvbdConst.Invalid)
+                    continue;
+                links.Add(new int2((int)r.ident.x, (int)r.ident.y));
+            }
+            return links.Count;
+        }
+
         /// <summary>What the last list build counted: entries, fractured joints left out, and records it could not list. Waits for the GPU.</summary>
         internal ConstraintListControl ReadListControl()
         {
