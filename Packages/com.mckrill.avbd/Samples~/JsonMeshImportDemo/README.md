@@ -37,7 +37,7 @@ The same as in the *GPU Fracture Wall Demo*, except for the volley (there is no 
 
 | Input | Action |
 | --- | --- |
-| Left click (outside the panel) | Shoot a box in the direction the camera looks, or, in explosion mode, set off an explosion where the camera ray hits |
+| Left click (outside the panels) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits; in grab mode, **hold** to grab the blocks around the point the ray hits and move them (the point stays at the center of the screen at the distance where it was grabbed) |
 | Right drag | Look around |
 | `W` `A` `S` `D`, `Q` `E` | Move, down and up. `Shift` is three times faster |
 | Mouse wheel | Move forward and back |
@@ -46,11 +46,12 @@ The same as in the *GPU Fracture Wall Demo*, except for the volley (there is no 
 
 ## The panel
 
-The click mode button and its shot and explosion settings, the solver's iterations and the joint settings are as in the fracture wall demo. The object and joint settings take effect on **Reset**, because the package cannot change a joint after it was added.
+The click mode buttons and their shot, explosion and grab settings, the solver's iterations and the joint settings are as in the fracture wall demo. The object and joint settings take effect on **Reset**, because the package cannot change a joint after it was added.
 
 | Control | What it does |
 | --- | --- |
-| Objects | One line for each file of the `Resources/JsonMeshImportDemo` folder: the number of voxels and joints and the size of the object, or why it was not loaded |
+| Objects (a panel of its own, top right of the screen) | One line for each file of the `Resources/JsonMeshImportDemo` folder: the number of voxels and joints, the size of the object and whether the file has a smooth surface, or why it was not loaded |
+| Explosion, Shot, Grab | The click mode. Grab has Radius (blocks around the hit point), Force (spring stiffness), Damping ratio and Offset gain, as in the fracture wall demo |
 | Smooth surface | Draw the surface blocks as their baked smooth pieces (takes effect on **Reset**). A file made without `--smooth` has no pieces and is drawn as cubes, which the objects list says ("no smooth surface in the file"). Only the drawing changes: the bodies, joints and collisions are the boxes either way |
 | Voxel mass | 0.01 to 10 kg (log scale), default 0.25 kg like a block of the fracture wall. The mass of every voxel; the density of an object follows from it and the size of its voxels |
 | Rigid joints, Joint stiffness, Fracture threshold | As in the fracture wall demo (defaults: stiffness 5e3, threshold 40). **They are the wall's numbers, not tuned for voxels**: the multiplier a joint sees depends on the voxel size and mass, so if nothing breaks lower the threshold or shoot harder, and if an object falls apart by itself raise it |
