@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace McKrill.Avbd.Samples
 {
@@ -15,6 +16,10 @@ namespace McKrill.Avbd.Samples
     ///
     /// The simulation runs entirely through the package's public API (<see cref="AvbdBodyBuffers"/>, <see cref="AvbdConstraintBuffers"/>,
     /// <see cref="AvbdSolver.Step"/>), and drawing is one instanced draw call that reads the poses from the solver's buffer, as in the Fracture Wall Demo.
+    ///
+    /// With <c>smoothSurface</c> on, the blocks on the surface of an object are drawn as the pieces of the smooth surface that the voxelizer baked for them (a file
+    /// written with <c>--smooth</c>): one mesh for all pieces, each moved rigidly with its block by the vertex shader, in one more draw call. Intact, the object
+    /// looks smooth. A block that breaks off still is a block: its curved outside and its flat cut faces. The physics does not change, the bodies are the same boxes.
     /// The scene is y-up, so solver positions and rotations are used as Unity world positions and rotations. Input is read through IMGUI events, so it works
     /// with the Input Manager and with the Input System package.
     /// </summary>
@@ -55,6 +60,15 @@ namespace McKrill.Avbd.Samples
             public float size;
         }
 
+        // One vertex of the mesh of all chunks (mirrors the vertex shader of AvbdBlockChunks.shader): position and normal relative to the block, and the number
+        // of the block's record in the chunk instance buffer.
+        struct ChunkVertex
+        {
+            public float3 position;
+            public float3 normal;
+            public uint block;
+        }
+
         // A voxel file that was read, with where it stands in the scene.
         sealed class VoxelObject
         {
@@ -65,20 +79,19 @@ namespace McKrill.Avbd.Samples
         }
 
         [Header("Objects (applied on Reset)")]
-        [Tooltip("Mass of one voxel in kg. The density of an object follows from it and the size of its voxels, so a finer file has the same mass per voxel. A block of the Fracture Wall Demo weighs 0.25 kg.")]
+        [SerializeField] bool smoothSurface = true;
+        [Tooltip("Mass of one voxel in kg.")]
         [SerializeField, Min(0.001f)] float voxelMass = 0.25f;
-        [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
-        [SerializeField] bool rigidJoints = false;
+        [SerializeField] bool rigidJoints = true;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
         [SerializeField, Min(1f)] float jointStiffness = 5e3f;
         [Tooltip("A joint breaks when the norm of its angular multiplier is above this.")]
-        [SerializeField, Min(0.01f)] float fractureThreshold = 40f;
+        [SerializeField, Min(0.01f)] float fractureThreshold = 330f;
 
         [Header("Plastic joints (applied on Reset)")]
-        [Tooltip("Joints yield instead of holding: above the yield threshold the angle lock gives way and the joint keeps the bend. Off: the joints are rigid up to the fracture threshold, and the package runs without any plastic code or buffer.")]
-        [SerializeField] bool plasticJoints = false;
+        [SerializeField] bool plasticJoints = true;
         [Tooltip("A plastic joint yields when the norm of its angular multiplier is above this. Keep it below the fracture threshold: a joint breaks before it can yield otherwise.")]
-        [SerializeField, Min(0.1f)] float yieldThreshold = 8f;
+        [SerializeField, Min(0.1f)] float yieldThreshold = 110f;
         [Tooltip("A plastic joint that has yielded breaks once it is bent further than the angle below from where it started.")]
         [SerializeField] bool bendBreak = true;
         [Tooltip("The bend, in degrees, above which a plastic joint breaks (with bend break on).")]
@@ -86,11 +99,10 @@ namespace McKrill.Avbd.Samples
 
         [Header("Solver")]
         [SerializeField, Range(1, 30)] int iterations = 10;
-        [Tooltip("Upper bound on solver steps per rendered frame. If the GPU cannot keep up, the simulation runs slower than real time instead of stalling.")]
         [SerializeField, Range(1, 4)] int maxStepsPerFrame = 2;
 
         [Header("Throw")]
-        [Tooltip("Speed in meters per second of the voxels that Throw lets fly. They leave from the middle of the screen, the way the camera looks.")]
+        [Tooltip("Speed in meters per second of the voxels that Throw lets fly.")]
         [SerializeField, Range(5f, 200f)] float throwSpeed = 30f;
 
         [Header("Shots")]
@@ -104,12 +116,20 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(1)] int maxShots = 100;
 
         [Header("Explosion")]
-        [Tooltip("Reach of an explosion in meters: a voxel whose center is farther from the explosion is not touched, and the push falls off to zero at this distance.")]
         [SerializeField, Range(1f, 50f)] float explosionRadius = 5f;
-        [Tooltip("Impulse in N s that a body at the center of the explosion would receive. A body's velocity changes by this times a falloff (1 at the center, 0 at the radius, squared) divided by its mass.")]
         [SerializeField, Range(0.1f, 1000f)] float explosionForce = 10f;
-        [Tooltip("Meters behind the surface that the camera ray hits, along the ray, where the explosion goes off: 0 on the surface, more to go inside.")]
         [SerializeField, Range(0f, 20f)] float explosionDepth = 0.5f;
+
+        [Header("Grab")]
+        [SerializeField, Range(0.1f, 10f)] float grabRadius = 1.5f;
+        [SerializeField, Range(10f, 2000f)] float grabForce = 100f;
+        [Tooltip("Damping ratio of the velocity of each grabbed block. 0 is a spring that swings, 1 is critical damping.")]
+        [SerializeField, Range(0f, 3f)] float grabDamping = 1f;
+        [Tooltip("How much the force grows with the distance of the grabbed blocks from the center of the screen, per meter: the stiffness is Force times (1 + gain times the distance in meters of the blocks from the line of sight through the held point). 0 is a constant stiffness.")]
+        [SerializeField, Range(0f, 5f)] float grabOffsetGain = 0.5f;
+
+        [Tooltip("Off: the grabbed blocks are pulled with a spring force (Force, Damping ratio and Offset gain). On: each block is placed directly, every frame, at its own place relative to the held point.")]
+        [SerializeField] bool grabDirect = false;
 
         [Header("View")]
         [Tooltip("Fly camera: right drag to look, W A S D to move, Q and E for down and up, Shift for faster, mouse wheel to dolly.")]
@@ -129,7 +149,13 @@ namespace McKrill.Avbd.Samples
             Shoot,
             Explode,
             Throw,
+            Grab,
         }
+
+        // Every body the demo spawns is in DemoGroup. The group mask of a new body has all bits set, which would put it in every group, so the bodies get
+        // this one bit and the grab (a spring force field, see Grab below) labels the bodies it holds with GrabGroup and nothing else.
+        const uint DemoGroup = 1u;
+        const uint GrabGroup = 2u;
 
         AvbdBodyBuffers bodies;
         AvbdConstraintBuffers constraints;
@@ -147,7 +173,15 @@ namespace McKrill.Avbd.Samples
         readonly List<VoxelObject> objects = new List<VoxelObject>();            // the files that were read
         readonly List<string> objectLines = new List<string>();                  // one line per file of the folder for the panel: what was read, or why not
         Material boxMaterial;
+        Material chunkMaterial;
         Mesh cubeMesh;
+        // The smooth pieces: one record (slot, color) for each block that is drawn as a chunk, and one mesh of all the chunks.
+        GraphicsBuffer chunkInstanceBuffer;
+        InstanceData[] chunkInstances;      // what the buffer holds now (the selection changes colors)
+        InstanceData[] chunkBaseInstances;  // the colors without a selection
+        int[] chunkBlockOfSlot = new int[0]; // body slot -> number of its record in the chunk buffer, or -1
+        Mesh chunkMesh;
+        int chunkBlockCount;
         GameObject meshSource;
 
         Camera cam;
@@ -170,7 +204,8 @@ namespace McKrill.Avbd.Samples
         // Requests made from OnGUI, applied in Update so the IMGUI control count never changes between Layout and Repaint.
         bool requestShoot;
         bool requestExplode;
-        int requestMode = -1; // a ClickMode to switch to, or -1
+        int requestMode = -1;          // the click mode asked for in the panel, or -1
+        bool requestGrabStart;
         bool requestThrowClick;
         bool requestReset;
         bool requestClearShots;
@@ -182,6 +217,27 @@ namespace McKrill.Avbd.Samples
         int simulationVersion;         // counts the simulations built, so that the answer of a ray cast of an old one is dropped
         const float RayMaxDistance = 10000f;
 
+        // Grab: hold the left mouse button in Grab mode. The ray of the click is cast on the GPU like the one of an explosion; when the hit is back, the
+        // bodies within the radius of the hit get the group mask bit GrabGroup (AvbdGroupLabeler, on the GPU) and a spring force field for GrabGroup pulls their
+        // centroid to a point in front of the camera, at the distance the ray hit. The blocks move together and keep their arrangement; the joints between
+        // them and the rest of the object stretch and break. Letting go removes the field and the labels.
+        // With grabDirect no force field is made: once a frame, before the steps, every labelled body is placed on its own (AvbdGroupMover.Hold, on the GPU) at its offset from
+        // the held point (remembered when the grab began) plus the held point, and gets the velocity of the held point. The place is absolute, so what the steps did to a body
+        // (gravity, contacts, the joints to the rest of the object) is undone every frame: the group does not sink and keeps its arrangement, and it follows the camera. Let
+        // go, the blocks keep the velocity of the point and fly on. Their mass and moments of inertia are not touched.
+        AvbdGroupLabeler labeler;
+        AvbdGroupMover mover;
+        int requestGrabDirect = -1;    // 1 or 0 to switch the grab style, or -1 (applied in Update, like the mode)
+        bool grabIsDirect;             // the style of the grab that is active (the setting can change while it is held: it ends the grab)
+        float3 grabLastTarget;         // direct grab: where the held point was at the last frame
+        bool grabFirstMove;            // direct grab: the next UpdateGrab only begins the hold (remembers where each block is relative to the held point)
+        bool grabHeld;                 // the button is down (set in OnGUI)
+        bool grabActive;               // the bodies are labelled and the field exists
+        int grabToken;                 // changes at every start and end, so that the answer of a ray cast of a grab that is over is dropped
+        float grabDistance;            // meters from the camera to the point that is held
+        ForceFieldHandle grabField;
+        string grabStatus = "";
+
         // Throw: in Throw mode the first left click casts a ray on the GPU (like an explosion) and selects the voxel it hits and every voxel that is joined to
         // it by a joint that has not fractured (the whole object while it is whole, one piece of it after it broke); the selection is drawn in SelectedColor. The
         // next click puts the selection in front of the camera, the way a shot is placed, with the velocity of the Throw speed. Which joints are intact is read
@@ -189,6 +245,7 @@ namespace McKrill.Avbd.Samples
         static readonly Color SelectedColor = new Color(0.2f, 0.95f, 0.35f);
         int[] staticIndexOfSlot = new int[0];            // body slot -> index into the static instances, or -1
         readonly List<BodyHandle> staticHandleList = new List<BodyHandle>(); // the body of every static instance (the ground, the voxels)
+        readonly List<float3> staticSizeList = new List<float3>();           // the size of the box of every static instance (the cube instance has size 0 for a block drawn as a chunk)
         readonly List<bool> staticImmobileList = new List<bool>();           // true for a static instance without mass (the ground)
         readonly List<int> selectedStatic = new List<int>(); // indices of the selected voxels
         BodyHandle selectedShot;                         // a selected shot (shots have no joints: it is selected alone)
@@ -197,6 +254,7 @@ namespace McKrill.Avbd.Samples
         string throwStatus = "";
 
         Rect panelScreenRect;
+        Rect objectsPanelScreenRect;   // the panel of the objects, top right
         GUIStyle boldLabel;
 
         // ---- lifecycle ---------------------------------------------------------------------------------
@@ -211,6 +269,13 @@ namespace McKrill.Avbd.Samples
                 return;
             }
             boxMaterial = new Material(boxShader) { hideFlags = HideFlags.HideAndDontSave };
+
+            // Optional: without the chunk shader (or where it is not supported) every block is a cube.
+            Shader chunkShader = AvbdShaderSet.Load()?.BlockChunks;
+            if (chunkShader != null && chunkShader.isSupported)
+                chunkMaterial = new Material(chunkShader) { hideFlags = HideFlags.HideAndDontSave };
+            else
+                Debug.LogWarning("JSON Mesh Import Demo: the package's block chunk shader is missing or not supported on this device, so every block is drawn as a cube.");
 
             // The cube mesh comes from a primitive that is destroyed again: it keeps the demo free of mesh assets.
             meshSource = GameObject.CreatePrimitive(PrimitiveType.Cube);
@@ -230,6 +295,8 @@ namespace McKrill.Avbd.Samples
             cubeMesh = null;
             if (boxMaterial != null) Destroy(boxMaterial);
             boxMaterial = null;
+            if (chunkMaterial != null) Destroy(chunkMaterial);
+            chunkMaterial = null;
 
             if (createdLight != null) Destroy(createdLight);
             createdLight = null;
@@ -246,7 +313,10 @@ namespace McKrill.Avbd.Samples
         void OnApplicationFocus(bool focus)
         {
             if (!focus)
+            {
                 held.Clear(); // a key released while the window had no focus never sends its KeyUp
+                grabHeld = false; // nor does the button
+            }
         }
 
         void Update()
@@ -262,11 +332,14 @@ namespace McKrill.Avbd.Samples
                 requestReset = false;
                 requestShoot = false;
                 requestExplode = false;
+                requestGrabStart = false;
                 requestThrowClick = false;
                 requestClearShots = false;
             }
             if (requestMode >= 0)
             {
+                if ((ClickMode)requestMode != ClickMode.Grab)
+                    EndGrab();
                 if ((ClickMode)requestMode != ClickMode.Throw)
                 {
                     ClearSelection();
@@ -284,6 +357,21 @@ namespace McKrill.Avbd.Samples
                     ThrowClick();
                 requestThrowClick = false;
             }
+            if (requestGrabDirect >= 0)
+            {
+                EndGrab(); // a grab keeps the style it started with; the next click uses the new one
+                grabToken++; // and the answer of a ray cast that is on its way, made for the old style, is dropped
+                grabDirect = requestGrabDirect == 1;
+                requestGrabDirect = -1;
+            }
+            if (requestGrabStart)
+            {
+                if (grabHeld && clickMode == ClickMode.Grab)
+                    StartGrab();
+                requestGrabStart = false;
+            }
+            if (!grabHeld)
+                EndGrab();
             if (requestClearShots)
             {
                 ClearShots();
@@ -301,6 +389,7 @@ namespace McKrill.Avbd.Samples
             }
 
             MoveCamera();
+            UpdateGrab();
             tunnelRisk = shotSpeed * solver.Settings.dt > shotSize;
 
             // The settings take effect at the next step.
@@ -397,7 +486,8 @@ namespace McKrill.Avbd.Samples
                 objects.Add(item);
                 voxelTotal += data.voxelCount;
                 objectLines.Add(name + ": " + data.voxelCount + " voxels, " + data.jointCount + " joints, "
-                    + item.extent.x.ToString("0.0") + " x " + item.extent.y.ToString("0.0") + " x " + item.extent.z.ToString("0.0") + " m");
+                    + item.extent.x.ToString("0.0") + " x " + item.extent.y.ToString("0.0") + " x " + item.extent.z.ToString("0.0") + " m"
+                    + (data.HasChunks ? ", " + data.chunkCount + " smooth blocks" : ", no smooth surface in the file"));
                 if (item.extent.x > ObjectSpacing || item.extent.z > ObjectSpacing)
                     Debug.LogWarning("JSON Mesh Import Demo: \"" + name + "\" is wider than the " + ObjectSpacing + " m between the objects and will overlap its neighbor.");
             }
@@ -437,6 +527,7 @@ namespace McKrill.Avbd.Samples
             staticInstances.Clear();
 
             AvbdSolverSettings settings = AvbdSolverSettings.Default; // 60 Hz, gravity (0, -10, 0): Unity's y-up
+            settings.penaltyMin = 2000f
             settings.iterations = iterations;
             // Manifold slots: a voxel touches up to 26 others, but at rest only the joined ones (which make no manifold) and a few more; a shot can lie on or
             // inside a dozen. A pair that finds no slot just gets no contacts until one is free.
@@ -446,6 +537,8 @@ namespace McKrill.Avbd.Samples
             constraints = new AvbdConstraintBuffers(bodies, jointCapacity, null, manifoldSlots, plasticJoints ? jointCapacity : 0);
             solver = new AvbdSolver(bodies, settings, null, constraints);
             raycaster = new AvbdRaycaster(bodies);
+            labeler = new AvbdGroupLabeler(bodies);
+            mover = new AvbdGroupMover(bodies);
             simulationVersion++;
 
             // The ground and every voxel go in one batch (the ground is element 0, then the voxels object by object, in the order of the file), so that the bodies
@@ -459,7 +552,7 @@ namespace McKrill.Avbd.Samples
 
             // Ground: a static slab whose top face is the plane y = 0.
             var ground = new float3(GroundHalfExtent * 2f, 1f, GroundHalfExtent * 2f);
-            descriptors.Add(BodyDescriptor.Box(ground, 0f, new float3(0f, -0.5f, 0f)));
+            descriptors.Add(DemoBox(ground, 0f, new float3(0f, -0.5f, 0f)));
             instanceSizes.Add(ground);
             instanceColors.Add(new Color(0.30f, 0.33f, 0.36f));
 
@@ -476,7 +569,7 @@ namespace McKrill.Avbd.Samples
                 {
                     float3 position = data.VoxelCenter(n) + o.offset;
                     positions[first + n] = position;
-                    descriptors.Add(BodyDescriptor.Box(size, density, position));
+                    descriptors.Add(DemoBox(size, density, position));
                     instanceSizes.Add(size);
                     instanceColors.Add(VoxelColor(i, data.voxels[3 * n], data.voxels[3 * n + 1], data.voxels[3 * n + 2]));
                 }
@@ -484,8 +577,26 @@ namespace McKrill.Avbd.Samples
             }
             var spawned = new BodyHandle[descriptors.Count];
             bodies.SpawnBatch(descriptors, spawned, zCurveOrder);
+
+            // The blocks that are drawn as chunks (those of a file with chunks, with the smooth surface on) are not cubes in the instance list: they get a record in
+            // the chunk instance buffer instead. Index in the list of descriptors: 1 + the voxel's number in the whole scene.
+            bool[] drawnAsChunk = new bool[spawned.Length];
+            bool chunksWanted = smoothSurface && chunkMaterial != null;
+            if (chunksWanted)
+            {
+                first = 0;
+                foreach (VoxelObject o in objects)
+                {
+                    if (o.data.HasChunks)
+                        for (int c = 0; c < o.data.chunkCount; c++)
+                            drawnAsChunk[1 + first + o.data.chunkVoxels[c]] = spawned[1 + first + o.data.chunkVoxels[c]].IsValid;
+                    first += o.data.voxelCount;
+                }
+            }
             for (int i = 0; i < spawned.Length; i++)
-                AddStaticInstance(spawned[i], instanceSizes[i], instanceColors[i], i == 0); // element 0 is the ground
+                AddStaticInstance(spawned[i], instanceSizes[i], instanceColors[i], i == 0, drawnAsChunk[i]); // element 0 is the ground
+            if (chunksWanted)
+                CreateChunkMesh(spawned, drawnAsChunk, instanceColors);
 
             // Joints: one for every pair of the file.
             jointCount = 0;
@@ -509,6 +620,68 @@ namespace McKrill.Avbd.Samples
             stepMs = 0f;
         }
 
+        // The mesh of all chunks, and the record of each (the body slot and the color of its block). The chunks of a file are stored one after the other, so the
+        // vertices of chunk c of an object are the file's vertices chunkVertexStart[c] up to chunkVertexStart[c + 1] - 1, and the vertex number of a triangle's
+        // corner is counted from the first of them. Positions and normals are relative to the block: the vertex shader moves them with the block's pose.
+        void CreateChunkMesh(BodyHandle[] spawned, bool[] drawnAsChunk, List<Color> colors)
+        {
+            var blocks = new List<InstanceData>();
+            var vertices = new List<ChunkVertex>();
+            var indices = new List<int>();
+            int first = 0;
+            foreach (VoxelObject o in objects)
+            {
+                VoxelMeshData data = o.data;
+                for (int c = 0; data.HasChunks && c < data.chunkCount; c++)
+                {
+                    int descriptorIndex = 1 + first + data.chunkVoxels[c];
+                    if (!drawnAsChunk[descriptorIndex])
+                        continue;
+                    uint block = (uint)blocks.Count;
+                    blocks.Add(MakeInstance(spawned[descriptorIndex], float3.zero, colors[descriptorIndex]));
+
+                    int vertexBase = vertices.Count;
+                    for (int v = data.chunkVertexStart[c]; v < data.chunkVertexStart[c + 1]; v++)
+                        vertices.Add(new ChunkVertex
+                        {
+                            position = new float3(data.chunkPositions[3 * v], data.chunkPositions[3 * v + 1], data.chunkPositions[3 * v + 2]),
+                            normal = new float3(data.chunkNormals[3 * v], data.chunkNormals[3 * v + 1], data.chunkNormals[3 * v + 2]),
+                            block = block,
+                        });
+                    for (int m = 3 * data.chunkTriangleStart[c]; m < 3 * data.chunkTriangleStart[c + 1]; m++)
+                        indices.Add(vertexBase + data.chunkTriangles[m]);
+                }
+                first += data.voxelCount;
+            }
+
+            chunkBlockCount = blocks.Count;
+            if (chunkBlockCount == 0)
+                return;
+
+            chunkMesh = new Mesh { name = "AVBD block chunks", indexFormat = IndexFormat.UInt32, hideFlags = HideFlags.HideAndDontSave };
+            chunkMesh.SetVertexBufferParams(vertices.Count,
+                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3),
+                new VertexAttributeDescriptor(VertexAttribute.Normal, VertexAttributeFormat.Float32, 3),
+                new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.UInt32, 1));
+            chunkMesh.SetVertexBufferData(vertices, 0, 0, vertices.Count, 0, MeshUpdateFlags.DontRecalculateBounds);
+            chunkMesh.SetIndexBufferParams(indices.Count, IndexFormat.UInt32);
+            chunkMesh.SetIndexBufferData(indices, 0, 0, indices.Count, MeshUpdateFlags.DontRecalculateBounds);
+            chunkMesh.SetSubMesh(0, new SubMeshDescriptor(0, indices.Count), MeshUpdateFlags.DontRecalculateBounds);
+            chunkMesh.bounds = new Bounds(Vector3.zero, new Vector3(100000f, 100000f, 100000f)); // the blocks move on the GPU
+
+            chunkBaseInstances = blocks.ToArray();
+            chunkInstances = blocks.ToArray();
+            chunkBlockOfSlot = new int[bodies.Capacity];
+            for (int i = 0; i < chunkBlockOfSlot.Length; i++)
+                chunkBlockOfSlot[i] = -1;
+            for (int i = 0; i < chunkBaseInstances.Length; i++)
+                chunkBlockOfSlot[chunkBaseInstances[i].slot] = i;
+            chunkInstanceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, blocks.Count, UnsafeUtility.SizeOf<InstanceData>());
+            chunkInstanceBuffer.SetData(chunkInstances);
+            chunkMaterial.SetBuffer("_Poses", bodies.State);
+            chunkMaterial.SetBuffer("_Instances", chunkInstanceBuffer);
+        }
+
         // A ball-socket joint at the middle between the two voxels (the middle of the face they share, for neighbors by a face), with a rigid angle lock.
         // Both anchors are that point, so the joint starts satisfied.
         void Join(BodyHandle a, float3 positionA, BodyHandle b, float3 positionB)
@@ -530,11 +703,14 @@ namespace McKrill.Avbd.Samples
             return Color.HSVToRGB(hue, 0.55f, ((i + j + k) & 1) == 0 ? 0.88f : 0.78f);
         }
 
-        void AddStaticInstance(BodyHandle handle, float3 size, Color color, bool immobile = false)
+        // A block that is drawn as a chunk stays in the list of static instances (the selection of Throw works on it), but its cube has size 0: the cube shader
+        // draws nothing for it. Its real size is in staticSizeList.
+        void AddStaticInstance(BodyHandle handle, float3 size, Color color, bool immobile = false, bool drawnAsChunk = false)
         {
             if (!handle.IsValid)
                 return;
-            staticInstances.Add(MakeInstance(handle, size, color));
+            staticInstances.Add(MakeInstance(handle, drawnAsChunk ? float3.zero : size, color));
+            staticSizeList.Add(size);
             staticHandleList.Add(handle);
             staticImmobileList.Add(immobile);
         }
@@ -574,6 +750,14 @@ namespace McKrill.Avbd.Samples
             boxMaterial.SetBuffer("_Instances", instanceBuffer);
         }
 
+        // A box of the demo: in DemoGroup only.
+        static BodyDescriptor DemoBox(float3 size, float density, float3 position)
+        {
+            BodyDescriptor d = BodyDescriptor.Box(size, density, position);
+            d.groupMask = DemoGroup;
+            return d;
+        }
+
         void DestroySimulation()
         {
             selectedStatic.Clear();
@@ -582,6 +766,7 @@ namespace McKrill.Avbd.Samples
             castingSelection = false;
             throwStatus = "";
             staticHandleList.Clear();
+            staticSizeList.Clear();
             staticImmobileList.Clear();
             staticIndexOfSlot = new int[0];
             shots.Clear();
@@ -590,6 +775,24 @@ namespace McKrill.Avbd.Samples
             instanceBuffer = null;
             instances = null;
             staticCount = 0;
+            if (chunkInstanceBuffer != null) chunkInstanceBuffer.Release();
+            chunkInstanceBuffer = null;
+            chunkInstances = null;
+            chunkBaseInstances = null;
+            chunkBlockOfSlot = new int[0];
+            if (chunkMesh != null) Destroy(chunkMesh);
+            chunkMesh = null;
+            chunkBlockCount = 0;
+            grabActive = false;
+            grabHeld = false;
+            grabToken++;
+            grabField = ForceFieldHandle.Invalid;
+            grabStatus = "";
+            grabIsDirect = false;
+            if (labeler != null) labeler.Dispose();
+            labeler = null;
+            if (mover != null) mover.Dispose();
+            mover = null;
             if (raycaster != null) raycaster.Dispose();
             raycaster = null;
             if (solver != null) solver.Dispose();
@@ -658,7 +861,7 @@ namespace McKrill.Avbd.Samples
             BodyHandle bestShot = BodyHandle.Invalid;
             for (int i = 0; i < staticCount; i++)
             {
-                float d = BoxDistance(state[staticHandleList[i].Slot], new float3(instances[i].sizeX, instances[i].sizeY, instances[i].sizeZ), point);
+                float d = BoxDistance(state[staticHandleList[i].Slot], staticSizeList[i], point);
                 if (d < best)
                 {
                     best = d;
@@ -753,9 +956,27 @@ namespace McKrill.Avbd.Samples
                 instances[selectedStatic[i]] = instance;
             }
             instanceBuffer.SetData(instances, 0, 0, staticCount);
+            ColorChunks(true);
 
             throwStatus = "Selected " + selectedStatic.Count + (selectedStatic.Count == 1 ? " voxel." : " voxels.")
                 + (selectionAnchored ? " " + heldByImmobile + " joints still hold them to the ground: they cannot be thrown until those break." : "");
+        }
+
+        // The chunks of the selected blocks get the color of the selection (or their own again): the cube of such a block is not drawn.
+        void ColorChunks(bool selected)
+        {
+            if (chunkInstanceBuffer == null || chunkInstances == null)
+                return;
+            foreach (int index in selectedStatic)
+            {
+                int block = chunkBlockOfSlot[staticHandleList[index].Slot];
+                if (block < 0)
+                    continue;
+                chunkInstances[block] = chunkBaseInstances[block];
+                if (selected)
+                    chunkInstances[block].color = ShaderColor(SelectedColor);
+            }
+            chunkInstanceBuffer.SetData(chunkInstances);
         }
 
         void ClearSelection()
@@ -765,6 +986,7 @@ namespace McKrill.Avbd.Samples
                 for (int i = 0; i < selectedStatic.Count; i++)
                     instances[selectedStatic[i]] = staticInstances[selectedStatic[i]];
                 instanceBuffer.SetData(instances, 0, 0, staticCount);
+                ColorChunks(false);
             }
             selectedStatic.Clear();
             if (selectedShot.IsValid)
@@ -799,7 +1021,7 @@ namespace McKrill.Avbd.Samples
                 foreach (int index in selectedStatic)
                 {
                     handles.Add(staticHandleList[index]);
-                    sizes.Add(0.5f * math.length(new float3(instances[index].sizeX, instances[index].sizeY, instances[index].sizeZ)));
+                    sizes.Add(0.5f * math.length(staticSizeList[index]));
                 }
             }
             if (handles.Count == 0)
@@ -849,7 +1071,7 @@ namespace McKrill.Avbd.Samples
             float size = shotSize;
 
             // Start just in front of the camera, clear of the near plane, and fly the way the camera looks.
-            BodyDescriptor descriptor = BodyDescriptor.Box(new float3(size), shotMass / (size * size * size), (float3)t.position + direction * (size + 0.6f));
+            BodyDescriptor descriptor = DemoBox(new float3(size), shotMass / (size * size * size), (float3)t.position + direction * (size + 0.6f));
             descriptor.rotation = t.rotation;
             descriptor.linearVelocity = direction * shotSpeed;
 
@@ -895,6 +1117,122 @@ namespace McKrill.Avbd.Samples
                         + distance.ToString("0.0") + " m to the surface" + (paused ? " (waits for the next step)" : "")
                     : "Not queued: too many explosions for one step.";
             });
+        }
+
+        // Where the camera is and which way it looks: the pose of this frame (the camera object gets it in LateUpdate).
+        void GetCameraRay(out float3 origin, out float3 direction)
+        {
+            if (controlCamera || cam == null)
+            {
+                origin = camPosition;
+                direction = Quaternion.Euler(pitch, yaw, 0f) * Vector3.forward;
+            }
+            else
+            {
+                origin = cam.transform.position;
+                direction = cam.transform.forward;
+            }
+        }
+
+        // The spring of the grab: the held point is on the line of sight at grabDistance, and the stiffness grows with how far the grabbed blocks are from that line,
+        // that is, from the center of the screen (the field does it on the GPU, from the centroid of the blocks).
+        ForceFieldDescriptor GrabSpring(float3 origin, float3 direction)
+        {
+            float3 forward = math.normalizesafe(direction);
+            return ForceFieldDescriptor.Spring(GrabGroup, origin + forward * grabDistance, grabForce, grabDamping, forward, grabOffsetGain);
+        }
+
+        void StartGrab()
+        {
+            if (cam == null || grabActive)
+                return;
+
+            GetCameraRay(out float3 origin, out float3 direction);
+            float radius = grabRadius;
+            int version = simulationVersion;
+            int token = ++grabToken;
+            bool direct = grabDirect;
+
+            grabStatus = "Casting the ray...";
+            raycaster.Cast(origin, direction, RayMaxDistance, (hit, distance) =>
+            {
+                if (token != grabToken || version != simulationVersion || solver == null || !grabHeld || clickMode != ClickMode.Grab)
+                    return; // the button was released, the mode changed or the simulation was rebuilt while the ray was on its way
+                if (!hit)
+                {
+                    grabStatus = "Nothing to grab: the ray from the camera hit nothing.";
+                    return;
+                }
+
+                float3 point = origin + math.normalizesafe(direction) * distance;
+                labeler.Label(point, radius, GrabGroup, 0u);
+
+                grabDistance = distance;
+                if (direct)
+                {
+                    // No field: the next UpdateGrab begins the hold and takes the point the camera holds then as the start, so the blocks do not jump by the way the
+                    // camera moved while the ray was on its way.
+                    grabIsDirect = true;
+                    grabFirstMove = true;
+                    grabActive = true;
+                    grabStatus = "";
+                    return;
+                }
+                ForceFieldHandle field = solver.AddForceField(GrabSpring(origin, direction));
+                if (!field.IsValid)
+                {
+                    labeler.ClearAll(GrabGroup);
+                    grabStatus = "Not grabbed: no force field left.";
+                    return;
+                }
+                grabField = field;
+                grabIsDirect = false;
+                grabActive = true;
+                grabStatus = "";
+            });
+        }
+
+        // Every frame while a grab is held: the target is the point the camera looks at, at the distance of the grab, and the sliders of the panel apply.
+        void UpdateGrab()
+        {
+            if (!grabActive || solver == null)
+                return;
+
+            GetCameraRay(out float3 origin, out float3 direction);
+            if (!grabIsDirect)
+            {
+                solver.UpdateForceField(grabField, GrabSpring(origin, direction));
+                return;
+            }
+
+            // Direct: the held point is where the camera looks, at the distance of the grab. The first frame remembers where every block is relative to it. Every later
+            // frame puts every block at the point plus its own offset, with the velocity of the point (its move over the time of the frame): the blocks follow the camera
+            // exactly, and a block that is let go keeps that velocity. Paused, they follow the camera at rest. A very short frame is taken as 4 ms.
+            float3 target = origin + math.normalizesafe(direction) * grabDistance;
+            if (grabFirstMove)
+            {
+                grabLastTarget = target;
+                grabFirstMove = false;
+                mover.BeginHold(GrabGroup, target);
+                return;
+            }
+            float3 velocity = paused ? float3.zero : (target - grabLastTarget) / Mathf.Max(Time.deltaTime, 0.004f);
+            grabLastTarget = target;
+            mover.Hold(GrabGroup, target, velocity);
+        }
+
+        void EndGrab()
+        {
+            if (!grabActive)
+                return;
+            grabToken++;
+            grabActive = false;
+            if (solver != null && !grabIsDirect)
+                solver.RemoveForceField(grabField);
+            grabField = ForceFieldHandle.Invalid;
+            if (labeler != null)
+                labeler.ClearAll(GrabGroup);
+            grabStatus = "Released.";
         }
 
         void RemoveShot(int index)
@@ -954,6 +1292,16 @@ namespace McKrill.Avbd.Samples
                 layer = gameObject.layer,
             };
             Graphics.RenderMeshPrimitives(renderParams, cubeMesh, 0, staticCount + shots.Count);
+
+            // The smooth pieces of the blocks on the surface: the same light, one more draw call for all of them.
+            if (chunkMesh != null)
+            {
+                chunkMaterial.SetVector("_LightDirection", toLight);
+                chunkMaterial.SetColor("_LightColor", lightColor);
+                chunkMaterial.SetColor("_AmbientColor", new Color(0.35f, 0.37f, 0.40f));
+                renderParams.material = chunkMaterial;
+                Graphics.RenderMeshPrimitives(renderParams, chunkMesh, 0, 1);
+            }
         }
 
         // ---- camera and light --------------------------------------------------------------------------
@@ -1037,7 +1385,11 @@ namespace McKrill.Avbd.Samples
             Event e = Event.current;
             if (e.type == EventType.Repaint)
                 DrawCrosshair();
+            // The release of the button ends a grab wherever it happens, also over a panel, where a control may use the event (rawType is the original).
+            if (e.rawType == EventType.MouseUp && e.button == 0)
+                grabHeld = false;
 
+            DrawObjectsPanel();
             DrawPanel();
             HandleInput(e);
         }
@@ -1065,7 +1417,7 @@ namespace McKrill.Avbd.Samples
             GUILayout.BeginArea(new Rect(margin, margin, width, Screen.height / scale - 2f * margin));
             GUILayout.BeginVertical(GUI.skin.box);
 
-            // What a left click does. The button only asks: the mode changes in Update, so the controls below never change in the middle of an event.
+            // What a left click does. The buttons only ask: the mode changes in Update, so the controls below never change in the middle of an event.
             GUILayout.Label("Left click:", boldLabel);
             GUILayout.BeginHorizontal();
             for (int i = 0; i < ClickModeNames.Length; i++)
@@ -1100,7 +1452,7 @@ namespace McKrill.Avbd.Samples
                     : "Click a voxel to select it and every voxel joined to it.");
                 GUILayout.Label(throwStatus);
             }
-            else
+            else if (clickMode == ClickMode.Explode)
             {
                 GUILayout.Label("Radius: " + explosionRadius.ToString("0.0") + " m");
                 explosionRadius = GUILayout.HorizontalSlider(explosionRadius, 1f, 50f);
@@ -1114,15 +1466,38 @@ namespace McKrill.Avbd.Samples
 
                 GUILayout.Label(explosionStatus);
             }
+            else
+            {
+                GUILayout.Label("Radius: " + grabRadius.ToString("0.0") + " m   (blocks around the point the ray hits)");
+                grabRadius = GUILayout.HorizontalSlider(grabRadius, 0.1f, 10f);
+
+                // How the blocks are grabbed. The toggle only asks (the style changes in Update). The sliders of the force are always drawn and greyed out in the
+                // direct style: a control that comes and goes while the panel is drawn is an IMGUI error.
+                bool grabEnabled = GUI.enabled;
+                if (GUILayout.Toggle(grabDirect, "Direct: move the blocks, no force (mass and inertia unchanged)") != grabDirect)
+                    requestGrabDirect = grabDirect ? 0 : 1;
+                GUI.enabled = grabEnabled && !grabDirect;
+
+                // Stiffness on a log scale: 10 to 2000 N/m. Each block gets this times the distance of the group from the held point, in newtons.
+                GUILayout.Label("Force: " + grabForce.ToString("0") + " N/m   (a pull of this many N per meter the blocks are from the held point)");
+                grabForce = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(grabForce), 1f, Mathf.Log10(2000f))), 10f, 2000f);
+
+                GUILayout.Label("Damping ratio: " + grabDamping.ToString("0.00") + "   (0 swings, 1 is critical)");
+                grabDamping = GUILayout.HorizontalSlider(grabDamping, 0f, 3f);
+
+                GUILayout.Label("Offset gain: " + grabOffsetGain.ToString("0.00") + " per m   (the force grows with the distance of the blocks from the center of the screen)");
+                grabOffsetGain = GUILayout.HorizontalSlider(grabOffsetGain, 0f, 5f);
+
+                GUI.enabled = grabEnabled;
+
+                GUILayout.Label(grabActive ? "Holding at " + grabDistance.ToString("0.0") + " m from the camera" : grabStatus);
+            }
 
             GUILayout.Space(4f);
             GUILayout.Label("Iterations: " + iterations);
             iterations = Mathf.RoundToInt(GUILayout.HorizontalSlider(iterations, 1, 30));
 
             GUILayout.Space(4f);
-            GUILayout.Label("Objects (Reset reads the files again)", boldLabel);
-            foreach (string line in objectLines)
-                GUILayout.Label(line);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button(paused ? "Play" : "Pause")) paused = !paused;
             if (GUILayout.Button("Step")) { paused = true; requestStep = true; }
@@ -1131,6 +1506,8 @@ namespace McKrill.Avbd.Samples
             GUILayout.EndHorizontal();
 
             // Mass, stiffness and the threshold on log scales.
+            smoothSurface = GUILayout.Toggle(smoothSurface, "Smooth surface (needs chunks in the file, see the objects panel)");
+
             GUILayout.Label("Voxel mass: " + voxelMass.ToString(voxelMass < 1f ? "0.000" : "0.0") + " kg");
             voxelMass = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(voxelMass), -2f, 1f)), 0.01f, 10f);
 
@@ -1156,14 +1533,14 @@ namespace McKrill.Avbd.Samples
             bendBreakDegrees = Mathf.Round(GUILayout.HorizontalSlider(bendBreakDegrees, 1f, 180f));
             GUI.enabled = wasEnabled;
             GUILayout.Space(4f);
-            GUILayout.Label("bodies " + (staticCount + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
+            GUILayout.Label("bodies " + (staticCount + chunkBlockCount + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
             GUILayout.Label("joints broken " + (constraints != null ? constraints.BrokenCount : 0) + " / " + jointCount);
             GUILayout.Label("step " + stepMs.ToString("0.00") + " ms (CPU side)   frame " + frameMs.ToString("0.0") + " ms");
             if (behindRealTime)
                 GUILayout.Label("running slower than real time");
 
             GUILayout.Space(4f);
-            GUILayout.Label("Left click: shoot, explode, or click to select and click again to throw (the mode buttons)\nSpace: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
+            GUILayout.Label("Left click: shoot, explode, click to select and click again to throw, or hold to grab (the mode buttons)\nSpace: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
 
             GUILayout.EndVertical();
             Rect used = GUILayoutUtility.GetLastRect();
@@ -1171,6 +1548,31 @@ namespace McKrill.Avbd.Samples
 
             if (Event.current.type == EventType.Repaint)
                 panelScreenRect = new Rect(0f, 0f, (width + 2f * margin) * scale, (used.yMax + 2f * margin) * scale);
+
+            GUI.matrix = oldMatrix;
+        }
+
+        // One line for each file of the folder, in a panel of its own at the top right of the screen.
+        void DrawObjectsPanel()
+        {
+            const float margin = 8f;
+            const float width = 340f;
+            float scale = Mathf.Clamp(Screen.height / 800f, 1f, 2.5f);
+
+            Matrix4x4 oldMatrix = GUI.matrix;
+            GUI.matrix = Matrix4x4.Scale(new Vector3(scale, scale, 1f));
+
+            GUILayout.BeginArea(new Rect(Screen.width / scale - width - margin, margin, width, Screen.height / scale - 2f * margin));
+            GUILayout.BeginVertical(GUI.skin.box);
+            GUILayout.Label("Objects (Reset reads the files again)", boldLabel);
+            foreach (string line in objectLines)
+                GUILayout.Label(line);
+            GUILayout.EndVertical();
+            Rect used = GUILayoutUtility.GetLastRect();
+            GUILayout.EndArea();
+
+            if (Event.current.type == EventType.Repaint)
+                objectsPanelScreenRect = new Rect(Screen.width - (width + 2f * margin) * scale, 0f, (width + 2f * margin) * scale, (used.yMax + 2f * margin) * scale);
 
             GUI.matrix = oldMatrix;
         }
@@ -1192,7 +1594,7 @@ namespace McKrill.Avbd.Samples
             }
 
             // Mouse events a panel control already used have the type Used and do not get here; the rest outside the panel are the scene's.
-            if (panelScreenRect.Contains(e.mousePosition))
+            if (panelScreenRect.Contains(e.mousePosition) || objectsPanelScreenRect.Contains(e.mousePosition))
                 return;
 
             if (e.type == EventType.MouseDown && e.button == 0)
@@ -1201,8 +1603,13 @@ namespace McKrill.Avbd.Samples
                     requestExplode = true;
                 else if (clickMode == ClickMode.Throw)
                     requestThrowClick = true;
-                else
+                else if (clickMode == ClickMode.Shoot)
                     requestShoot = true;
+                else
+                {
+                    grabHeld = true;
+                    requestGrabStart = true;
+                }
                 e.Use();
             }
             else if (controlCamera && e.type == EventType.MouseDrag && e.button == 1)
@@ -1220,7 +1627,7 @@ namespace McKrill.Avbd.Samples
 
         // ---- helpers -----------------------------------------------------------------------------------
 
-        static readonly string[] ClickModeNames = { "Shot", "Explosion", "Throw" };
+        static readonly string[] ClickModeNames = { "Shot", "Explosion", "Throw", "Grab" };
 
         static readonly Color ShotColor = new Color(1f, 0.25f, 0.15f);
     }
