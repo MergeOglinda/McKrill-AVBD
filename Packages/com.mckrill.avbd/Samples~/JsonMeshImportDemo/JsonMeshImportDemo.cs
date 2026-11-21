@@ -67,6 +67,8 @@ namespace McKrill.Avbd.Samples
         [Header("Objects (applied on Reset)")]
         [Tooltip("Mass of one voxel in kg. The density of an object follows from it and the size of its voxels, so a finer file has the same mass per voxel. A block of the Fracture Wall Demo weighs 0.25 kg.")]
         [SerializeField, Min(0.001f)] float voxelMass = 0.25f;
+        [Tooltip("Use the colors that a voxel file has for the voxels on the surface of the object (the voxelizer writes them when the mesh has colors). Voxels without a color, such as the ones below the surface, and files without colors keep the color of their object.")]
+        [SerializeField] bool useFileColors = true;
         [Tooltip("Joints are rigid (infinite stiffness) instead of springs with the stiffness below.")]
         [SerializeField] bool rigidJoints = false;
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
@@ -397,7 +399,8 @@ namespace McKrill.Avbd.Samples
                 objects.Add(item);
                 voxelTotal += data.voxelCount;
                 objectLines.Add(name + ": " + data.voxelCount + " voxels, " + data.jointCount + " joints, "
-                    + item.extent.x.ToString("0.0") + " x " + item.extent.y.ToString("0.0") + " x " + item.extent.z.ToString("0.0") + " m");
+                    + item.extent.x.ToString("0.0") + " x " + item.extent.y.ToString("0.0") + " x " + item.extent.z.ToString("0.0") + " m"
+                    + (data.HasColors ? ", " + data.colorCount + " colored" : ""));
                 if (item.extent.x > ObjectSpacing || item.extent.z > ObjectSpacing)
                     Debug.LogWarning("JSON Mesh Import Demo: \"" + name + "\" is wider than the " + ObjectSpacing + " m between the objects and will overlap its neighbor.");
             }
@@ -472,13 +475,16 @@ namespace McKrill.Avbd.Samples
                 float edge = data.voxelSize - Mathf.Min(VoxelGap, MaxGapFraction * data.voxelSize);
                 var size = new float3(edge);
                 float density = voxelMass / (edge * edge * edge);
+                int[] colorOfVoxel = useFileColors ? data.ColorIndexOfVoxels() : null; // null: no colors in the file, or not used
                 for (int n = 0; n < data.voxelCount; n++)
                 {
                     float3 position = data.VoxelCenter(n) + o.offset;
                     positions[first + n] = position;
                     descriptors.Add(BodyDescriptor.Box(size, density, position));
                     instanceSizes.Add(size);
-                    instanceColors.Add(VoxelColor(i, data.voxels[3 * n], data.voxels[3 * n + 1], data.voxels[3 * n + 2]));
+                    instanceColors.Add(colorOfVoxel != null && colorOfVoxel[n] >= 0
+                        ? (Color)data.ColorAt(colorOfVoxel[n])
+                        : VoxelColor(i, data.voxels[3 * n], data.voxels[3 * n + 1], data.voxels[3 * n + 2]));
                 }
                 first += data.voxelCount;
             }
@@ -1134,6 +1140,7 @@ namespace McKrill.Avbd.Samples
             GUILayout.Label("Voxel mass: " + voxelMass.ToString(voxelMass < 1f ? "0.000" : "0.0") + " kg");
             voxelMass = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(voxelMass), -2f, 1f)), 0.01f, 10f);
 
+            useFileColors = GUILayout.Toggle(useFileColors, "Colors from the files (surface voxels)");
             rigidJoints = GUILayout.Toggle(rigidJoints, "Rigid joints");
             GUILayout.Label("Joint stiffness: " + (rigidJoints ? "rigid (the slider is not used)" : jointStiffness.ToString("0.0e+0")));
             jointStiffness = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(jointStiffness), 2f, 8f)), 1e2f, 1e8f);

@@ -15,7 +15,7 @@ The project needs a render pipeline that draws a `Universal Render Pipeline/Lit`
 
 ## The files
 
-There is no list of files. The demo spawns **every file in the `Resources/JsonMeshImportDemo` folder**, one object each, in the order of the file names (ordinal, so `Cube`, `Sphere`, `Torus`). In the imported sample that is `Assets/Samples/McKrill AVBD/<version>/JSON Mesh Import Demo/Resources/JsonMeshImportDemo`; any `Resources/JsonMeshImportDemo` folder in the project counts, and all of them are read together. The folder ships with three files: a sphere, a torus lying flat and a cube. The cube was made from an STL that is hollow (a surface for the outside and another, facing inward, for a cavity), to show that the script fills the inside.
+There is no list of files. The demo spawns **every file in the `Resources/JsonMeshImportDemo` folder**, one object each, in the order of the file names (ordinal, so `ColorBall`, `Cube`, `Sphere`, `Torus`). In the imported sample that is `Assets/Samples/McKrill AVBD/<version>/JSON Mesh Import Demo/Resources/JsonMeshImportDemo`; any `Resources/JsonMeshImportDemo` folder in the project counts, and all of them are read together. The folder ships with four files: a ball with colored stripes (made from an OBJ with vertex colors, to show the colors, see below), a sphere, a torus lying flat and a cube. The cube was made from an STL that is hollow (a surface for the outside and another, facing inward, for a cavity), to show that the script fills the inside.
 
 To use your own mesh, run the script and put its output (a `.json` file) in that folder:
 
@@ -48,8 +48,9 @@ The click mode buttons (Shot, Explosion and Throw) and their shot and explosion 
 
 | Control | What it does |
 | --- | --- |
-| Objects | One line for each file of the `Resources/JsonMeshImportDemo` folder: the number of voxels and joints and the size of the object, or why it was not loaded |
+| Objects | One line for each file of the `Resources/JsonMeshImportDemo` folder: the number of voxels and joints, the size of the object and, if the file has colors, how many voxels have one, or why it was not loaded |
 | Voxel mass | 0.01 to 10 kg (log scale), default 0.25 kg like a block of the fracture wall. The mass of every voxel; the density of an object follows from it and the size of its voxels |
+| Colors from the files | Voxels on the surface that have a color in their file take it; the voxels below the surface, and the voxels of a file without colors, keep the color of their object (see Colors) |
 | Rigid joints, Joint stiffness, Fracture threshold | As in the fracture wall demo (defaults: stiffness 5e3, threshold 40). **They are the wall's numbers, not tuned for voxels**: the multiplier a joint sees depends on the voxel size and mass, so if nothing breaks lower the threshold or shoot harder, and if an object falls apart by itself raise it |
 | Plastic yield, Yield threshold, Bend break, Bend limit | As in the fracture wall demo |
 
@@ -65,6 +66,10 @@ The click mode buttons (Shot, Explosion and Throw) and their shot and explosion 
 - The shot size slider goes up to 2 m and shots are cubes.
 - Drawing is instanced and has **no shadows**, as in the fracture wall demo.
 - Written without a Unity editor: not compiled, not run.
+
+## Colors
+
+A voxel file made by `Tools/Voxelize/voxelize_stl.py` from an OBJ with colors (vertex colors, material colors or textures) has the colors of the voxels **on the surface**: `colorVoxels` (the voxel numbers) and `colors` (red, green and blue, 0 to 255, three integers per voxel). The demo gives those voxels their color; every other voxel (the ones below the surface, and all voxels of a file without colors) has the color of its object, as before. The **Colors from the files** toggle switches that on and off, on Reset. The colors are read as sRGB and lit by the demo's light like the other voxels. The Throw selection is drawn in green and gives the voxels their color back when it is let go.
 
 ## Throw
 

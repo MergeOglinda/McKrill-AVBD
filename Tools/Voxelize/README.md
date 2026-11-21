@@ -25,6 +25,7 @@ python3 Tools/Voxelize/voxelize_stl.py model.obj -o model.voxels.json --voxel-si
 | `--connectivity 6` (default) | Joint every voxel to its 6 face neighbors. `18` adds the 12 edge neighbors, `26` adds the 8 corner neighbors. |
 | `--scale F` | Multiplies the mesh first, for example `0.001` for a mesh in millimeters. |
 | `--zup-to-yup` | Rotates the mesh from a z-up frame (most CAD tools) to Unity's y-up frame: `(x, y, z) -> (x, z, -y)`. |
+| `--no-colors` | Does not write the colors of the surface voxels, even if the mesh has colors (see Colors). |
 | `--max-cells N` | Refuses a grid with more cells than this (default 200 million) instead of running out of memory. |
 
 The grid starts at the minimum corner of the (scaled, rotated) mesh. The script prints the voxel count, the joint count
@@ -72,6 +73,7 @@ JSON, `"format": "mckrill-avbd-voxels"`, `"version": 1`. The arrays are flat arr
 | `gridDimensions` | Number of cells along x, y, z. |
 | `voxels` | `3 * voxelCount` integers: the `(i, j, k)` index of each solid voxel, ordered by `i`, then `j`, then `k`. The position of a triple in this list (0, 1, 2, ...) is the **voxel number**. |
 | `joints` | `2 * jointCount` integers: pairs of voxel numbers. Each pair of neighbors appears once. |
+| `colorCount`, `colorVoxels`, `colors` | Only if the mesh has colors: `colorVoxels` are the numbers of the voxels on the surface that have a color (ascending), `colors` their colors as `3 * colorCount` integers 0 to 255 (red, green, blue, sRGB). Voxels that are not listed have no color. The three fields are absent for a mesh without colors, and the version stays 1: a reader that does not know them ignores them. |
 
 Voxel `n` with index `(i, j, k)` is a box of size `voxelSize` on all three sides, centered at
 
@@ -116,7 +118,21 @@ for (int m = 0; m < data.jointCount; m++)
 }
 ```
 
-The package's *JSON Mesh Import Demo* sample does this: it reads a list of voxel files, spawns the boxes and joints on the GPU solver and lets you shoot or blow them up (`Packages/com.mckrill.avbd/Samples~/JsonMeshImportDemo`, which also has a ready-made `VoxelMeshData` class that reads and checks the file).
+The package's *JSON Mesh Import Demo* sample does this (and also reads the colors, see Colors below): it reads a list of voxel files, spawns the boxes and joints on the GPU solver and lets you shoot or blow them up (`Packages/com.mckrill.avbd/Samples~/JsonMeshImportDemo`, which also has a ready-made `VoxelMeshData` class that reads and checks the file).
+
+## Colors
+
+An OBJ can carry colors, and the voxelizer passes them on to the voxels **on the surface**, that is the voxels with a face that no other voxel shares. The voxels below the surface get no color.
+
+For a surface voxel the script finds the point of the mesh that is closest to the center of the voxel (among the triangles that touch the voxel or one of its six face neighbors) and takes the color of the mesh at that point. It is one sample for each voxel, not an average over the voxel, so a texture with detail finer than a voxel is sampled, not filtered. The color of a triangle comes from, in this order:
+
+1. its **texture**: the `map_Kd` image of the material (from the `mtllib` file) at the texture coordinates (`vt`) of the face, with bilinear filtering and repeat. Reading an image needs the [Pillow](https://pypi.org/project/pillow/) package (`pip install pillow`); without it the script warns and uses the next source. The only other dependency stays numpy.
+2. its **vertex colors**: `v x y z r g b` (the common extension of MeshLab and others), interpolated between the corners. The values are 0 to 1, or 0 to 255 if any value in the file is above 1.
+3. the diffuse color `Kd` of its material (`usemtl`).
+
+A surface voxel whose closest triangle has none of them has no color (a part of the mesh without a material, for example). A missing `.mtl` or texture file is reported as a warning, and the material's `Kd` is used. STL files have no colors, so the output of an STL has none. Colors are written as they are in the file (sRGB). Colors do not change which voxels exist, or the joints.
+
+The *JSON Mesh Import Demo* sample applies them (`Packages/com.mckrill.avbd/Samples~/JsonMeshImportDemo`).
 
 ## Limits
 
