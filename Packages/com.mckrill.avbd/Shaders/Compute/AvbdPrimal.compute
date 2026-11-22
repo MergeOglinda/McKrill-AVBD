@@ -250,32 +250,68 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
     }
 }
 
-// The terms of a body's system that the lanes add up: the 3x3 blocks lhsLin, lhsAng and lhsCross (9 each, row-major), then rhsLin and
-// rhsAng (3 each).
-#define AVBD_PRIMAL_TERMS 33
+// The terms of a body's system that the lanes add up. The solver reads only the lower triangle of the 6x6 matrix, and the linear and the angular block are
+// symmetric, so of those only their lower triangles are kept: lhsLin (6), lhsAng (6), the full cross block (9, rows 3 to 5, columns 0 to 2), then rhsLin and
+// rhsAng (3 each). That is 27 terms, not 33, and the result is the same bit for bit (the upper triangles were never read).
+#define AVBD_PRIMAL_TERMS 27
+#define AVBD_TERM_LIN   0u
+#define AVBD_TERM_ANG   6u
+#define AVBD_TERM_CROSS 12u
+#define AVBD_TERM_RHS   21u
 
-// Partial sums of the lanes, term-major: term t of thread i is at t * AVBD_GROUP_SIZE + i, so the lanes of a body read consecutive words.
-groupshared float gsTerms[AVBD_PRIMAL_TERMS * AVBD_GROUP_SIZE];
+#if AVBD_PRIMAL_LANES < 2
+#error The partial systems are added up in two halves: AVBD_PRIMAL_LANES must be at least 2.
+#endif
 
-void StorePartial(uint tid, PrimalSystem sys)
+// The lanes of a body add their partial systems in two steps, so shared memory only has to hold half of them: the upper half of the lanes (lane >= H, with
+// H = AVBD_PRIMAL_LANES / 2) writes its terms, the lower half adds them to its own, and then the lower half writes the result and every sum over its H lanes is
+// formed by one thread. A slot holds the terms of one lane of the lower half: slot b * H + l is lane l of body b of the group, and the terms of a slot are
+// term-major, term t of slot s at t * AVBD_PRIMAL_SLOTS + s, so the neighboring threads of a warp write neighboring words.
+#define AVBD_PRIMAL_HALF_LANES (AVBD_PRIMAL_LANES / 2u)
+#define AVBD_PRIMAL_SLOTS (AVBD_GROUP_SIZE / 2u)
+groupshared float gsTerms[AVBD_PRIMAL_TERMS * AVBD_PRIMAL_SLOTS];
+
+// Index of the element (r, c), c <= r, in a packed lower triangle.
+uint TriIndex(uint r, uint c)
+{
+    return r * (r + 1u) / 2u + c;
+}
+
+void PackSystem(PrimalSystem sys, out float p[AVBD_PRIMAL_TERMS])
 {
     [unroll]
     for (uint r = 0; r < 3; r++)
     {
         [unroll]
-        for (uint col = 0; col < 3; col++)
+        for (uint c = 0; c <= r; c++)
         {
-            gsTerms[(r * 3 + col) * AVBD_GROUP_SIZE + tid] = sys.lhsLin[r][col];
-            gsTerms[(9 + r * 3 + col) * AVBD_GROUP_SIZE + tid] = sys.lhsAng[r][col];
-            gsTerms[(18 + r * 3 + col) * AVBD_GROUP_SIZE + tid] = sys.lhsCross[r][col];
+            p[AVBD_TERM_LIN + TriIndex(r, c)] = sys.lhsLin[r][c];
+            p[AVBD_TERM_ANG + TriIndex(r, c)] = sys.lhsAng[r][c];
         }
+        [unroll]
+        for (uint c2 = 0; c2 < 3; c2++)
+            p[AVBD_TERM_CROSS + r * 3 + c2] = sys.lhsCross[r][c2];
     }
     [unroll]
     for (uint k = 0; k < 3; k++)
     {
-        gsTerms[(27 + k) * AVBD_GROUP_SIZE + tid] = sys.rhsLin[k];
-        gsTerms[(30 + k) * AVBD_GROUP_SIZE + tid] = sys.rhsAng[k];
+        p[AVBD_TERM_RHS + k] = sys.rhsLin[k];
+        p[AVBD_TERM_RHS + 3 + k] = sys.rhsAng[k];
     }
+}
+
+void StoreTerms(uint slot, float p[AVBD_PRIMAL_TERMS])
+{
+    [unroll]
+    for (uint t = 0; t < AVBD_PRIMAL_TERMS; t++)
+        gsTerms[t * AVBD_PRIMAL_SLOTS + slot] = p[t];
+}
+
+void AddTerms(uint slot, inout float p[AVBD_PRIMAL_TERMS])
+{
+    [unroll]
+    for (uint t = 0; t < AVBD_PRIMAL_TERMS; t++)
+        p[t] += gsTerms[t * AVBD_PRIMAL_SLOTS + slot];
 }
 
 // The summed system of every body of the group, term-major like gsTerms, but with the body as the fast index: term t of body b is at t * AVBD_PRIMAL_BODIES + b.
@@ -285,19 +321,19 @@ void StorePartial(uint tid, PrimalSystem sys)
 groupshared float gsSums[AVBD_PRIMAL_TERMS * AVBD_PRIMAL_BODIES];
 
 // The term of the lower-triangle element (i, j), i >= j, of the symmetric 6x6 matrix: the linear block (rows and columns 0 to 2), the cross block (rows 3 to 5,
-// columns 0 to 2) or the angular block (rows and columns 3 to 5), in the order StorePartial wrote them.
+// columns 0 to 2) or the angular block (rows and columns 3 to 5), in the order PackSystem wrote them.
 uint SolveTerm(uint i, uint j)
 {
     if (i < 3u)
-        return i * 3u + j;
+        return AVBD_TERM_LIN + TriIndex(i, j);
     if (j < 3u)
-        return 18u + (i - 3u) * 3u + j;
-    return 9u + (i - 3u) * 3u + (j - 3u);
+        return AVBD_TERM_CROSS + (i - 3u) * 3u + j;
+    return AVBD_TERM_ANG + TriIndex(i - 3u, j - 3u);
 }
 
 // Element (i, j) of the matrix of body `body` of the group and element i of its right-hand side.
 #define AVBD_SOLVE_A(i, j) gsSums[SolveTerm(i, j) * AVBD_PRIMAL_BODIES + body]
-#define AVBD_SOLVE_Y(i)    gsSums[(27u + (i)) * AVBD_PRIMAL_BODIES + body]
+#define AVBD_SOLVE_Y(i)    gsSums[(AVBD_TERM_RHS + (i)) * AVBD_PRIMAL_BODIES + body]
 
 // Solves A x = -rhs for the summed system of body `body` of the group with an LDL^T factorization, no pivoting, in groupshared memory: the lower triangle
 // of the matrix is overwritten by the factorization and the right-hand side by x (AVBD_SOLVE_Y). Mirrors Mat6.TrySolveLDLT in the reference. Returns false if
@@ -489,22 +525,38 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
                 }
             }
         }
+    }
 
-        StorePartial(tid, sys);
+    // Add up the partial systems of the body's lanes in two steps (see AVBD_PRIMAL_HALF_LANES), then into the body's column of gsSums. The order of the
+    // additions is fixed, so the sum does not depend on timing: lane l of the lower half adds lane l + H to its own terms, and the sum is made in lane order.
+    uint slotOfLane = body * AVBD_PRIMAL_HALF_LANES + (lane % AVBD_PRIMAL_HALF_LANES);
+
+    float terms[AVBD_PRIMAL_TERMS];
+    PackSystem(sys, terms);
+    if (active && lane >= AVBD_PRIMAL_HALF_LANES)
+        StoreTerms(slotOfLane, terms);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // A lane of the lower half reads and then overwrites its own slot, and no other thread touches it between the two barriers: no barrier between them.
+    if (active && lane < AVBD_PRIMAL_HALF_LANES)
+    {
+        AddTerms(slotOfLane, terms);
+        StoreTerms(slotOfLane, terms);
     }
 
     GroupMemoryBarrierWithGroupSync();
 
-    // Add up the partial systems of the body's lanes, in lane order (so the sum does not depend on timing), into the body's column of gsSums. Lane l
-    // adds the terms l, l + AVBD_PRIMAL_LANES, ...; a term is read and written by one lane only.
+    // Lane l adds the terms l, l + AVBD_PRIMAL_LANES, ... over the H slots of the body; a term is read and written by one lane only.
     if (active)
     {
+        uint firstSlot = body * AVBD_PRIMAL_HALF_LANES;
         for (uint t = lane; t < AVBD_PRIMAL_TERMS; t += AVBD_PRIMAL_LANES)
         {
             float sum = 0.0;
             [unroll]
-            for (uint l = 0; l < AVBD_PRIMAL_LANES; l++)
-                sum += gsTerms[t * AVBD_GROUP_SIZE + first + l];
+            for (uint l = 0; l < AVBD_PRIMAL_HALF_LANES; l++)
+                sum += gsTerms[t * AVBD_PRIMAL_SLOTS + firstSlot + l];
             gsSums[t * AVBD_PRIMAL_BODIES + body] = sum;
         }
     }
