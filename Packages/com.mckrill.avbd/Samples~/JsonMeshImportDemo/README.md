@@ -46,11 +46,12 @@ The same as in the *GPU Fracture Wall Demo*, except for the volley (there is no 
 
 ## The panel
 
-The click mode buttons (Shot, Explosion, Throw and Grab) and their shot, explosion, throw and grab settings, the solver's iterations and the joint settings are as in the fracture wall demo. The object and joint settings take effect on **Reset**, because the package cannot change a joint after it was added.
+The click mode buttons (Shot, Explosion, Throw and Grab) and their shot, explosion, throw and grab settings, the joint settings are as in the fracture wall demo (the solver's settings are in the panel at the right). The object and joint settings take effect on **Reset**, because the package cannot change a joint after it was added.
 
 | Control | What it does |
 | --- | --- |
 | Objects (a panel of its own, top right of the screen) | One line for each file of the `Resources/JsonMeshImportDemo` folder: the number of voxels and joints, the size of the object and whether the file has a smooth surface, or why it was not loaded |
+| AVBD solver settings (the same panel, below the objects) | All the constants of `AvbdSolverSettings`: time step (steps per second), iterations, gravity (x, y, z), alpha, beta linear, beta angular, gamma, lowest and highest penalty, plus the most steps run in a frame and a button back to the defaults (the lowest penalty defaults to the demo's 2000). They take effect at the next step, **no Reset needed**. The same values are serialized fields of the component |
 | Shot, Explosion, Throw, Grab | The click mode. Grab has Radius (blocks around the hit point), the **Direct** toggle (place each block every frame at its own spot relative to the held point, with that point's velocity, so it can be thrown; no force, mass and inertia untouched) and, without Direct, Force (spring stiffness), Damping ratio and Offset gain, as in the fracture wall demo |
 | Smooth surface | Draw the surface blocks as their baked smooth pieces (takes effect on **Reset**). A file made without `--smooth` has no pieces and is drawn as cubes, which the objects list says ("no smooth surface in the file"). Only the drawing changes: the bodies, joints and collisions are the boxes either way |
 | Voxel mass | 0.01 to 10 kg (log scale), default 0.25 kg like a block of the fracture wall. The mass of every voxel; the density of an object follows from it and the size of its voxels |
