@@ -506,5 +506,96 @@ class SmoothChunkTests(unittest.TestCase):
             self.assertEqual(len(shipped["chunkTriangles"]), 3 * baked.stats["triangles"], name)
 
 
+class ShellTests(unittest.TestCase):
+    def solid_box(self, n=6):
+        return np.ones((n, n, n), dtype=bool)
+
+    def test_a_block_of_voxels_loses_its_inside_layer_by_layer(self):
+        for layers, expected in ((1, 6 ** 3 - 4 ** 3), (2, 6 ** 3 - 2 ** 3), (3, 6 ** 3), (4, 6 ** 3)):
+            self.assertEqual(int(vox.shell_of(self.solid_box(), layers).sum()), expected, "%d layers" % layers)
+
+    def test_the_shell_is_the_voxels_within_n_layers_of_the_outside(self):
+        solid, _, _ = vox.voxelize(icosphere(1.0, 2), voxel_size=0.15)
+        padded = np.pad(solid, 4, constant_values=False)
+        for layers in (1, 2, 3):
+            shell = vox.shell_of(solid, layers)
+            self.assertTrue(np.all(solid[shell]), "the shell is made of solid voxels")
+            for cell in np.argwhere(solid):
+                # within `layers` voxels of the outside: a cell that is not solid lies in the cube of that radius around it (corners count)
+                i, j, k = cell + 4
+                window = padded[i - layers:i + layers + 1, j - layers:j + layers + 1, k - layers:k + layers + 1]
+                self.assertEqual(bool(shell[tuple(cell)]), not window.all(), "cell %s, %d layers" % (cell, layers))
+            self.assertLess(int(shell.sum()), int(solid.sum()))
+
+    def test_the_skin_is_one_piece_joined_by_face_neighbors(self):
+        solid, _, _ = vox.voxelize(icosphere(1.0, 2), voxel_size=0.15)
+        voxels, joints = vox.build_joints(vox.shell_of(solid, 1), 6)
+        parent = list(range(len(voxels)))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for a, b in joints:
+            parent[find(a)] = find(b)
+        self.assertEqual(len({find(a) for a in range(len(voxels))}), 1, "a single layer of voxels, still all joined at connectivity 6")
+
+    def test_a_cavity_is_not_an_outside(self):
+        # a box with a closed cavity: the cavity is inside the solid object, so the one-layer shell is the outer skin only (the cavity's wall is not skin)
+        mesh = samples.sample_meshes()["Cube"].astype(np.float32).astype(np.float64)
+        solid, _, _ = vox.voxelize(mesh, voxel_size=0.25)
+        shell = vox.shell_of(solid, 1)
+        self.assertEqual(int(shell.sum()), 8 ** 3 - 6 ** 3)
+        self.assertFalse(shell[3, 3, 3] or shell[4, 4, 4], "no voxel in the middle, where the cavity is")
+
+    def test_the_chunks_of_a_shell_are_closed_and_the_same_as_for_the_solid_object(self):
+        mesh = icosphere(1.0, 2)
+        solid, origin, size = vox.voxelize(mesh, voxel_size=0.15)
+        full_voxels, _ = vox.build_joints(solid, 6)
+        full = chunks_module.bake(mesh, origin, size, solid, full_voxels)
+        shell_voxels, _ = vox.build_joints(vox.shell_of(solid, 1), 6)
+        shell = chunks_module.bake(mesh, origin, size, solid, shell_voxels)
+        self.assertEqual(shell.count, full.count, "the same blocks have a chunk")
+        for i in range(shell.count):
+            volume, area_vector = volume_and_area_vector(shell, i)
+            self.assertGreater(volume, 0.0)
+            self.assertLess(np.linalg.norm(area_vector), 1e-3 * size ** 2, "chunk %d is closed: its inner side is capped" % i)
+        cells_full = {tuple(full_voxels[n]): full.triangle_start[i + 1] - full.triangle_start[i] for i, n in enumerate(full.voxel_numbers)}
+        cells_shell = {tuple(shell_voxels[n]): shell.triangle_start[i + 1] - shell.triangle_start[i] for i, n in enumerate(shell.voxel_numbers)}
+        self.assertEqual(cells_shell, cells_full, "same cells, same triangle counts: the interior that has no voxels still counts as solid")
+
+    def test_a_cavity_wall_is_not_drawn_in_a_shell(self):
+        mesh = samples.sample_meshes()["Cube"].astype(np.float32).astype(np.float64)
+        solid, origin, size = vox.voxelize(mesh, voxel_size=0.25)
+        voxels, _ = vox.build_joints(vox.shell_of(solid, 1), 6)
+        chunks = chunks_module.bake(mesh, origin, size, solid, voxels)
+        self.assertEqual(chunks.stats["cavity_triangles_left_out"], 12)
+
+    def test_the_command_line_writes_a_shell(self):
+        mesh = icosphere(1.0, 2)
+        with tempfile.TemporaryDirectory() as d:
+            stl = os.path.join(d, "s.stl")
+            write_binary(stl, mesh)
+            out = os.path.join(d, "s.json")
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(vox.main([stl, "-o", out, "--voxel-size", "0.15", "--shell", "1", "--smooth"]), 0)
+                solid_out = os.path.join(d, "solid.json")
+                self.assertEqual(vox.main([stl, "-o", solid_out, "--voxel-size", "0.15"]), 0)
+                self.assertEqual(vox.main([stl, "-o", os.path.join(d, "bad.json"), "--voxel-size", "0.15", "--shell", "-1"]), 1)
+            with open(out) as f:
+                shell = json.load(f)
+            with open(solid_out) as f:
+                solid = json.load(f)
+            self.assertEqual(shell["shellLayers"], 1)
+            self.assertNotIn("shellLayers", solid)
+            self.assertLess(shell["voxelCount"], solid["voxelCount"])
+            self.assertEqual(len(shell["voxels"]), 3 * shell["voxelCount"])
+            self.assertEqual(len(shell["joints"]), 2 * shell["jointCount"])
+            self.assertTrue(all(0 <= v < shell["voxelCount"] for v in shell["chunkVoxels"]))
+            self.assertTrue(all(0 <= j < shell["voxelCount"] for j in shell["joints"]))
+
+
 if __name__ == "__main__":
     unittest.main()

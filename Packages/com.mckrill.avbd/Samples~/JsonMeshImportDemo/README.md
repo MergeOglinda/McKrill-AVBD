@@ -25,6 +25,8 @@ To use your own mesh, run the script and put its output (a `.json` file) in that
 python3 Tools/Voxelize/voxelize_stl.py engine.stl -o engine.voxels.json --voxel-size 0.25 --zup-to-yup
 ```
 
+For a hollow object (only the skin, far fewer bodies) add `--shell 1`, or `--shell 2` for a thicker wall.
+
 To leave an object out, remove its file from the folder (or move it out of any `Resources` folder). There is nothing to edit in the code.
 
 Every text asset in the folder is read as a voxel file, so keep other text files out of it. A file that cannot be read (not a voxel file, wrong version, inconsistent arrays) is reported in the console and in the panel and is left out; the other files are still spawned. If the folder has no files, the console says so and the scene has only the ground. **Reset** reads the folder again, so a file you changed or added while playing is picked up with `R` (in the editor the asset must be imported first, which happens when the editor window regains focus). Objects are placed 5 m apart along x, centered on x = 0.

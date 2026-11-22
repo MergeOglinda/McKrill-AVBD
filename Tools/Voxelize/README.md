@@ -23,6 +23,7 @@ python3 Tools/Voxelize/voxelize_stl.py model.stl -o model.voxels.json --voxel-si
 | `--resolution N` | Grid size as the number of voxels along the longest side of the mesh. Exactly one of `--voxel-size` and `--resolution` is required. |
 | `--surface center` (default) | A voxel is solid if its **center** is inside the mesh. The voxel volume is close to the mesh volume. |
 | `--surface touch` | A voxel is solid if it touches or is inside the mesh. Conservative: the result contains the mesh. |
+| `--shell N` | Only the skin: keep the voxels within `N` voxels of the outside (`1` is a single layer) and leave the inside without voxels, instead of a solid object. A voxel is one layer from the outside if any of its 26 neighbors (faces, edges, corners) is empty, so the skin is joined face to face and the default connectivity of 6 holds it together. A closed cavity is not an outside: it is filled first, so its wall is not skin (a cavity near the surface can still end up inside the `N` layers). Default `0`: solid. |
 | `--connectivity 6` (default) | Joint every voxel to its 6 face neighbors. `18` adds the 12 edge neighbors, `26` adds the 8 corner neighbors. |
 | `--scale F` | Multiplies the mesh first, for example `0.001` for a mesh in millimeters. |
 | `--zup-to-yup` | Rotates the mesh from a z-up frame (most CAD tools) to Unity's y-up frame: `(x, y, z) -> (x, z, -y)`. |
@@ -73,6 +74,7 @@ JSON, `"format": "mckrill-avbd-voxels"`, `"version": 1`. The arrays are flat arr
 | `voxelSize` | Edge length of a voxel (and of its box body). |
 | `origin` | Minimum corner of voxel `(0,0,0)`, in the output frame. |
 | `gridDimensions` | Number of cells along x, y, z. |
+| `shellLayers` | Optional, only with `--shell`: the number of layers kept. For information; the voxels are what counts. |
 | `voxels` | `3 * voxelCount` integers: the `(i, j, k)` index of each solid voxel, ordered by `i`, then `j`, then `k`. The position of a triple in this list (0, 1, 2, ...) is the **voxel number**. |
 | `joints` | `2 * jointCount` integers: pairs of voxel numbers. Each pair of neighbors appears once. |
 
@@ -145,6 +147,8 @@ All chunks of a file are stored in a few flat arrays:
 | `chunkTriangles` | Three integers for each triangle, counted from the first vertex **of the chunk**. Counterclockwise seen from outside, so a left-handed engine such as Unity sees them clockwise from outside, which is its front face. |
 
 Numbers from the shipped samples (voxel size 0.25 and 0.2): about 40 to 46 triangles per chunk (60% of them caps), 250 to 870 KB for the whole file. The triangle count follows the resolution of the STL: a finely tessellated mesh gives many tiny triangles in each chunk, so decimate the mesh first if the file is too large.
+
+With `--shell` the chunks are baked as for the solid object and the faces toward the inside that has no voxels get caps like any face toward another block, so a chunk is closed and a shell block that breaks off is a solid piece. The walls of cavities in the removed inside are not drawn.
 
 Limits of the method: the mesh must be closed (the caps need a reliable inside test); a part thinner than a cell can be left without its own chunk; the sum of the chunk volumes equals the mesh volume only up to about 0.1% (the script nudges the mesh by a tiny amount so that no triangle lies exactly on a cell face).
 

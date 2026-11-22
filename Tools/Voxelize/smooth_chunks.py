@@ -397,10 +397,16 @@ class ChunkSet:
 def bake(triangles, origin, size, solid, voxels, crease_degrees=50.0):
     """Bakes the chunks of the voxels that are on the surface of the mesh.
 
-    triangles: the mesh (T, 3, 3) in the units of the output; origin, size: the grid; solid: the boolean array of the voxels; voxels: (N, 3) the indices of
-    the voxels in the order of the output (voxel n is voxels[n]). Returns a ChunkSet."""
+    triangles: the mesh (T, 3, 3) in the units of the output; origin, size: the grid; solid: the boolean array of everything that is solid (the voxels, and with
+    a shell also the interior that has no voxels); voxels: (N, 3) the indices of the voxels in the order of the output (voxel n is voxels[n]); they are all solid,
+    and they are all of the solid unless the object is a shell. The cells that are solid but not voxels are treated as solid neighbors: the chunks next to them
+    get caps, and a cavity wall inside is left out. Returns a ChunkSet."""
     dims = solid.shape
     solid_cells = {tuple(int(x) for x in v): n for n, v in enumerate(voxels)}
+
+    def is_solid(cell):
+        return 0 <= cell[0] < dims[0] and 0 <= cell[1] < dims[1] and 0 <= cell[2] < dims[2] and bool(solid[cell])
+
     tris = orient_outward(to_cell_units(triangles, origin, size, dims))
     normals = corner_normals(tris, crease_degrees)
 
@@ -429,9 +435,9 @@ def bake(triangles, origin, size, solid, voxels, crease_degrees=50.0):
     # 2. leave out the triangles of closed cavities: a triangle is part of the outside if one of its pieces is in a cell that is not a voxel or that has
     #    an empty cell next to it (also across an edge or a corner). The wall of a cavity only touches cells that are surrounded by voxels.
     def on_the_outside(cell):
-        if cell not in solid_cells:
+        if not is_solid(cell):
             return True
-        return any((cell[0] + d[0], cell[1] + d[1], cell[2] + d[2]) not in solid_cells for d in NEIGHBORS_26)
+        return any(not is_solid((cell[0] + d[0], cell[1] + d[1], cell[2] + d[2])) for d in NEIGHBORS_26)
 
     outer = set()
     for cell, cell_pieces in pieces.items():
@@ -497,7 +503,7 @@ def bake(triangles, origin, size, solid, voxels, crease_degrees=50.0):
             across = (cell[0] + step[0], cell[1] + step[1], cell[2] + step[2])
             if chunk_of.get(across) == owner[cell]:
                 continue                                   # the same chunk goes on there: no face
-            if across not in solid_cells and across not in pieces:
+            if not is_solid(across) and across not in pieces:
                 continue                                   # no solid there: the surface of the mesh is the end
             plane = cell[axis] + (1.0 if side > 0 else 0.0)
             u, v = (axis + 1) % 3, (axis + 2) % 3
@@ -531,7 +537,7 @@ def bake(triangles, origin, size, solid, voxels, crease_degrees=50.0):
             across = (cell[0] + step[0], cell[1] + step[1], cell[2] + step[2])
             if chunk_of.get(across) == cell:
                 continue
-            if across not in solid_cells and across not in pieces:
+            if not is_solid(across) and across not in pieces:
                 continue
             plane = cell[axis] + (1.0 if side > 0 else 0.0)
             u, v = (axis + 1) % 3, (axis + 2) % 3

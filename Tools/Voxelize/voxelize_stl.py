@@ -15,6 +15,10 @@ is solid when it is inside the outer surface:
   * --surface center (default): the voxel's center is inside the mesh. The size of the voxel object matches the mesh on average; a part thinner than a voxel
     can vanish.
   * --surface touch: the voxel touches the mesh or is inside it. The object is up to one voxel larger; nothing is lost.
+With --shell N only the skin is kept: the voxels within N voxels of the outside (1 is a single layer, and a voxel counts as touching the outside through its faces,
+edges and corners, so the skin is joined face to face by the default connectivity), and the inside has no voxels. The inside is found as for the solid object, so
+closed cavities are not an outside and their walls are not skin. With --smooth the chunks are baked as for the solid object and closed with caps toward the
+interior that has no voxels.
 The fill needs a closed mesh: the outside is found by flooding the grid from its corner, so a hole in the surface bigger than a voxel lets the flood into the
 inside and leaves the model hollow (the script warns when the mesh has open edges). The center test counts the crossings of a ray with the mesh, so it
 does not depend on the direction of the triangles.
@@ -375,6 +379,31 @@ def voxelize(triangles, voxel_size=None, resolution=None, surface="center", max_
     return filled[inner].copy(), origin, size
 
 
+# ---- the shell ----------------------------------------------------------------------------------------------------
+def shell_of(solid, layers):
+    """The voxels of the skin of a solid set of voxels: those within `layers` voxels of the outside. A voxel is one layer from the outside if one of its 26
+    neighbors (faces, edges and corners) is not solid, two layers if it is next to a voxel of the first layer, and so on. With corners counted, the skin
+    is joined face to face (a diagonal wall has no gaps that only touch along an edge), so the default connectivity of 6 holds it together. Closed cavities
+    are already solid here, so they do not count as the outside and their walls are not skin."""
+    if layers < 1:
+        raise ValueError("the shell needs at least one layer")
+    inner = np.pad(solid, 1, constant_values=False)
+    for _ in range(layers):
+        inner = _erode_cube(inner)
+    return solid & ~inner[1:-1, 1:-1, 1:-1]
+
+
+def _erode_cube(mask):
+    """A cell stays only if all 26 neighbors are set (the array's edge counts as empty: the caller pads it)."""
+    out = mask.copy()
+    for axis in range(3):
+        out &= np.roll(out, 1, axis=axis) & np.roll(out, -1, axis=axis)
+    out[0, :, :] = out[-1, :, :] = False
+    out[:, 0, :] = out[:, -1, :] = False
+    out[:, :, 0] = out[:, :, -1] = False
+    return out
+
+
 # ---- the joints ----------------------------------------------------------------------------------------------------
 
 def neighbor_offsets(connectivity):
@@ -426,7 +455,7 @@ def _flat_floats(array, decimals):
     return "[" + ",".join(text) + "]"
 
 
-def write_json(path, source, origin, voxel_size, dims, voxels, joints, connectivity, surface, chunks=None):
+def write_json(path, source, origin, voxel_size, dims, voxels, joints, connectivity, surface, chunks=None, shell=0):
     header = {
         "format": FORMAT_NAME,
         "version": FORMAT_VERSION,
@@ -439,6 +468,8 @@ def write_json(path, source, origin, voxel_size, dims, voxels, joints, connectiv
         "voxelCount": int(len(voxels)),
         "jointCount": int(len(joints)),
     }
+    if shell:
+        header["shellLayers"] = int(shell)   # optional, for information: only the skin was voxelized
     with open(path, "w", encoding="utf-8") as f:
         f.write("{\n")
         for key, value in header.items():
@@ -470,6 +501,8 @@ def main(argv=None):
     size.add_argument("--voxel-size", type=float, help="edge length of a voxel, in the output units")
     size.add_argument("--resolution", type=int, help="number of voxels along the longest side of the mesh")
     p.add_argument("--surface", choices=("center", "touch"), default="center", help="solid voxels: center inside the mesh (default), or touching or inside it")
+    p.add_argument("--shell", type=int, default=0, metavar="N", help="only the skin: keep the voxels within N voxels of the outside (1 is a single layer) and leave the "
+                   "inside empty, instead of a solid object; closed cavities are not an outside (default 0: solid)")
     p.add_argument("--connectivity", type=int, choices=(6, 18, 26), default=6, help="neighbors that are joined: 6 (faces, default), 18 (+ edges), 26 (+ corners)")
     p.add_argument("--scale", type=float, default=1.0, help="factor applied to the mesh first (for example 0.001 for a mesh in millimeters, to get meters)")
     p.add_argument("--zup-to-yup", action="store_true", help="rotate the mesh from a z-up tool's frame into Unity's y-up frame: (x, y, z) -> (x, z, -y)")
@@ -485,10 +518,14 @@ def main(argv=None):
             raise ValueError("the mesh has vertices that are not finite numbers")
         open_edges = open_edge_count(triangles)
         solid, origin, voxel_size = voxelize(triangles, args.voxel_size, args.resolution, args.surface, args.max_cells)
-        voxels, joints = build_joints(solid, args.connectivity)
+        if args.shell < 0:
+            raise ValueError("--shell must not be negative")
+        kept = shell_of(solid, args.shell) if args.shell else solid
+        voxels, joints = build_joints(kept, args.connectivity)
         chunks = None
         if args.smooth and len(voxels):
             import smooth_chunks
+            # `solid` is the whole object, also the interior that has no voxels in a shell: the chunks next to it are closed with caps
             chunks = smooth_chunks.bake(triangles, origin, voxel_size, solid, voxels, args.crease)
     except (ValueError, OSError) as error:
         print("error: %s" % error, file=sys.stderr)
@@ -500,13 +537,15 @@ def main(argv=None):
     if len(voxels) == 0:
         print("warning: no voxel is solid: the voxel size is too large for this mesh (try a smaller one, or --surface touch)", file=sys.stderr)
 
-    write_json(output, args.mesh, origin, voxel_size, solid.shape, voxels, joints, args.connectivity, args.surface, chunks)
+    write_json(output, args.mesh, origin, voxel_size, solid.shape, voxels, joints, args.connectivity, args.surface, chunks, args.shell)
 
     mesh_vol = mesh_volume(triangles)
     voxel_vol = len(voxels) * voxel_size ** 3
     print("%s: %d triangles, grid %d x %d x %d, voxel size %.6g" % (os.path.basename(args.mesh), len(triangles), *solid.shape, voxel_size))
     print("%d voxels, %d joints (%d-neighborhood); voxel volume %.6g, mesh volume %.6g%s" % (
         len(voxels), len(joints), args.connectivity, voxel_vol, mesh_vol, " (%.1f%%)" % (100.0 * voxel_vol / mesh_vol) if mesh_vol > 0 else ""))
+    if args.shell:
+        print("shell of %d layer%s: %d of the %d voxels of the solid object kept" % (args.shell, "" if args.shell == 1 else "s", len(voxels), int(solid.sum())))
     if chunks is not None:
         st = chunks.stats
         print("smooth surface: %d chunks (the other %d voxels are plain boxes), %d vertices, %d triangles (%d of them caps, %.1f per chunk)" % (
