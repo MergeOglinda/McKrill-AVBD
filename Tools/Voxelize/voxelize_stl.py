@@ -22,8 +22,9 @@ does not depend on the direction of the triangles.
 Each voxel is a box of voxel-size edges, and every voxel is linked to its immediate neighbors (--connectivity 6: the voxels that share a face; 18 adds
 the ones that share an edge; 26 the ones that share a corner) by one ball-socket joint, once per pair. The joint's anchor is the middle between the two
 voxel centers, which is where the faces meet for the 6-neighborhood.
-With --connect-isolated (on top of connectivity 6) a voxel that has no face neighbor at all is also linked to its edge and corner neighbors, so that a piece that
-only touches the rest along an edge or a corner (a thin diagonal, a voxel that clings to a corner) does not fall off the model.
+With --connect-isolated (on top of connectivity 6) a voxel is linked to its face neighbors; if it has none, to its edge neighbors; if it has no edge neighbor
+either, to its corner neighbors. A piece that only touches the rest along an edge or a corner (a thin diagonal, a voxel that clings to a corner) does not fall off
+the model, and a voxel never gets the more distant links while a closer neighbor exists.
 
 With --smooth the script also bakes the smooth surface of the mesh into the blocks (see smooth_chunks.py): for every voxel on the surface, the piece of the mesh
 that belongs to it, closed into a solid of its own with flat faces where it touches its neighbors. The demo draws these chunks instead of the boxes, so an object looks
@@ -412,8 +413,9 @@ def _neighbor_pairs(number, offsets):
 def build_joints(solid, connectivity=6, connect_isolated=False):
     """Returns (voxels, joints): the (N, 3) integer indices of the solid cells in the order i, j, k, and the (M, 2) numbers of the pairs of neighbors (each pair once).
 
-    With connect_isolated (only for connectivity 6) every voxel that has no face neighbor is also joined to its edge and corner neighbors: a pair of voxels that
-    share an edge or a corner gets a joint if either of the two has no face neighbor."""
+    With connect_isolated (only for connectivity 6) the neighbors are tried in steps for every voxel: its face neighbors; if it has none, its edge neighbors; if it has
+    no edge neighbor either, its corner neighbors. A pair of voxels that share an edge gets a joint if either of the two has no face neighbor, and a pair that
+    shares a corner gets one if either of the two has neither a face nor an edge neighbor."""
     if connect_isolated and connectivity != 6:
         raise ValueError("connecting the isolated voxels needs connectivity 6: 18 and 26 already join the edge neighbors of every voxel")
     voxels = np.argwhere(solid).astype(np.int64)
@@ -421,12 +423,17 @@ def build_joints(solid, connectivity=6, connect_isolated=False):
     number[solid] = np.arange(len(voxels))  # the order of argwhere is the order of a C-ordered boolean mask
     joints = _neighbor_pairs(number, neighbor_offsets(connectivity))
     if connect_isolated and len(voxels):
-        face_neighbors = np.bincount(joints.reshape(-1), minlength=len(voxels))
-        isolated = face_neighbors == 0
-        if isolated.any():
-            others = [o for o in neighbor_offsets(26) if o not in neighbor_offsets(6)]
-            diagonal = _neighbor_pairs(number, others)
-            joints = np.concatenate([joints, diagonal[isolated[diagonal[:, 0]] | isolated[diagonal[:, 1]]]])
+        no_face = np.bincount(joints.reshape(-1), minlength=len(voxels)) == 0
+        if no_face.any():
+            edge_offsets = [o for o in neighbor_offsets(18) if o not in neighbor_offsets(6)]
+            corner_offsets = [o for o in neighbor_offsets(26) if o not in neighbor_offsets(18)]
+            edges = _neighbor_pairs(number, edge_offsets)
+            no_edge = np.bincount(edges.reshape(-1), minlength=len(voxels)) == 0
+            corners = _neighbor_pairs(number, corner_offsets)
+            no_face_or_edge = no_face & no_edge
+            joints = np.concatenate([joints,
+                                     edges[no_face[edges[:, 0]] | no_face[edges[:, 1]]],
+                                     corners[no_face_or_edge[corners[:, 0]] | no_face_or_edge[corners[:, 1]]]])
     return voxels, joints
 
 
@@ -459,7 +466,7 @@ def write_json(path, source, origin, voxel_size, dims, voxels, joints, connectiv
         "jointCount": int(len(joints)),
     }
     if connect_isolated:
-        header["connectIsolated"] = True  # informational: the joints of voxels without a face neighbor also go to their edge and corner neighbors
+        header["connectIsolated"] = True  # informational: face neighbors, else edge neighbors, else corner neighbors
     with open(path, "w", encoding="utf-8") as f:
         f.write("{\n")
         for key, value in header.items():
@@ -492,8 +499,8 @@ def main(argv=None):
     size.add_argument("--resolution", type=int, help="number of voxels along the longest side of the mesh")
     p.add_argument("--surface", choices=("center", "touch"), default="center", help="solid voxels: center inside the mesh (default), or touching or inside it")
     p.add_argument("--connectivity", type=int, choices=(6, 18, 26), default=None, help="neighbors that are joined: 6 (faces, default), 18 (+ edges), 26 (+ corners)")
-    p.add_argument("--connect-isolated", action="store_true", help="join a voxel to its 6 face neighbors, and a voxel that has none to its edge and corner neighbors as well "
-                   "(connectivity 6 only, which is the default)")
+    p.add_argument("--connect-isolated", action="store_true", help="join a voxel to its 6 face neighbors; if it has none, to its edge neighbors; if it has no edge "
+                   "neighbor either, to its corner neighbors (connectivity 6 only, which is the default)")
     p.add_argument("--scale", type=float, default=1.0, help="factor applied to the mesh first (for example 0.001 for a mesh in millimeters, to get meters)")
     p.add_argument("--zup-to-yup", action="store_true", help="rotate the mesh from a z-up tool's frame into Unity's y-up frame: (x, y, z) -> (x, z, -y)")
     p.add_argument("--smooth", action="store_true", help="also bake the smooth surface of the mesh into the blocks on the surface (a chunk each, see smooth_chunks.py); larger files")
@@ -533,7 +540,7 @@ def main(argv=None):
     voxel_vol = len(voxels) * voxel_size ** 3
     print("%s: %d triangles, grid %d x %d x %d, voxel size %.6g" % (os.path.basename(args.mesh), len(triangles), *solid.shape, voxel_size))
     print("%d voxels, %d joints (%d-neighborhood%s); voxel volume %.6g, mesh volume %.6g%s" % (
-        len(voxels), len(joints), args.connectivity, ", edge and corner neighbors for voxels without a face neighbor" if args.connect_isolated else "", voxel_vol, mesh_vol, " (%.1f%%)" % (100.0 * voxel_vol / mesh_vol) if mesh_vol > 0 else ""))
+        len(voxels), len(joints), args.connectivity, ", edge then corner neighbors as fallback" if args.connect_isolated else "", voxel_vol, mesh_vol, " (%.1f%%)" % (100.0 * voxel_vol / mesh_vol) if mesh_vol > 0 else ""))
     if chunks is not None:
         st = chunks.stats
         print("smooth surface: %d chunks (the other %d voxels are plain boxes), %d vertices, %d triangles (%d of them caps, %.1f per chunk)" % (

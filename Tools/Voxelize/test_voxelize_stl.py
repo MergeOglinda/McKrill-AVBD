@@ -140,6 +140,19 @@ class VoxelizerTests(unittest.TestCase):
         pairs = {tuple(sorted(map(tuple, voxels[j].tolist()))) for j in joints}
         self.assertEqual(pairs, {((0, 0, 0), (1, 0, 0)), ((1, 0, 0), (2, 1, 1))})
 
+    def test_connect_isolated_tries_corner_neighbors_only_without_edge_neighbors(self):
+        # A = (2, 2, 2) has an edge neighbor B and a corner neighbor C = (1, 1, 1), which has an edge neighbor D: nobody falls back to corners
+        solid = np.zeros((4, 4, 4), bool)
+        for v in [(2, 2, 2), (3, 3, 2), (1, 1, 1), (0, 0, 1)]:
+            solid[v] = True
+        voxels, joints = vox.build_joints(solid, 6, connect_isolated=True)
+        pairs = {tuple(sorted(map(tuple, voxels[j].tolist()))) for j in joints}
+        self.assertEqual(pairs, {((2, 2, 2), (3, 3, 2)), ((0, 0, 1), (1, 1, 1))})
+        # without the edge neighbors the corner neighbors are used
+        solid[3, 3, 2] = solid[0, 0, 1] = False
+        voxels, joints = vox.build_joints(solid, 6, connect_isolated=True)
+        self.assertEqual({tuple(sorted(map(tuple, voxels[j].tolist()))) for j in joints}, {((1, 1, 1), (2, 2, 2))})
+
     def test_connect_isolated_off_and_with_18_or_26(self):
         solid = np.zeros((2, 2, 2), bool)
         solid[0, 0, 0] = solid[1, 1, 1] = True
