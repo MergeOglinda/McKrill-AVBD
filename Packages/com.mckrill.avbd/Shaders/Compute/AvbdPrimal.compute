@@ -278,6 +278,105 @@ void StorePartial(uint tid, PrimalSystem sys)
     }
 }
 
+// The summed system of every body of the group, term-major like gsTerms, but with the body as the fast index: term t of body b is at t * AVBD_PRIMAL_BODIES + b.
+// The lanes write the sums here and lane 0 of each body factorizes it where it is. The LDL^T used to run on a local array of 36 + 6 floats, which stayed in
+// registers for the whole solve; here the lane 0 threads of the group (one per body, so adjacent bodies) touch consecutive words, which is free of bank conflicts.
+#define AVBD_PRIMAL_BODIES (AVBD_GROUP_SIZE / AVBD_PRIMAL_LANES)
+groupshared float gsSums[AVBD_PRIMAL_TERMS * AVBD_PRIMAL_BODIES];
+
+// The term of the lower-triangle element (i, j), i >= j, of the symmetric 6x6 matrix: the linear block (rows and columns 0 to 2), the cross block (rows 3 to 5,
+// columns 0 to 2) or the angular block (rows and columns 3 to 5), in the order StorePartial wrote them.
+uint SolveTerm(uint i, uint j)
+{
+    if (i < 3u)
+        return i * 3u + j;
+    if (j < 3u)
+        return 18u + (i - 3u) * 3u + j;
+    return 9u + (i - 3u) * 3u + (j - 3u);
+}
+
+// Element (i, j) of the matrix of body `body` of the group and element i of its right-hand side.
+#define AVBD_SOLVE_A(i, j) gsSums[SolveTerm(i, j) * AVBD_PRIMAL_BODIES + body]
+#define AVBD_SOLVE_Y(i)    gsSums[(27u + (i)) * AVBD_PRIMAL_BODIES + body]
+
+// Solves A x = -rhs for the summed system of body `body` of the group with an LDL^T factorization, no pivoting, in groupshared memory: the lower triangle
+// of the matrix is overwritten by the factorization and the right-hand side by x (AVBD_SOLVE_Y). Mirrors Mat6.TrySolveLDLT in the reference. Returns false if
+// a pivot is not above 1e-20 or is NaN (x is then meaningless). Only lane 0 of a body runs it, so no barrier is needed.
+bool SolveLdlt6(uint body)
+{
+    float v[6];
+    bool ok = true; // no early return inside the unrolled loops: a failed pivot is replaced by 1 and reported at the end
+
+    [unroll]
+    for (uint n = 0; n < 6; n++)
+        AVBD_SOLVE_Y(n) = -AVBD_SOLVE_Y(n);
+
+    [unroll]
+    for (uint j = 0; j < 6; j++)
+    {
+        [unroll]
+        for (uint k = 0; k < j; k++)
+            v[k] = AVBD_SOLVE_A(j, k) * AVBD_SOLVE_A(k, k);
+
+        float dj = AVBD_SOLVE_A(j, j);
+        [unroll]
+        for (uint k2 = 0; k2 < j; k2++)
+            dj -= AVBD_SOLVE_A(j, k2) * v[k2];
+
+        if (!(dj > 1e-20))
+        {
+            ok = false;
+            dj = 1.0;
+        }
+        AVBD_SOLVE_A(j, j) = dj;
+
+        float inv = 1.0 / dj;
+        [unroll]
+        for (uint i = j + 1; i < 6; i++)
+        {
+            float s = AVBD_SOLVE_A(i, j);
+            [unroll]
+            for (uint k3 = 0; k3 < j; k3++)
+                s -= AVBD_SOLVE_A(i, k3) * v[k3];
+            AVBD_SOLVE_A(i, j) = s * inv;
+        }
+    }
+
+    // Forward substitution: L y = b
+    [unroll]
+    for (uint i1 = 0; i1 < 6; i1++)
+    {
+        float s = AVBD_SOLVE_Y(i1);
+        [unroll]
+        for (uint k4 = 0; k4 < i1; k4++)
+            s -= AVBD_SOLVE_A(i1, k4) * AVBD_SOLVE_Y(k4);
+        AVBD_SOLVE_Y(i1) = s;
+    }
+
+    // Diagonal: D z = y
+    [unroll]
+    for (uint i2 = 0; i2 < 6; i2++)
+        AVBD_SOLVE_Y(i2) /= AVBD_SOLVE_A(i2, i2);
+
+    // Backward substitution: L^T x = z
+    [unroll]
+    for (int i3 = 5; i3 >= 0; i3--)
+    {
+        float s = AVBD_SOLVE_Y(i3);
+        [unroll]
+        for (int k5 = i3 + 1; k5 < 6; k5++)
+            s -= AVBD_SOLVE_A(k5, i3) * AVBD_SOLVE_Y(k5);
+        AVBD_SOLVE_Y(i3) = s;
+    }
+
+    return ok;
+}
+
+// Entries of the body's list that a lane reads before it stamps any of them: the entries and the joint or spring records of the whole batch are requested
+// together, so their latencies overlap instead of following one another (list entry, then record, then the neighbor's pose, per stamp). Each record in
+// flight is 160 B of registers: 1 gives the plain one-at-a-time loop, and a larger batch buys more loads in flight with more registers.
+#define AVBD_PRIMAL_BATCH 2u
+
 // AVBD_PRIMAL_LANES threads solve one body. Lane l stamps the entries l, l + AVBD_PRIMAL_LANES, ... of the body's list into its own partial system;
 // the partial systems are added up in groupshared memory, and lane 0 solves the sum once and writes the pose. The lanes of a body are
 // adjacent threads of a group, so a group of AVBD_GROUP_SIZE threads solves AVBD_GROUP_SIZE / AVBD_PRIMAL_LANES bodies.
@@ -290,28 +389,40 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
     uint index = item / AVBD_PRIMAL_LANES;
     uint lane = item % AVBD_PRIMAL_LANES;
     uint first = tid - lane; // the thread of lane 0 of this body
+    uint body = tid / AVBD_PRIMAL_LANES; // the body's number in the group
 
     bool active = index < _ColorWork[AVBD_COLOR_COUNTS_OFFSET + _Color];
     uint slot = 0u;
     float mass = 0.0;
     float4 momentMass = float4(0.0, 0.0, 0.0, 0.0);
+    float3 position = float3(0.0, 0.0, 0.0);
+    float4 rotation = float4(0.0, 0.0, 0.0, 1.0);
+    uint2 range = uint2(0u, 0u);
+    BodyInertialRecord inertial = (BodyInertialRecord)0;
     if (active)
     {
         slot = _ColorBodies[_ColorWork[AVBD_COLOR_STARTS_OFFSET + _Color] + index];
 
+        // Everything the body needs is requested at once, before any of it is tested: the reads depend on the slot only, so they are in flight together
+        // instead of one after the other (flags, then mass, then pose, then the range of the list). A body that is skipped below has wasted a few reads.
+        uint bodyFlags = _BodyMeta[slot].ident.x;
+        momentMass = _BodyMass[slot].momentMass;
+        BodyStateRecord state = _BodyState[slot];
+        range = _BodyRange[slot].range.xy;
+        if (lane == 0u)
+            inertial = _BodyInertial[slot];
+
         // The lists and the colors were built before the last edits; a body removed or changed since is skipped.
-        if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
+        if (bodyFlags & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
             active = false;
         else
         {
-            momentMass = _BodyMass[slot].momentMass;
             mass = momentMass.w;
             active = mass > 0.0;
         }
+        position = state.position.xyz;
+        rotation = state.rotation;
     }
-
-    float3 position = float3(0.0, 0.0, 0.0);
-    float4 rotation = float4(0.0, 0.0, 0.0, 1.0);
 
     PrimalSystem sys;
     sys.lhsLin = float3x3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -322,39 +433,60 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
     if (active)
     {
-        BodyStateRecord state = _BodyState[slot];
-        position = state.position.xyz;
-        rotation = state.rotation;
-
         // Inertia term: once, by lane 0.
         if (lane == 0u)
         {
             float dtSq = AVBD_DT * AVBD_DT;
-            BodyInertialRecord inertial = _BodyInertial[slot];
             sys.lhsLin = AvbdDiagonal(float3(mass / dtSq, mass / dtSq, mass / dtSq));
             sys.lhsAng = AvbdDiagonal(float3(momentMass.x / dtSq, momentMass.y / dtSq, momentMass.z / dtSq));
             sys.rhsLin = (mass / dtSq) * (position - inertial.position.xyz);
             sys.rhsAng = (momentMass.xyz / dtSq) * AvbdQuatDifference(rotation, inertial.rotation);
         }
 
-        // This lane's share of the constraints of the body.
-        uint2 range = _BodyRange[slot].range.xy;
-        for (uint e = lane; e < range.y; e += AVBD_PRIMAL_LANES)
+        // This lane's share of the constraints of the body, AVBD_PRIMAL_BATCH entries at a time: the entries, then the records of the joints and springs
+        // among them (both requested before any stamp starts), then the stamps.
+        for (uint e = lane; e < range.y; e += AVBD_PRIMAL_LANES * AVBD_PRIMAL_BATCH)
         {
-            uint entry = _ConstraintList[range.x + e];
-            if (entry & AVBD_LIST_CONTACT_FLAG)
+            uint entries[AVBD_PRIMAL_BATCH];
+            ConstraintRecord records[AVBD_PRIMAL_BATCH];
+
+            [unroll]
+            for (uint b0 = 0; b0 < AVBD_PRIMAL_BATCH; b0++)
             {
-                StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, position, rotation, sys);
+                entries[b0] = 0u;
+                if (e + b0 * AVBD_PRIMAL_LANES < range.y)
+                    entries[b0] = _ConstraintList[range.x + e + b0 * AVBD_PRIMAL_LANES];
             }
-            else
+
+            [unroll]
+            for (uint b1 = 0; b1 < AVBD_PRIMAL_BATCH; b1++)
             {
-                ConstraintRecord c = _Constraints[entry];
-                uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
-                uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
-                if (kind == AVBD_CONSTRAINT_KIND_JOINT)
-                    StampJoint(c, flags, slot, position, rotation, sys);
-                else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
-                    StampSpring(c, slot, position, rotation, sys);
+                records[b1] = (ConstraintRecord)0;
+                if (e + b1 * AVBD_PRIMAL_LANES < range.y && !(entries[b1] & AVBD_LIST_CONTACT_FLAG))
+                    records[b1] = _Constraints[entries[b1]];
+            }
+
+            [unroll]
+            for (uint b2 = 0; b2 < AVBD_PRIMAL_BATCH; b2++)
+            {
+                if (e + b2 * AVBD_PRIMAL_LANES < range.y)
+                {
+                    uint entry = entries[b2];
+                    if (entry & AVBD_LIST_CONTACT_FLAG)
+                    {
+                        StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, position, rotation, sys);
+                    }
+                    else
+                    {
+                        ConstraintRecord c = records[b2];
+                        uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+                        uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
+                        if (kind == AVBD_CONSTRAINT_KIND_JOINT)
+                            StampJoint(c, flags, slot, position, rotation, sys);
+                        else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
+                            StampSpring(c, slot, position, rotation, sys);
+                    }
+                }
             }
         }
 
@@ -363,8 +495,8 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
     GroupMemoryBarrierWithGroupSync();
 
-    // Add up the partial systems of the body's lanes into lane 0's words, in lane order (so the sum does not depend on timing). Lane l adds
-    // the terms l, l + AVBD_PRIMAL_LANES, ...; a term is read and written by one lane only, so this needs no second copy.
+    // Add up the partial systems of the body's lanes, in lane order (so the sum does not depend on timing), into the body's column of gsSums. Lane l
+    // adds the terms l, l + AVBD_PRIMAL_LANES, ...; a term is read and written by one lane only.
     if (active)
     {
         for (uint t = lane; t < AVBD_PRIMAL_TERMS; t += AVBD_PRIMAL_LANES)
@@ -373,7 +505,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
             [unroll]
             for (uint l = 0; l < AVBD_PRIMAL_LANES; l++)
                 sum += gsTerms[t * AVBD_GROUP_SIZE + first + l];
-            gsTerms[t * AVBD_GROUP_SIZE + first] = sum;
+            gsSums[t * AVBD_PRIMAL_BODIES + body] = sum;
         }
     }
 
@@ -382,38 +514,11 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
     if (!active || lane != 0u)
         return;
 
-    // Lower triangle of the symmetric 6x6 matrix, row-major, and the right-hand side -rhs.
-    float a[36];
-    [unroll]
-    for (uint i = 0; i < 36; i++)
-        a[i] = 0.0;
-
-    [unroll]
-    for (uint r = 0; r < 3; r++)
+    if (SolveLdlt6(body))
     {
-        [unroll]
-        for (uint col = 0; col < 3; col++)
-        {
-            a[r * 6 + col] = gsTerms[(r * 3 + col) * AVBD_GROUP_SIZE + tid];
-            a[(3 + r) * 6 + col] = gsTerms[(18 + r * 3 + col) * AVBD_GROUP_SIZE + tid];
-            a[(3 + r) * 6 + 3 + col] = gsTerms[(9 + r * 3 + col) * AVBD_GROUP_SIZE + tid];
-        }
-    }
-
-    float y[6];
-    [unroll]
-    for (uint k = 0; k < 3; k++)
-    {
-        y[k] = -gsTerms[(27 + k) * AVBD_GROUP_SIZE + tid];
-        y[3 + k] = -gsTerms[(30 + k) * AVBD_GROUP_SIZE + tid];
-    }
-
-    if (AvbdSolveLdlt6(a, y))
-    {
-        BodyStateRecord state = _BodyState[slot];
-        state.position = float4(position + float3(y[0], y[1], y[2]), 0.0);
-        state.rotation = AvbdIntegrateAngular(rotation, float3(y[3], y[4], y[5]));
-        _BodyState[slot] = state;
+        // Only the pose changes: write those two words, not the start-of-step pose that follows them in the 64 B record.
+        _BodyState[slot].position = float4(position + float3(AVBD_SOLVE_Y(0), AVBD_SOLVE_Y(1), AVBD_SOLVE_Y(2)), 0.0);
+        _BodyState[slot].rotation = AvbdIntegrateAngular(rotation, float3(AVBD_SOLVE_Y(3), AVBD_SOLVE_Y(4), AVBD_SOLVE_Y(5)));
     }
     else
     {
