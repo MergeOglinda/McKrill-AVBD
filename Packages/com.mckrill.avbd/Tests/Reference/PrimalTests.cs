@@ -185,6 +185,7 @@ namespace McKrill.Avbd.Tests
 
                 var state = new BodyStateRecord[Capacity];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after a primal sweep");
                 for (int s = 0; s < scene.bodyCount; s++)
                 {
                     string name = what + ", slot " + s;
@@ -272,6 +273,7 @@ namespace McKrill.Avbd.Tests
 
                 var state = new BodyStateRecord[16];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after a primal sweep");
                 var records = new ConstraintRecord[8];
                 constraints.Records.GetData(records);
 
@@ -310,6 +312,7 @@ namespace McKrill.Avbd.Tests
 
                 var state = new BodyStateRecord[16];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after a primal sweep");
                 Assert.AreEqual(10f, state[anchor.Slot].position.y);
                 Assert.Greater(state[block.Slot].position.y, 6f - 1e-6f, "the spring is stretched (rest 2, length 4) and pulls the block up");
             }

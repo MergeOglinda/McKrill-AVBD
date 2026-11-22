@@ -37,6 +37,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdIndirect.hlsl"
 
 StructuredBuffer<BodyStateRecord>      _BodyState;
+StructuredBuffer<BodyPoseRecord>       _BodyPose;      // the current pose of every body, 32 B per body (a copy of the pose in _BodyState)
 RWStructuredBuffer<ConstraintRecord>   _Constraints;
 #if defined(AVBD_PLASTIC_JOINTS)
 RWStructuredBuffer<PlasticRecord>      _Plastic;       // rest rotation and limits of the joints with the PLASTIC flag, by ident.w
@@ -50,7 +51,8 @@ uint _Base;        // first constraint to process
 uint _Count;       // end of the range: constraints [_Base, _Count)
 uint _SlotCapacity; // DualContact: manifold slots
 
-// Pose of body slot `id`: the start-of-step pose or the current pose. A body of AVBD_INVALID is the world.
+// Pose of body slot `id`: the start-of-step pose or the current pose. A body of AVBD_INVALID is the world. The current pose comes from the compact pose array
+// (32 B per body, twice as many bodies per cache line as the 64 B state record); only the start-of-step pose needs the state record.
 void LoadPose(uint id, bool atStart, out float3 pos, out float4 rot)
 {
     if (id == AVBD_INVALID)
@@ -60,9 +62,18 @@ void LoadPose(uint id, bool atStart, out float3 pos, out float4 rot)
     }
     else
     {
-        BodyStateRecord s = _BodyState[id];
-        pos = atStart ? s.startPosition.xyz : s.position.xyz;
-        rot = atStart ? s.startRotation : s.rotation;
+        if (atStart)
+        {
+            BodyStateRecord s = _BodyState[id];
+            pos = s.startPosition.xyz;
+            rot = s.startRotation;
+        }
+        else
+        {
+            BodyPoseRecord p = _BodyPose[id];
+            pos = p.position.xyz;
+            rot = p.rotation;
+        }
     }
 }
 

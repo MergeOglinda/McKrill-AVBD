@@ -25,6 +25,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactSolve.hlsl"
 
 RWStructuredBuffer<BodyStateRecord>    _BodyState;
+RWStructuredBuffer<BodyPoseRecord>     _BodyPose;       // the current pose of every body, 32 B per body: what the neighbors of a joint or spring are read from
 StructuredBuffer<BodyInertialRecord>   _BodyInertial;
 StructuredBuffer<BodyMassRecord>       _BodyMass;
 StructuredBuffer<BodyMetaRecord>       _BodyMeta;
@@ -52,9 +53,32 @@ struct PrimalSystem
     float3 rhsAng;
 };
 
-// Pose of body slot `id`. The body being solved is passed in, the others are read from the state array.
+// Pose of body slot `id`. The body being solved is passed in, the others are read from the compact pose array (a joint or spring needs nothing else of
+// the neighbor, and 32 B records put twice as many bodies in a cache line as the 64 B state records). A manifold also needs the start-of-step pose
+// of both bodies, which only the state record has, so it reads the state record (LoadPoseFromState) and one line serves both.
 // A body A of AVBD_INVALID is the world: origin and identity rotation.
 void LoadPose(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos, out float4 rot)
+{
+    if (id == self)
+    {
+        pos = selfPos;
+        rot = selfRot;
+    }
+    else if (id == AVBD_INVALID)
+    {
+        pos = float3(0.0, 0.0, 0.0);
+        rot = float4(0.0, 0.0, 0.0, 1.0);
+    }
+    else
+    {
+        BodyPoseRecord p = _BodyPose[id];
+        pos = p.position.xyz;
+        rot = p.rotation;
+    }
+}
+
+// The same from the state record, for the manifolds.
+void LoadPoseFromState(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos, out float4 rot)
 {
     if (id == self)
     {
@@ -221,8 +245,8 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
 
     float3 posA, posB;
     float4 rotA, rotB;
-    LoadPose(pair.ident.x, slot, selfPos, selfRot, posA, rotA);
-    LoadPose(pair.ident.y, slot, selfPos, selfRot, posB, rotB);
+    LoadPoseFromState(pair.ident.x, slot, selfPos, selfRot, posA, rotA);
+    LoadPoseFromState(pair.ident.y, slot, selfPos, selfRot, posB, rotB);
 
     BodyStateRecord stateA = _BodyState[pair.ident.x];
     BodyStateRecord stateB = _BodyState[pair.ident.y];
@@ -570,9 +594,15 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
     if (SolveLdlt6(body))
     {
-        // Only the pose changes: write those two words, not the start-of-step pose that follows them in the 64 B record.
-        _BodyState[slot].position = float4(position + float3(AVBD_SOLVE_Y(0), AVBD_SOLVE_Y(1), AVBD_SOLVE_Y(2)), 0.0);
-        _BodyState[slot].rotation = AvbdIntegrateAngular(rotation, float3(AVBD_SOLVE_Y(3), AVBD_SOLVE_Y(4), AVBD_SOLVE_Y(5)));
+        // Only the pose changes: write those two words, not the start-of-step pose that follows them in the 64 B record, and the compact copy of the pose.
+        float4 newPosition = float4(position + float3(AVBD_SOLVE_Y(0), AVBD_SOLVE_Y(1), AVBD_SOLVE_Y(2)), 0.0);
+        float4 newRotation = AvbdIntegrateAngular(rotation, float3(AVBD_SOLVE_Y(3), AVBD_SOLVE_Y(4), AVBD_SOLVE_Y(5)));
+        _BodyState[slot].position = newPosition;
+        _BodyState[slot].rotation = newRotation;
+        BodyPoseRecord pose;
+        pose.position = newPosition;
+        pose.rotation = newRotation;
+        _BodyPose[slot] = pose;
     }
     else
     {

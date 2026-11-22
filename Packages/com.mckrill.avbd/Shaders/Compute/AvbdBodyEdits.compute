@@ -8,6 +8,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdEditCommand.hlsl"
 
 RWStructuredBuffer<BodyStateRecord>    _BodyState;
+RWStructuredBuffer<BodyPoseRecord>     _BodyPose;     // a copy of the pose in _BodyState, kept in step with it
 RWStructuredBuffer<BodyInertialRecord> _BodyInertial;
 RWStructuredBuffer<BodyMassRecord>     _BodyMass;
 RWStructuredBuffer<BodyMotionRecord>   _BodyMotion;
@@ -20,6 +21,15 @@ uint _Capacity;     // number of body slots
 uint _Base;         // first slot (ClearBodies) of this dispatch, so more than 65535 groups can be covered
 uint _CommandCount; // commands in _Commands (ApplyEdits)
 
+// The compact copy of a slot's pose (see BodyPoseRecord): every write of the pose in _BodyState is followed by one of these.
+void WritePose(uint slot, float4 position, float4 rotation)
+{
+    BodyPoseRecord p;
+    p.position = position;
+    p.rotation = rotation;
+    _BodyPose[slot] = p;
+}
+
 // Puts a slot into the free state (rule P9): zeroed data, identity rotations, Free flag, invalid ids.
 void WriteFreeSlot(uint slot)
 {
@@ -31,6 +41,7 @@ void WriteFreeSlot(uint slot)
     s.startPosition = float4(0, 0, 0, 0);
     s.startRotation = identity;
     _BodyState[slot] = s;
+    WritePose(slot, s.position, s.rotation);
 
     BodyInertialRecord i;
     i.position = float4(0, 0, 0, 0);
@@ -79,6 +90,7 @@ void ApplySpawn(uint slot, EditCommand c)
     s.startPosition = c.position;
     s.startRotation = c.rotation;
     _BodyState[slot] = s;
+    WritePose(slot, s.position, s.rotation);
 
     BodyMassRecord m;
     m.momentMass = c.momentMass;
@@ -134,6 +146,7 @@ void ApplySet(uint slot, EditCommand c)
         s.startPosition = c.position;
         s.startRotation = c.rotation;
         _BodyState[slot] = s;
+        WritePose(slot, s.position, s.rotation);
     }
 
     if (fields & AVBD_EDIT_FIELD_VELOCITY)

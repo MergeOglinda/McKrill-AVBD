@@ -132,6 +132,7 @@ namespace McKrill.Avbd.Tests
                 var state = new BodyStateRecord[16];
                 var inertial = new BodyInertialRecord[16];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after Predict");
                 buffers.Inertial.GetData(inertial);
 
                 int s = h.Slot;
@@ -166,6 +167,7 @@ namespace McKrill.Avbd.Tests
 
                 var state = new BodyStateRecord[16];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after Predict");
                 // y + v dt + g dt^2 = 10 - 0.1 - 0.1
                 Assert.AreEqual(9.8f, state[h.Slot].position.y, 1e-5f);
             }
@@ -188,12 +190,14 @@ namespace McKrill.Avbd.Tests
 
                 var before = new BodyStateRecord[16];
                 buffers.State.GetData(before);
+                PoseMirror.Assert(buffers, "after Predict");
 
                 new AvbdSolver(buffers, AvbdSolverSettings.Default).DispatchPredict();
 
                 var after = new BodyStateRecord[16];
                 var inertial = new BodyInertialRecord[16];
                 buffers.State.GetData(after);
+                PoseMirror.Assert(buffers, "after Predict");
                 buffers.Inertial.GetData(inertial);
 
                 foreach (BodyHandle h in new[] { hs, hk })
@@ -253,6 +257,7 @@ namespace McKrill.Avbd.Tests
                 var state = new BodyStateRecord[Capacity];
                 var inertial = new BodyInertialRecord[Capacity];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after Predict");
                 buffers.Inertial.GetData(inertial);
 
                 for (int slot = 0; slot < Capacity; slot++)
@@ -477,6 +482,7 @@ namespace McKrill.Avbd.Tests
                 var motion = new BodyMotionRecord[Capacity];
                 var inertial = new BodyInertialRecord[Capacity];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after Predict");
                 buffers.Motion.GetData(motion);
                 buffers.Inertial.GetData(inertial);
 
