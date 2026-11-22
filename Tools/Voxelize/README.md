@@ -24,6 +24,7 @@ python3 Tools/Voxelize/voxelize_stl.py model.stl -o model.voxels.json --voxel-si
 | `--surface center` (default) | A voxel is solid if its **center** is inside the mesh. The voxel volume is close to the mesh volume. |
 | `--surface touch` | A voxel is solid if it touches or is inside the mesh. Conservative: the result contains the mesh. |
 | `--connectivity 6` (default) | Joint every voxel to its 6 face neighbors. `18` adds the 12 edge neighbors, `26` adds the 8 corner neighbors. |
+| `--connect-isolated` | Joint every voxel to its 6 face neighbors, and a voxel that has **no** face neighbor also to its edge and corner neighbors (up to 18 more). Voxels that already have a face neighbor get no extra joints, so a model with solid volume stays at about 3 joints per voxel while a thin diagonal or a voxel that only touches the rest at an edge or corner stays attached. Works on top of `--connectivity 6`; combining it with `18` or `26` is an error. The JSON header gets `"connectIsolated": true`. |
 | `--scale F` | Multiplies the mesh first, for example `0.001` for a mesh in millimeters. |
 | `--zup-to-yup` | Rotates the mesh from a z-up frame (most CAD tools) to Unity's y-up frame: `(x, y, z) -> (x, z, -y)`. |
 | `--smooth` | Also bake the smooth surface of the mesh into the voxels on the surface (see *Smooth surface* below). Larger files. |
