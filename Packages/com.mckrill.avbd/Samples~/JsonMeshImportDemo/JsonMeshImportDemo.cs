@@ -86,12 +86,12 @@ namespace McKrill.Avbd.Samples
         [Tooltip("Stiffness of the joints' linear part when they are not rigid. The angle lock is always rigid: only a rigid angle lock stores the multiplier that fracture tests.")]
         [SerializeField, Min(1f)] float jointStiffness = 5e3f;
         [Tooltip("A joint breaks when the norm of its angular multiplier is above this.")]
-        [SerializeField, Min(0.01f)] float fractureThreshold = 330f;
+        [SerializeField, Min(0.01f)] float fractureThreshold = 600f;
 
         [Header("Plastic joints (applied on Reset)")]
         [SerializeField] bool plasticJoints = true;
         [Tooltip("A plastic joint yields when the norm of its angular multiplier is above this. Keep it below the fracture threshold: a joint breaks before it can yield otherwise.")]
-        [SerializeField, Min(0.1f)] float yieldThreshold = 110f;
+        [SerializeField, Min(0.1f)] float yieldThreshold = 400f;
         [Tooltip("A plastic joint that has yielded breaks once it is bent further than the angle below from where it started.")]
         [SerializeField] bool bendBreak = true;
         [Tooltip("The bend, in degrees, above which a plastic joint breaks (with bend break on).")]
@@ -99,17 +99,27 @@ namespace McKrill.Avbd.Samples
 
         [Header("Linear fracture and plasticity (applied on Reset; need rigid joints)")]
         [Tooltip("A joint breaks when the norm of its linear multiplier (the force it carries) is above the threshold below. Needs rigid joints.")]
-        [SerializeField] bool linearFracture = false;
-        [SerializeField, Min(0.01f)] float linearFractureThreshold = 400f;
+        [SerializeField] bool linearFracture = true;
+        [SerializeField, Min(0.01f)] float linearFractureThreshold = 600f;
         [Tooltip("Joints yield in the linear row too: above the yield threshold the joint gives way and keeps the stretch. Needs rigid joints.")]
-        [SerializeField] bool linearYield = false;
-        [SerializeField, Min(0.1f)] float linearYieldThreshold = 100f;
+        [SerializeField] bool linearYield = true;
+        [SerializeField, Min(0.1f)] float linearYieldThreshold = 400f;
         [Tooltip("A joint that has yielded linearly breaks once its anchors have moved apart further than the distance below.")]
         [SerializeField] bool stretchBreak = true;
-        [SerializeField, Range(0.01f, 2f)] float stretchBreakMeters = 0.25f;
+        [SerializeField, Range(0.01f, 2f)] float stretchBreakMeters = 0.04f;
 
         [Header("Solver")]
+        [Tooltip("The solver's constants (AvbdSolverSettings). They are in the panel at the right of the screen and take effect at the next step, no Reset needed. The defaults are the package's, except the lowest penalty (2000, as the demo always used).")]
+        [SerializeField, Range(15f, 240f)] float stepsPerSecond = 60f;
+        [SerializeField] Vector3 gravity = new Vector3(0f, -10f, 0f);
         [SerializeField, Range(1, 30)] int iterations = 10;
+        [SerializeField, Range(0f, 1f)] float alpha = 0.925f;
+        [SerializeField, Min(0f)] float betaLin = 1e4f;
+        [SerializeField, Min(0f)] float betaAng = 100f;
+        [SerializeField, Range(0f, 1f)] float gamma = 0.999f;
+        [SerializeField, Min(1e-3f)] float penaltyMin = 2000f;
+        [SerializeField, Min(1e-3f)] float penaltyMax = 1e10f;
+        [Tooltip("The most steps run in one frame; a frame that needs more runs slower than real time.")]
         [SerializeField, Range(1, 4)] int maxStepsPerFrame = 2;
 
         [Header("Throw")]
@@ -403,13 +413,8 @@ namespace McKrill.Avbd.Samples
             UpdateGrab();
             tunnelRisk = shotSpeed * solver.Settings.dt > shotSize;
 
-            // The settings take effect at the next step.
-            AvbdSolverSettings settings = solver.Settings;
-            if (settings.iterations != iterations)
-            {
-                settings.iterations = iterations;
-                solver.Settings = settings;
-            }
+            // The settings (the panel at the right) take effect at the next step.
+            solver.Settings = CurrentSettings();
 
             // Make spawns and removals visible to the readback below, also while paused.
             bodies.ApplyEdits();
@@ -764,6 +769,24 @@ namespace McKrill.Avbd.Samples
 
             boxMaterial.SetBuffer("_Poses", bodies.State);
             boxMaterial.SetBuffer("_Instances", instanceBuffer);
+        }
+
+        // The solver's constants as the panel has them. A value that would not pass the solver's check is brought into range (the highest penalty is not below the lowest).
+        AvbdSolverSettings CurrentSettings()
+        {
+            float lowest = Mathf.Max(penaltyMin, 1e-3f);
+            return new AvbdSolverSettings
+            {
+                dt = 1f / Mathf.Max(stepsPerSecond, 1f),
+                gravity = gravity,
+                iterations = iterations,
+                alpha = Mathf.Clamp01(alpha),
+                betaLin = Mathf.Max(betaLin, 0f),
+                betaAng = Mathf.Max(betaAng, 0f),
+                gamma = Mathf.Clamp01(gamma),
+                penaltyMin = lowest,
+                penaltyMax = Mathf.Max(penaltyMax, lowest),
+            };
         }
 
         // A box of the demo: in DemoGroup only.
@@ -1510,10 +1533,6 @@ namespace McKrill.Avbd.Samples
             }
 
             GUILayout.Space(4f);
-            GUILayout.Label("Iterations: " + iterations);
-            iterations = Mathf.RoundToInt(GUILayout.HorizontalSlider(iterations, 1, 30));
-
-            GUILayout.Space(4f);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button(paused ? "Play" : "Pause")) paused = !paused;
             if (GUILayout.Button("Step")) { paused = true; requestStep = true; }
@@ -1585,7 +1604,7 @@ namespace McKrill.Avbd.Samples
             GUI.matrix = oldMatrix;
         }
 
-        // One line for each file of the folder, in a panel of its own at the top right of the screen.
+        // The objects and, below them, the solver's settings, in a panel of their own at the top right of the screen.
         void DrawObjectsPanel()
         {
             const float margin = 8f;
@@ -1604,6 +1623,54 @@ namespace McKrill.Avbd.Samples
             foreach (string line in objectLines)
                 GUILayout.Label(line);
             GUILayout.EndVertical();
+
+            // Below it, the solver's settings (AvbdSolverSettings). The controls never come and go, and none of them needs a Reset.
+            GUILayout.Space(4f);
+            GUILayout.BeginVertical(GUI.skin.box);
+            GUILayout.Label("AVBD solver settings (apply at the next step)", boldLabel);
+
+            GUILayout.Label("Time step: " + (1f / stepsPerSecond * 1000f).ToString("0.0") + " ms   (" + stepsPerSecond.ToString("0") + " steps per second)");
+            stepsPerSecond = Mathf.Round(GUILayout.HorizontalSlider(stepsPerSecond, 15f, 240f));
+
+            GUILayout.Label("Iterations: " + iterations + "   (a primal and a dual pass each)");
+            iterations = Mathf.RoundToInt(GUILayout.HorizontalSlider(iterations, 1, 30));
+
+            GUILayout.Label("Gravity: (" + gravity.x.ToString("0.0") + ", " + gravity.y.ToString("0.0") + ", " + gravity.z.ToString("0.0") + ") m/s^2");
+            gravity.x = GUILayout.HorizontalSlider(gravity.x, -30f, 30f);
+            gravity.y = GUILayout.HorizontalSlider(gravity.y, -30f, 30f);
+            gravity.z = GUILayout.HorizontalSlider(gravity.z, -30f, 30f);
+
+            GUILayout.Label("Alpha: " + alpha.ToString("0.000") + "   (stabilization: 1 none, 0 full)");
+            alpha = GUILayout.HorizontalSlider(alpha, 0f, 1f);
+
+            betaLin = LogSlider("Beta linear", betaLin, 1f, 1e7f, "   (penalty ramping, linear rows)");
+            betaAng = LogSlider("Beta angular", betaAng, 1f, 1e6f, "   (penalty ramping, angular rows)");
+
+            GUILayout.Label("Gamma: " + gamma.ToString("0.0000") + "   (warm start decay)");
+            gamma = GUILayout.HorizontalSlider(gamma, 0f, 1f);
+
+            penaltyMin = LogSlider("Penalty min", penaltyMin, 1f, 1e8f, "   (lowest penalty of a row)");
+            penaltyMax = LogSlider("Penalty max", penaltyMax, 1f, 1e12f, "   (highest penalty of a row)");
+
+            GUILayout.Label("Max steps per frame: " + maxStepsPerFrame + "   (more is slower than real time)");
+            maxStepsPerFrame = Mathf.RoundToInt(GUILayout.HorizontalSlider(maxStepsPerFrame, 1, 4));
+
+            if (GUILayout.Button("Default solver settings"))
+            {
+                AvbdSolverSettings d = AvbdSolverSettings.Default;
+                stepsPerSecond = 1f / d.dt;
+                gravity = d.gravity;
+                iterations = d.iterations;
+                alpha = d.alpha;
+                betaLin = d.betaLin;
+                betaAng = d.betaAng;
+                gamma = d.gamma;
+                penaltyMin = 2000f; // the demo's own lowest penalty
+                penaltyMax = d.penaltyMax;
+                maxStepsPerFrame = 2;
+            }
+            GUILayout.EndVertical();
+
             Rect used = GUILayoutUtility.GetLastRect();
             GUILayout.EndArea();
 
@@ -1611,6 +1678,14 @@ namespace McKrill.Avbd.Samples
                 objectsPanelScreenRect = new Rect(Screen.width - (width + 2f * margin) * scale, 0f, (width + 2f * margin) * scale, (used.yMax + 2f * margin) * scale);
 
             GUI.matrix = oldMatrix;
+        }
+
+        // A slider on a log scale (the value in [min, max]) with its label.
+        static float LogSlider(string name, float value, float min, float max, string note)
+        {
+            GUILayout.Label(name + ": " + value.ToString("G4") + note);
+            float t = GUILayout.HorizontalSlider(Mathf.Log10(Mathf.Clamp(value, min, max)), Mathf.Log10(min), Mathf.Log10(max));
+            return Mathf.Clamp(Mathf.Pow(10f, t), min, max);
         }
 
         void HandleInput(Event e)
