@@ -410,8 +410,8 @@ void StampManifold(uint manifold, uint tid, uint slot, float3 selfPos, float4 se
 }
 
 // The summed system of every body of the group, term-major like gsTerms, but with the body as the fast index: term t of body b is at t * AVBD_PRIMAL_BODIES + b.
-// The lanes write the sums here and lane 0 of each body factorizes it where it is. The LDL^T used to run on a local array of 36 + 6 floats, which stayed in
-// registers for the whole solve; here the lane 0 threads of the group (one per body, so adjacent bodies) touch consecutive words, which is free of bank conflicts.
+// The lanes write the sums here and lane 0 of each body reads them (SolveLdlt6): the lane 0 threads of the group (one per body, so adjacent bodies) touch
+// consecutive words, which is free of bank conflicts.
 #define AVBD_PRIMAL_BODIES (AVBD_GROUP_SIZE / AVBD_PRIMAL_LANES)
 groupshared float gsSums[AVBD_PRIMAL_TERMS * AVBD_PRIMAL_BODIES];
 
@@ -426,50 +426,60 @@ uint SolveTerm(uint i, uint j)
     return AVBD_TERM_ANG + TriIndex(i - 3u, j - 3u);
 }
 
-// Element (i, j) of the matrix of body `body` of the group and element i of its right-hand side.
-#define AVBD_SOLVE_A(i, j) gsSums[SolveTerm(i, j) * AVBD_PRIMAL_BODIES + body]
-#define AVBD_SOLVE_Y(i)    gsSums[(AVBD_TERM_RHS + (i)) * AVBD_PRIMAL_BODIES + body]
+// Element (i, j), i >= j, of the packed lower triangle of the matrix that SolveLdlt6 factorizes in registers.
+#define AVBD_SOLVE_M(i, j) m[TriIndex(i, j)]
 
-// Solves A x = -rhs for the summed system of body `body` of the group with an LDL^T factorization, no pivoting, in groupshared memory: the lower triangle
-// of the matrix is overwritten by the factorization and the right-hand side by x (AVBD_SOLVE_Y). Mirrors Mat6.TrySolveLDLT in the reference. Returns false if
-// a pivot is not above 1e-20 or is NaN (x is then meaningless). Only lane 0 of a body runs it, so no barrier is needed.
-bool SolveLdlt6(uint body)
+// Solves A x = -rhs for the summed system of body `body` of the group with an LDL^T factorization, no pivoting. Mirrors Mat6.TrySolveLDLT in the reference.
+// Returns false if a pivot is not above 1e-20 or is NaN (x is then meaningless). Only lane 0 of a body runs it, so no barrier is needed.
+//
+// The 21 elements of the lower triangle and the 6 of the right-hand side are read from gsSums once, all 27 together (one round trip to groupshared memory),
+// and the factorization runs on registers, so it is a chain of arithmetic only. It used to run in place in groupshared memory, where every element that a
+// step wrote and the next step read was a store followed by a load of the same word, about 25 cycles each, one after the other, for the whole solve. The
+// registers are free for it: the stamps, which come before it, are where the kernel needs the most (the lane's partial system no longer lives in them).
+// The operations and their order are the same, so x is the same bit for bit.
+bool SolveLdlt6(uint body, out float y[6])
 {
+    float m[21];
     float v[6];
     bool ok = true; // no early return inside the unrolled loops: a failed pivot is replaced by 1 and reported at the end
 
     [unroll]
-    for (uint n = 0; n < 6; n++)
-        AVBD_SOLVE_Y(n) = -AVBD_SOLVE_Y(n);
+    for (uint r = 0; r < 6; r++)
+    {
+        [unroll]
+        for (uint c = 0; c <= r; c++)
+            m[TriIndex(r, c)] = gsSums[SolveTerm(r, c) * AVBD_PRIMAL_BODIES + body];
+        y[r] = -gsSums[(AVBD_TERM_RHS + r) * AVBD_PRIMAL_BODIES + body];
+    }
 
     [unroll]
     for (uint j = 0; j < 6; j++)
     {
         [unroll]
         for (uint k = 0; k < j; k++)
-            v[k] = AVBD_SOLVE_A(j, k) * AVBD_SOLVE_A(k, k);
+            v[k] = AVBD_SOLVE_M(j, k) * AVBD_SOLVE_M(k, k);
 
-        float dj = AVBD_SOLVE_A(j, j);
+        float dj = AVBD_SOLVE_M(j, j);
         [unroll]
         for (uint k2 = 0; k2 < j; k2++)
-            dj -= AVBD_SOLVE_A(j, k2) * v[k2];
+            dj -= AVBD_SOLVE_M(j, k2) * v[k2];
 
         if (!(dj > 1e-20))
         {
             ok = false;
             dj = 1.0;
         }
-        AVBD_SOLVE_A(j, j) = dj;
+        AVBD_SOLVE_M(j, j) = dj;
 
         float inv = 1.0 / dj;
         [unroll]
         for (uint i = j + 1; i < 6; i++)
         {
-            float s = AVBD_SOLVE_A(i, j);
+            float s = AVBD_SOLVE_M(i, j);
             [unroll]
             for (uint k3 = 0; k3 < j; k3++)
-                s -= AVBD_SOLVE_A(i, k3) * v[k3];
-            AVBD_SOLVE_A(i, j) = s * inv;
+                s -= AVBD_SOLVE_M(i, k3) * v[k3];
+            AVBD_SOLVE_M(i, j) = s * inv;
         }
     }
 
@@ -477,27 +487,27 @@ bool SolveLdlt6(uint body)
     [unroll]
     for (uint i1 = 0; i1 < 6; i1++)
     {
-        float s = AVBD_SOLVE_Y(i1);
+        float s = y[i1];
         [unroll]
         for (uint k4 = 0; k4 < i1; k4++)
-            s -= AVBD_SOLVE_A(i1, k4) * AVBD_SOLVE_Y(k4);
-        AVBD_SOLVE_Y(i1) = s;
+            s -= AVBD_SOLVE_M(i1, k4) * y[k4];
+        y[i1] = s;
     }
 
     // Diagonal: D z = y
     [unroll]
     for (uint i2 = 0; i2 < 6; i2++)
-        AVBD_SOLVE_Y(i2) /= AVBD_SOLVE_A(i2, i2);
+        y[i2] /= AVBD_SOLVE_M(i2, i2);
 
     // Backward substitution: L^T x = z
     [unroll]
     for (int i3 = 5; i3 >= 0; i3--)
     {
-        float s = AVBD_SOLVE_Y(i3);
+        float s = y[i3];
         [unroll]
         for (int k5 = i3 + 1; k5 < 6; k5++)
-            s -= AVBD_SOLVE_A(k5, i3) * AVBD_SOLVE_Y(k5);
-        AVBD_SOLVE_Y(i3) = s;
+            s -= AVBD_SOLVE_M(k5, i3) * y[k5];
+        y[i3] = s;
     }
 
     return ok;
@@ -655,11 +665,12 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
     if (!active || lane != 0u)
         return;
 
-    if (SolveLdlt6(body))
+    float x[6];
+    if (SolveLdlt6(body, x))
     {
         // Only the pose changes: write those two words, not the start-of-step pose that follows them in the 64 B record, and the compact copy of the pose.
-        float4 newPosition = float4(position + float3(AVBD_SOLVE_Y(0), AVBD_SOLVE_Y(1), AVBD_SOLVE_Y(2)), 0.0);
-        float4 newRotation = AvbdIntegrateAngular(rotation, float3(AVBD_SOLVE_Y(3), AVBD_SOLVE_Y(4), AVBD_SOLVE_Y(5)));
+        float4 newPosition = float4(position + float3(x[0], x[1], x[2]), 0.0);
+        float4 newRotation = AvbdIntegrateAngular(rotation, float3(x[3], x[4], x[5]));
         _BodyState[slot].position = newPosition;
         _BodyState[slot].rotation = newRotation;
         BodyPoseRecord pose;
