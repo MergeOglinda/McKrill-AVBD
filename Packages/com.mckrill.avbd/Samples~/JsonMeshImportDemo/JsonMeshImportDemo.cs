@@ -609,8 +609,17 @@ namespace McKrill.Avbd.Samples
             if (chunksWanted)
                 CreateChunkMesh(spawned, drawnAsChunk, instanceColors);
 
-            // Joints: one for every pair of the file.
-            jointCount = 0;
+            // Joints: one for every pair of the file. The records are added in the order of the bodies' slots (the lower slot of the pair first, then the higher), not
+            // in the order of the file: the bodies sit in Z-curve order, so the ~14 records of one body, and those of its neighbors, end up in neighboring memory,
+            // and the primal sweep and the dual update read them with fewer cache misses. The solver computes the same thing in either order.
+            int pairCount = 0;
+            foreach (VoxelObject o in objects)
+                pairCount += o.data.jointCount;
+            var pairKeys = new ulong[pairCount];
+            var pairIds = new int[pairCount]; // the pair's index in the list of all pairs: file by file, in the order of the file
+            var pairA = new int[pairCount];   // voxel numbers in the whole scene
+            var pairB = new int[pairCount];
+            int pair = 0;
             first = 0;
             foreach (VoxelObject o in objects)
             {
@@ -619,9 +628,31 @@ namespace McKrill.Avbd.Samples
                 {
                     int a = first + pairs[2 * m];
                     int b = first + pairs[2 * m + 1];
-                    Join(spawned[1 + a], positions[a], spawned[1 + b], positions[b]);
+                    BodyHandle handleA = spawned[1 + a];
+                    BodyHandle handleB = spawned[1 + b];
+                    ulong key = ulong.MaxValue; // a pair with a body that was not spawned makes no joint (Join skips it): last
+                    if (handleA.IsValid && handleB.IsValid)
+                    {
+                        uint low = (uint)Mathf.Min(handleA.Slot, handleB.Slot);
+                        uint high = (uint)Mathf.Max(handleA.Slot, handleB.Slot);
+                        key = ((ulong)low << 32) | high;
+                    }
+                    pairKeys[pair] = key;
+                    pairIds[pair] = pair;
+                    pairA[pair] = a;
+                    pairB[pair] = b;
+                    pair++;
                 }
                 first += o.data.voxelCount;
+            }
+            System.Array.Sort(pairKeys, pairIds);
+
+            jointCount = 0;
+            for (int m = 0; m < pairCount; m++)
+            {
+                int a = pairA[pairIds[m]];
+                int b = pairB[pairIds[m]];
+                Join(spawned[1 + a], positions[a], spawned[1 + b], positions[b]);
             }
             bodies.ApplyEdits();
 
