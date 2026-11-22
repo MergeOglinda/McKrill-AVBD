@@ -73,6 +73,9 @@ namespace McKrill.Avbd
         /// <summary>Mirrors AVBD_COLOR_LANES: threads that look at the neighbors of one body in a coloring round.</summary>
         public const int RoundLanes = 8;
 
+        /// <summary>Mirrors AVBD_BUCKET_SPAN: the slots each thread of ColorBucket handles (a thread group handles GroupSize * BucketSpan of them).</summary>
+        public const int BucketSpan = 4;
+
         // Rounds dispatched before the first readback, and between the later ones. A round after the coloring is done finds every body colored
         // and ends at once, so a long first batch costs little and, for the usual graph (a few rounds with the hashed order), saves the second
         // wait for the GPU.
@@ -122,6 +125,7 @@ namespace McKrill.Avbd
         static readonly int FinishArgsId = Shader.PropertyToID("_ColorFinishArgs");
         static readonly int BaseId = Shader.PropertyToID("_Base");
         static readonly int CountId = Shader.PropertyToID("_Count");
+        static readonly int BucketEndId = Shader.PropertyToID("_BucketEnd");
 
         /// <summary>Rounds the last <see cref="Run"/> or <see cref="RunPersistent"/> dispatched (from scratch: the first batch, then a multiple of the batch size).</summary>
         public int LastRounds { get; private set; }
@@ -192,7 +196,7 @@ namespace McKrill.Avbd
 
         /// <summary>
         /// Colors the solved bodies among slots [0, bodyCount) and fills <paramref name="colorBodies"/> with the slots grouped by color
-        /// (order inside a color is unspecified; it does not change the result of a sweep). Returns the number of colors. The start and
+        /// (slot order inside each chunk of GroupSize * BucketSpan slots, chunks in timing order: it does not change the result of a sweep, but a sweep reads memory more coherently). Returns the number of colors. The start and
         /// the size of every color are on the GPU (<see cref="Work"/>, <see cref="Args"/>); <see cref="ReadSchedule"/> reads them back for tests.
         /// </summary>
         /// <param name="records">Constraint records, read through the lists.</param>
@@ -332,7 +336,8 @@ namespace McKrill.Avbd
         {
             AvbdDispatch.Linear(shader, countKernel, bodyCount);
             shader.Dispatch(planKernel, 1, 1, 1);
-            AvbdDispatch.Linear(shader, bucketKernel, bodyCount);
+            shader.SetInt(BucketEndId, bodyCount);
+            AvbdDispatch.Linear(shader, bucketKernel, (bodyCount + BucketSpan - 1) / BucketSpan);
         }
 
         void EnsureScratch(int capacity)

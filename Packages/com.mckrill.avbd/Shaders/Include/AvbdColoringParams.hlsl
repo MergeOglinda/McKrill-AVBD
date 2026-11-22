@@ -23,6 +23,10 @@
 #define AVBD_COLOR_STAT_FINISHED   198 // bodies still waiting after the rounds the host dispatched (before the extra rounds)
 #define AVBD_COLOR_WORK_WORDS 200
 
+// ColorBucket: slots per thread, and slots per thread group (a chunk; the bodies of a color keep slot order inside a chunk).
+#define AVBD_BUCKET_SPAN 4u
+#define AVBD_BUCKET_CHUNK (AVBD_GROUP_SIZE * AVBD_BUCKET_SPAN)
+
 // Threads that look at the neighbors of one body in a coloring round (a power of two that divides AVBD_GROUP_SIZE).
 #define AVBD_COLOR_LANES 8u
 

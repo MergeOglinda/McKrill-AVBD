@@ -38,7 +38,7 @@
 //   ColorForce       persistent: colors the bodies that are still without a color after all rounds, without waiting
 //   ColorCount       counts the bodies of each color
 //   ColorPlan        one thread; the start of each color (also the bucket cursors), the number of colors and the indirect dispatch arguments
-//   ColorBucket      writes the body slots into the color buckets, at the cursors ColorPlan set
+//   ColorBucket      writes the body slots into the color buckets, at the cursors ColorPlan set; slot order inside a chunk of AVBD_BUCKET_CHUNK slots
 // The cap (_ColorCap) is the number of colors the host will dispatch; a body that would need a color at or above it takes the last color below
 // it instead, and is counted in control word 1 (the host raises the cap; until then that body is solved with the bodies of that color, in
 // parallel, which is less accurate but not wrong in the sense of a crash). From scratch the cap is AVBD_COLOR_MAX.
@@ -78,6 +78,7 @@ uint _Count; // end of the range: items [_Base, _Count)
 uint _Order; // AVBD_COLOR_ORDER_*
 uint _ColorCap; // colors the host dispatches, at most AVBD_COLOR_MAX
 uint _Round;    // the round being dispatched, counted from 0 (statistics only)
+uint _BucketEnd; // ColorBucket: end of the slot range (its threads handle AVBD_BUCKET_SPAN slots each, so _Count is not the slot count there)
 
 uint HashSlot(uint x)
 {
@@ -411,18 +412,49 @@ void ColorPlan(uint3 id : SV_DispatchThreadID)
     _ColorWork[AVBD_COLOR_COUNT_WORD] = colors;
 }
 
-[numthreads(AVBD_GROUP_SIZE, 1, 1)]
-void ColorBucket(uint3 id : SV_DispatchThreadID)
-{
-    uint slot = _Base + id.x;
-    if (slot >= _Count)
-        return;
+// The bodies of a color are written in slot order inside a chunk of AVBD_BUCKET_CHUNK consecutive slots, and a chunk reserves its entries of a
+// color with one atomic add (the cursor), so the order of the chunks inside a color is the only thing that depends on timing. The sweep reads the
+// body state, the neighbor poses and the constraint lists of the bodies of a color; with slots that follow a spatial order (the demos spawn them
+// along a Z-curve) the lanes of a warp then touch memory that is close together instead of scattered over the whole object.
+// A thread group owns one chunk: AVBD_BUCKET_SPAN slots per thread, loaded as AVBD_BUCKET_SPAN coalesced rows. Then thread c (and c + group size,
+// ...) owns the colors c: it counts its color in the chunk, reserves that many entries and writes the slots in order. The colors are read from
+// shared memory (one broadcast read per thread and slot).
+// The host dispatches ceil(solved range / AVBD_BUCKET_SPAN) threads and sets _BucketEnd to the end of the slot range.
+groupshared uint gsBucketColor[AVBD_BUCKET_CHUNK];
 
-    uint color = _BodyMeta[slot].state.x;
-    if (color < AVBD_COLOR_MAX)
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorBucket(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
+{
+    uint chunkStart = (_Base + id.x - tid) * AVBD_BUCKET_SPAN;
+
+    [unroll]
+    for (uint k = 0u; k < AVBD_BUCKET_SPAN; k++)
     {
+        uint slot = chunkStart + k * AVBD_GROUP_SIZE + tid;
+        // A slot past the range, a body that is not solved (AVBD_INVALID) and one that is still waiting (AVBD_COLOR_PENDING) have no bucket.
+        gsBucketColor[k * AVBD_GROUP_SIZE + tid] = slot < _BucketEnd ? _BodyMeta[slot].state.x : AVBD_COLOR_PENDING;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint color = tid; color < AVBD_COLOR_MAX; color += AVBD_GROUP_SIZE)
+    {
+        uint count = 0u;
+        [loop]
+        for (uint i = 0u; i < AVBD_BUCKET_CHUNK; i++)
+            count += gsBucketColor[i] == color ? 1u : 0u;
+        if (count == 0u)
+            continue;
+
         uint entry;
-        InterlockedAdd(_ColorWork[AVBD_COLOR_CURSORS_OFFSET + color], 1u, entry);
-        _ColorBodies[entry] = slot;
+        InterlockedAdd(_ColorWork[AVBD_COLOR_CURSORS_OFFSET + color], count, entry);
+        [loop]
+        for (uint j = 0u; j < AVBD_BUCKET_CHUNK; j++)
+        {
+            if (gsBucketColor[j] == color)
+            {
+                _ColorBodies[entry] = chunkStart + j;
+                entry++;
+            }
+        }
     }
 }

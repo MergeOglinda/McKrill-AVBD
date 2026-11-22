@@ -464,6 +464,7 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)AvbdGraphColoring.RowGroups, d["AVBD_COLOR_ROW_GROUPS"]);
             Assert.AreEqual((uint)AvbdGraphColoring.PrimalLanes, d["AVBD_PRIMAL_LANES"]);
             Assert.AreEqual((uint)AvbdGraphColoring.RoundLanes, d["AVBD_COLOR_LANES"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.BucketSpan, d["AVBD_BUCKET_SPAN"]);
             Assert.AreEqual(0, AvbdConst.GroupSize % AvbdGraphColoring.RoundLanes, "the lanes of a body are in one thread group");
             Assert.AreEqual(0, AvbdConst.GroupSize % AvbdGraphColoring.PrimalLanes, "the lanes of a body are in one thread group");
             Assert.AreEqual(0, AvbdGraphColoring.PrimalLanes & (AvbdGraphColoring.PrimalLanes - 1), "a power of two");
