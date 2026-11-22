@@ -375,7 +375,7 @@ bool SolveLdlt6(uint body)
 // Entries of the body's list that a lane reads before it stamps any of them: the entries and the joint or spring records of the whole batch are requested
 // together, so their latencies overlap instead of following one another (list entry, then record, then the neighbor's pose, per stamp). Each record in
 // flight is 160 B of registers: 1 gives the plain one-at-a-time loop, and a larger batch buys more loads in flight with more registers.
-#define AVBD_PRIMAL_BATCH 2u
+#define AVBD_PRIMAL_BATCH 1u
 
 // AVBD_PRIMAL_LANES threads solve one body. Lane l stamps the entries l, l + AVBD_PRIMAL_LANES, ... of the body's list into its own partial system;
 // the partial systems are added up in groupshared memory, and lane 0 solves the sum once and writes the pose. The lanes of a body are

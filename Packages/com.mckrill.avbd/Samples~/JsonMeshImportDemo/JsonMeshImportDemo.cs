@@ -34,7 +34,7 @@ namespace McKrill.Avbd.Samples
         const string VoxelFolder = "JsonMeshImportDemo";
 
         /// <summary>Distance between the centers of two neighboring objects, along x, in meters.</summary>
-        const float ObjectSpacing = 5f;
+        const float ObjectSpacing = 25f;
 
         // Mirror of the package's state record (design doc, section 3): position, rotation, start-of-step position and rotation.
         // The package keeps its own struct internal; the demo only checks the stride of the public buffer against this copy (the draw shader reads the buffer).
@@ -538,7 +538,7 @@ namespace McKrill.Avbd.Samples
             staticInstances.Clear();
 
             AvbdSolverSettings settings = AvbdSolverSettings.Default; // 60 Hz, gravity (0, -10, 0): Unity's y-up
-            settings.penaltyMin = 2000f
+            settings.penaltyMin = 2000f;
             settings.iterations = iterations;
             // Manifold slots: a voxel touches up to 26 others, but at rest only the joined ones (which make no manifold) and a few more; a shot can lie on or
             // inside a dozen. A pair that finds no slot just gets no contacts until one is free.
