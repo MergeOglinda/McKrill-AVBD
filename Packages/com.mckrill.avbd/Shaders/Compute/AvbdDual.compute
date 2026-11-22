@@ -169,14 +169,19 @@ void Dual(uint3 id : SV_DispatchThreadID)
     LoadPose(c.ident.x, false, posA, rotA);
     LoadPose(c.ident.y, false, posB, rotB);
 
+    // The plastic data of the first update is requested with the poses, before they are used (see JointPlasticRead).
+    JointPlasticRead plasticRead = AvbdJointPlasticRead(c, flags);
+
     [loop]
     for (uint k = 0u; k < updates; k++)
     {
         flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
         if (flags & AVBD_CONSTRAINT_FLAG_BROKEN)
             break; // it broke in an earlier one of the updates
+        if (k > 0u)
+            plasticRead = AvbdJointPlasticRead(c, flags); // an earlier update may have moved the rest rotation (the record is written back each time)
         float4 rest;
-        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, rest);
+        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, plasticRead, rest);
         AvbdJointDualStore(index, c, result, rest);
     }
 }
