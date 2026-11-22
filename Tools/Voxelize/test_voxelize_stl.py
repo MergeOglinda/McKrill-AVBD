@@ -114,6 +114,66 @@ class VoxelizerTests(unittest.TestCase):
         self.assertEqual(len(vox.build_joints(solid, 18)[1]), 12 + 12)  # + the 12 face diagonals (2 on each of the 6 faces)
         self.assertEqual(len(vox.build_joints(solid, 26)[1]), 12 + 12 + 4)  # + the 4 space diagonals
 
+    def test_connect_isolated_joins_voxels_without_a_face_neighbor_to_their_edge_and_corner_neighbors(self):
+        # a diagonal line of voxels: no face neighbors at all, so each one joins its edge/corner neighbors
+        solid = np.zeros((4, 4, 4), bool)
+        for i in range(4):
+            solid[i, i, i] = True
+        self.assertEqual(len(vox.build_joints(solid, 6)[1]), 0)
+        voxels, joints = vox.build_joints(solid, 6, connect_isolated=True)
+        self.assertEqual(len(joints), 3)
+        self.assertTrue(np.all(np.abs(voxels[joints[:, 0]] - voxels[joints[:, 1]]).sum(axis=1) == 3))
+        # voxels that share an edge
+        solid = np.zeros((3, 3, 3), bool)
+        solid[0, 0, 0] = solid[1, 1, 0] = True
+        self.assertEqual(len(vox.build_joints(solid, 6, connect_isolated=True)[1]), 1)
+
+    def test_connect_isolated_adds_nothing_to_voxels_that_have_a_face_neighbor(self):
+        # a 2 x 2 x 2 block: every voxel has face neighbors, so no face diagonals or space diagonals
+        solid = np.ones((2, 2, 2), bool)
+        self.assertEqual(len(vox.build_joints(solid, 6, connect_isolated=True)[1]), 12)
+        # two face-connected voxels and a third one that touches only at a corner of the second
+        solid = np.zeros((4, 4, 4), bool)
+        solid[0, 0, 0] = solid[1, 0, 0] = True
+        solid[2, 1, 1] = True  # corner neighbor of (1, 0, 0), no face neighbor
+        voxels, joints = vox.build_joints(solid, 6, connect_isolated=True)
+        pairs = {tuple(sorted(map(tuple, voxels[j].tolist()))) for j in joints}
+        self.assertEqual(pairs, {((0, 0, 0), (1, 0, 0)), ((1, 0, 0), (2, 1, 1))})
+
+    def test_connect_isolated_off_and_with_18_or_26(self):
+        solid = np.zeros((2, 2, 2), bool)
+        solid[0, 0, 0] = solid[1, 1, 1] = True
+        self.assertEqual(len(vox.build_joints(solid, 6)[1]), 0)
+        self.assertEqual(len(vox.build_joints(solid, 6, connect_isolated=False)[1]), 0)
+        with self.assertRaises(ValueError):
+            vox.build_joints(solid, 18, connect_isolated=True)
+        with self.assertRaises(ValueError):
+            vox.build_joints(solid, 26, connect_isolated=True)
+
+    def test_connect_isolated_with_no_voxels(self):
+        voxels, joints = vox.build_joints(np.zeros((2, 2, 2), bool), 6, connect_isolated=True)
+        self.assertEqual((len(voxels), len(joints)), (0, 0))
+
+    def test_connect_isolated_option_on_the_command_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            stl = os.path.join(d, "b.stl")
+            write_binary(stl, box_mesh((0, 0, 0), (1, 1, 1)))
+            plain, flagged = os.path.join(d, "p.json"), os.path.join(d, "f.json")
+            self.assertEqual(vox.main([stl, "-o", plain, "--voxel-size", "0.25"]), 0)
+            self.assertEqual(vox.main([stl, "-o", flagged, "--voxel-size", "0.25", "--connect-isolated"]), 0)
+            with open(plain) as f:
+                a = json.load(f)
+            with open(flagged) as f:
+                b = json.load(f)
+            self.assertNotIn("connectIsolated", a)
+            self.assertTrue(b["connectIsolated"])
+            self.assertEqual(b["connectivity"], 6)
+            self.assertEqual(a["jointCount"], b["jointCount"], "a solid box has no isolated voxel")
+            with self.assertRaises(SystemExit):
+                with redirect_stderr(io.StringIO()):
+                    vox.main([stl, "-o", flagged, "--voxel-size", "0.25", "--connect-isolated", "--connectivity", "18"])
+            self.assertEqual(vox.main([stl, "-o", flagged, "--voxel-size", "0.25", "--connect-isolated", "--connectivity", "6"]), 0)
+
     def test_voxels_are_numbered_in_the_order_i_j_k(self):
         solid = np.zeros((3, 2, 2), bool)
         solid[0, 0, 1] = solid[0, 1, 0] = solid[2, 0, 0] = True
