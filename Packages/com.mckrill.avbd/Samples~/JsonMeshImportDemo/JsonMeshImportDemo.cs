@@ -91,7 +91,7 @@ namespace McKrill.Avbd.Samples
         [Header("Plastic joints (applied on Reset)")]
         [SerializeField] bool plasticJoints = true;
         [Tooltip("A plastic joint yields when the norm of its angular multiplier is above this. Keep it below the fracture threshold: a joint breaks before it can yield otherwise.")]
-        [SerializeField, Min(0.1f)] float yieldThreshold = 40f;
+        [SerializeField, Min(0.1f)] float yieldThreshold = 400f;
         [Tooltip("A plastic joint that has yielded breaks once it is bent further than the angle below from where it started.")]
         [SerializeField] bool bendBreak = true;
         [Tooltip("The bend, in degrees, above which a plastic joint breaks (with bend break on).")]
@@ -106,7 +106,7 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(0.1f)] float linearYieldThreshold = 400f;
         [Tooltip("A joint that has yielded linearly breaks once its anchors have moved apart further than the distance below.")]
         [SerializeField] bool stretchBreak = true;
-        [SerializeField, Range(0.01f, 2f)] float stretchBreakMeters = 0.04;
+        [SerializeField, Range(0.01f, 2f)] float stretchBreakMeters = 0.04f;
 
         [Header("Solver")]
         [Tooltip("The solver's constants (AvbdSolverSettings). They are in the panel at the right of the screen and take effect at the next step, no Reset needed. The defaults are the package's, except the lowest penalty (2000, as the demo always used).")]
