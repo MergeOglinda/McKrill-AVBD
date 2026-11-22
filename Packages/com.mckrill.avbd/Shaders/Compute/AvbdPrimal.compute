@@ -14,6 +14,14 @@
 // body B at the joint's rest rotation relative to body A. See AvbdDual.compute.
 #pragma multi_compile_local _ AVBD_PLASTIC_JOINTS
 
+// Compiled in when the solver fuses the dual update of the joints into the sweeps (AvbdSolver.FuseDualUpdate): the dual update of a joint after sweep k
+// then runs at the start of sweep k + 1, in the thread of the first body of the joint that is solved in that sweep, which writes the joint and marks it
+// with the id of the sweep (reserved.w), and the other body finds the mark and only stamps. The first body is the one with the lower color, and when it
+// runs, neither body of the joint has moved in sweep k + 1, so the joint sees the poses of the end of sweep k, as it does in the separate dual dispatch.
+// A dispatch (_DualSweep) of 0 does no dual update: the first sweep of a step, and the sweeps a test dispatches alone. The Dual kernel runs once after
+// the last sweep (AvbdDual.compute), for the sweep that has no sweep after it, and clears the marks.
+#pragma multi_compile_local _ AVBD_FUSED_DUAL
+
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdPlasticRecords.hlsl"
@@ -30,9 +38,16 @@ StructuredBuffer<BodyInertialRecord>   _BodyInertial;
 StructuredBuffer<BodyMassRecord>       _BodyMass;
 StructuredBuffer<BodyMetaRecord>       _BodyMeta;
 StructuredBuffer<BodyRangeRecord>      _BodyRange;
+#if defined(AVBD_FUSED_DUAL)
+RWStructuredBuffer<ConstraintRecord>   _Constraints;    // joints and springs (written by the dual update of the first body of a joint in a sweep)
+#if defined(AVBD_PLASTIC_JOINTS)
+RWStructuredBuffer<PlasticRecord>      _Plastic;        // rest rotation of the joints with the PLASTIC flag, by ident.w
+#endif
+#else
 StructuredBuffer<ConstraintRecord>     _Constraints;    // joints and springs
 #if defined(AVBD_PLASTIC_JOINTS)
 StructuredBuffer<PlasticRecord>        _Plastic;        // rest rotation of the joints with the PLASTIC flag, by ident.w
+#endif
 #endif
 StructuredBuffer<ContactPairRecord>    _ContactPairs;   // manifolds of the pool (a list entry with AVBD_LIST_CONTACT_FLAG names one)
 StructuredBuffer<ContactPointRecord>   _ContactPoints;
@@ -42,6 +57,11 @@ StructuredBuffer<uint>                 _ColorWork;      // stage C's work buffer
 RWStructuredBuffer<uint>               _Status;         // x = number of failed solves
 
 uint _Color; // the graph color this dispatch solves. The dispatch is indirect: its size comes from the arguments ColorPlan wrote
+uint _DualSweep; // AVBD_FUSED_DUAL: the id of this sweep (above 0) if it runs the dual update of the sweep before, 0 if it does not
+
+#if defined(AVBD_FUSED_DUAL)
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdJointDual.hlsl"
+#endif
 
 // The 6x6 system of one body, as the blocks the reference uses (all 3x3 blocks are mathematical matrices).
 struct PrimalSystem
@@ -98,7 +118,8 @@ void LoadPoseFromState(uint id, uint self, float3 selfPos, float4 selfRot, out f
     }
 }
 
-void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+// `entry` is the index of the record in _Constraints. With AVBD_FUSED_DUAL the joint is first brought up to date, if this body is the first to see it in the sweep.
+void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
 {
     float alpha = AVBD_ALPHA;
     bool hasA = c.ident.x != AVBD_INVALID;
@@ -108,6 +129,22 @@ void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float
     float4 rotA, rotB;
     LoadPose(c.ident.x, slot, selfPos, selfRot, posA, rotA);
     LoadPose(c.ident.y, slot, selfPos, selfRot, posB, rotB);
+
+    float4 rest = float4(0.0, 0.0, 0.0, 1.0); // rest rotation of the angular row: loaded below, or returned by the dual update that has just made it
+    bool haveRest = false;
+#if defined(AVBD_FUSED_DUAL)
+    // The dual update of the sweep before, with the poses read above: neither body of the joint has moved in this sweep (see the keyword above). A joint
+    // that is broken has none. The record is stored with the mark in the word that no other stage uses; the stamp below reads the updated joint.
+    if (_DualSweep != 0u && !(flags & AVBD_CONSTRAINT_FLAG_BROKEN) && asuint(c.reserved.w) != _DualSweep)
+    {
+        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, rest);
+        AvbdJointDualStore(entry, c, result, rest);
+        c.reserved.w = asfloat(_DualSweep);
+        _Constraints[entry].reserved.w = c.reserved.w;
+        flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+        haveRest = true;
+    }
+#endif
 
     float3 rA = c.anchorA.xyz;
     float3 rB = c.anchorB.xyz;
@@ -169,9 +206,8 @@ void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float
     // Angular constraint
     if (dot(penaltyAng, penaltyAng) > 0.0)
     {
-        float4 rest = float4(0.0, 0.0, 0.0, 1.0);
 #if defined(AVBD_PLASTIC_JOINTS)
-        if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC)
+        if (!haveRest && (flags & AVBD_CONSTRAINT_FLAG_PLASTIC))
             rest = _Plastic[c.ident.w].rest;
 #endif
         float3 C = AvbdJointAngularError(rotA, rotB, rest) * torqueArm; // rotA is the identity for a world joint
@@ -544,7 +580,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
                         uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
                         uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
                         if (kind == AVBD_CONSTRAINT_KIND_JOINT)
-                            StampJoint(c, flags, slot, position, rotation, sys);
+                            StampJoint(c, flags, entry, slot, position, rotation, sys);
                         else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
                             StampSpring(c, slot, position, rotation, sys);
                     }

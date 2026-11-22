@@ -121,6 +121,8 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(1e-3f)] float penaltyMax = 1e10f;
         [Tooltip("The most steps run in one frame; a frame that needs more runs slower than real time.")]
         [SerializeField, Range(1, 4)] int maxStepsPerFrame = 2;
+        [Tooltip("Run the dual update of the joints inside the primal sweeps and once more after the last one (AvbdSolver.FuseDualUpdate), instead of a dispatch after every sweep. The same result; compare the frame time of both.")]
+        [SerializeField] bool fuseDualUpdate = true;
 
         [Header("Throw")]
         [Tooltip("Speed in meters per second of the voxels that Throw lets fly.")]
@@ -415,6 +417,7 @@ namespace McKrill.Avbd.Samples
 
             // The settings (the panel at the right) take effect at the next step.
             solver.Settings = CurrentSettings();
+            solver.FuseDualUpdate = fuseDualUpdate;
 
             // Make spawns and removals visible to the readback below, also while paused.
             bodies.ApplyEdits();
@@ -1686,6 +1689,8 @@ namespace McKrill.Avbd.Samples
             GUILayout.Label("Max steps per frame: " + maxStepsPerFrame + "   (more is slower than real time)");
             maxStepsPerFrame = Mathf.RoundToInt(GUILayout.HorizontalSlider(maxStepsPerFrame, 1, 4));
 
+            fuseDualUpdate = GUILayout.Toggle(fuseDualUpdate, "Dual update inside the primal sweeps   (same result, fewer dispatches)");
+
             if (GUILayout.Button("Default solver settings"))
             {
                 AvbdSolverSettings d = AvbdSolverSettings.Default;
@@ -1699,6 +1704,7 @@ namespace McKrill.Avbd.Samples
                 penaltyMin = 2000f; // the demo's own lowest penalty
                 penaltyMax = d.penaltyMax;
                 maxStepsPerFrame = 2;
+                fuseDualUpdate = true;
             }
             GUILayout.EndVertical();
 

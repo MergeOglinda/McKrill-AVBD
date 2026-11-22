@@ -594,9 +594,44 @@ namespace McKrill.Avbd.Tests
             }
         }
 
+        // The dual update of the joints inside the primal sweeps (the default) against the separate dispatch after every sweep: both give what the oracle gives,
+        // over one iteration (no sweep runs a dual update, the last dispatch does all), two (one of each) and more, with fracture, plastic yield of both rows
+        // and joints to the world and between static bodies (which no sweep touches: they get all their updates in the last dispatch). The records leave the
+        // step with no mark in them (the comparison of `reserved` is exact).
+        [Test]
+        public void Gpu_Step_MatchesTheOracle_WithTheDualUpdateInTheSweeps_AndWithout([Values(1, 2, 3, 8)] int iterations, [Values(true, false)] bool fuseDual)
+        {
+            RequireCompute();
+            for (int seed = 1; seed <= 5; seed++)
+            {
+                var lattice = new ReferenceSolver();
+                ConstraintTestScenes.RandomLattice(lattice, 300 + seed);
+                CheckGpuAgainstOracle(lattice, iterations, "random scene " + seed, 0, fuseDual);
+            }
+
+            var rope = new ReferenceSolver();
+            AvbdScenes.Rope(rope);
+            ConstraintTestScenes.RandomizeJointState(rope, new System.Random(6));
+            CheckGpuAgainstOracle(rope, iterations, "rope", 0, fuseDual);
+
+            var fracture = new ReferenceSolver();
+            FractureScene(fracture, out _, out _);
+            CheckGpuAgainstOracle(fracture, iterations, "fracture scene", 0, fuseDual);
+
+            var plastic = new ReferenceSolver();
+            PlasticScene(plastic, out _, out _, out _);
+            CheckGpuAgainstOracle(plastic, iterations, "plastic scene", 8, fuseDual);
+
+            var linearPlastic = new ReferenceSolver();
+            LinearPlasticScene(linearPlastic, out _, out _, out _, out _);
+            CheckGpuAgainstOracle(linearPlastic, iterations, "linear plastic scene", 8, fuseDual);
+        }
+
         // plasticCapacity: the plastic capacity of the GPU constraint buffers. With 0 the joint kernels run without the plastic code; a scene with plastic
         // joints needs it above 0, and then they run the variants that read the plastic array (also on a scene that has no plastic joint).
-        static void CheckGpuAgainstOracle(ReferenceSolver reference, int iterations, string what, int plasticCapacity = 0)
+        // fuseDual: AvbdSolver.FuseDualUpdate. The default is on, so every test that goes through here runs the dual update inside the sweeps; the tests that
+        // switch it off are the check that the separate dispatch still works.
+        static void CheckGpuAgainstOracle(ReferenceSolver reference, int iterations, string what, int plasticCapacity = 0, bool fuseDual = true)
         {
             AvbdSolverSettings settings = Settings(iterations);
             SceneArrays scene = ConstraintTestScenes.FromReference(reference, Capacity);
@@ -620,7 +655,7 @@ namespace McKrill.Avbd.Tests
                     Assert.AreEqual(i, plastic ? constraints.AddRecord(raw[i], rawPlastic[raw[i].ident.w]) : constraints.AddRecord(raw[i]));
                 }
 
-                new AvbdSolver(buffers, settings, null, constraints).Step();
+                new AvbdSolver(buffers, settings, null, constraints) { FuseDualUpdate = fuseDual }.Step();
                 Assert.AreEqual(0, constraints.ReadSolveFailures(), what + ": GPU solve failures");
 
                 var state = new BodyStateRecord[Capacity];

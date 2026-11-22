@@ -35,15 +35,34 @@ namespace McKrill.Avbd
         readonly int npAllocateKernel = -1;
         readonly int dualContactKernel = -1;
         AvbdSolverSettings settings;
+        uint dualSweepCounter; // ids of the sweeps that run a fused dual update: 1, 2, ..., never 0 (see DispatchPrimalSweep)
+        uint lastDualSweep;    // the id of the last of them in this step, 0 if the step has none
+
+        /// <summary>
+        /// Run the dual update of the joints inside the primal sweeps (default true), not in a dispatch of its own after every sweep. The update after sweep k
+        /// then happens at the start of sweep k + 1, in the thread of the first body of the joint that is solved (the one of the lower color, so that
+        /// neither body has moved yet and the joint sees the poses of the end of sweep k), and one dual dispatch after the last sweep does the rest: with
+        /// 30 iterations that is 1 dual dispatch instead of 30, and 29 fewer reads of every joint record and of both of its poses. The result is the same as
+        /// without, to rounding (a joint that no solved body touches, such as one between two static bodies, gets all its updates in the last dispatch, one
+        /// after the other). It adds the update to the register-bound primal kernel, so it is a switch: compare both in a GPU trace. Takes effect at the
+        /// next step. Contacts are not affected (<see cref="DispatchDualContacts"/> still runs after every sweep).
+        /// </summary>
+        public bool FuseDualUpdate { get; set; } = true;
 
         // Keyword of the variants of the primal and dual shaders that read the plastic array (AvbdPlasticRecords.hlsl).
         const string PlasticKeyword = "AVBD_PLASTIC_JOINTS";
+        // Keyword of the variant of the primal shader that runs the dual update of the joints itself (see FuseDualUpdate).
+        const string FusedDualKeyword = "AVBD_FUSED_DUAL";
         static readonly int PlasticId = Shader.PropertyToID("_Plastic");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
         static readonly int ColorBodiesId = Shader.PropertyToID("_ColorBodies");
         static readonly int ColorWorkId = Shader.PropertyToID("_ColorWork");
         static readonly int ColorId = Shader.PropertyToID("_Color");
+        static readonly int DualSweepId = Shader.PropertyToID("_DualSweep");
+        static readonly int ClearMarksId = Shader.PropertyToID("_ClearMarks");
+        static readonly int LastSweepId = Shader.PropertyToID("_LastSweep");
+        static readonly int FinalUpdatesId = Shader.PropertyToID("_FinalUpdates");
         static readonly int StatusId = Shader.PropertyToID("_Status");
         static readonly int ContactPairsId = Shader.PropertyToID("_ContactPairs");
         static readonly int ContactPointsId = Shader.PropertyToID("_ContactPoints");
@@ -184,12 +203,17 @@ namespace McKrill.Avbd
                 constraints.RefreshContactTopology();
             }
             DispatchConstraintInit();
+            bool fused = FuseDualUpdate && constraints.RecordCount > 0;
+            lastDualSweep = 0u;
             for (int it = 0; it < settings.iterations; it++)
             {
-                DispatchPrimalSweep();
-                DispatchDual();
+                DispatchPrimalSweep(fused, fused && it > 0); // the first sweep has no dual update before it
+                if (!fused)
+                    DispatchDual();
                 DispatchDualContacts();
             }
+            if (fused && settings.iterations > 0)
+                DispatchFinalDual(); // the update of the last sweep, which no sweep follows, and the marks of the sweeps
             DispatchVelocity();
         }
 
@@ -420,12 +444,30 @@ namespace McKrill.Avbd
         // Stage V: one primal sweep. One dispatch per color; the dispatches of one sweep run in order, because a body reads the
         // poses that the earlier colors just wrote. Each dispatch is indirect: the size of a color is only known on the GPU, where stage C
         // wrote the arguments, and the host only knows how many colors there are. Does nothing without constraints.
-        internal void DispatchPrimalSweep()
+        //
+        // `fusedDual` picks the variant of the shader that can run the dual update of the joints itself (AVBD_FUSED_DUAL), and `dualOfPreviousSweep` makes this
+        // sweep do it: the sweep then updates every joint that a solved body touches, with the poses of the end of the sweep before, so the first sweep of a
+        // step does not, and every step that fuses ends with DispatchDual(true). Without fusedDual it is the plain sweep.
+        internal void DispatchPrimalSweep(bool fusedDual = false, bool dualOfPreviousSweep = false)
         {
             if (constraints == null)
                 return;
 
             ComputeShader shader = shaders.Primal;
+            if (fusedDual)
+                shader.EnableKeyword(FusedDualKeyword);
+            else
+                shader.DisableKeyword(FusedDualKeyword);
+            uint sweepId = 0u;
+            if (fusedDual && dualOfPreviousSweep)
+            {
+                // A joint that a sweep has updated holds this id, so the next sweep does not take it for updated. The marks are cleared at the end of every
+                // step, so a wrap-around cannot meet an old one; ids stay below 2^31 (the mark is a float word, and a NaN is better avoided).
+                dualSweepCounter = dualSweepCounter >= 0x7FFFFFFFu ? 1u : dualSweepCounter + 1u;
+                sweepId = dualSweepCounter;
+                lastDualSweep = sweepId;
+            }
+            shader.SetInt(DualSweepId, (int)sweepId);
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, primalKernel);
             shader.SetBuffer(primalKernel, RecordsId, constraints.Records);
@@ -453,6 +495,18 @@ namespace McKrill.Avbd
         // Stage D, after every primal sweep: multiplier, penalty and fracture update of every joint.
         internal void DispatchDual()
         {
+            shaders.Dual.SetInt(ClearMarksId, 0);
+            DispatchConstraintKernel(dualKernel);
+        }
+
+        // Stage D, after the last sweep of a step that fused the update into the sweeps: the update of that last sweep, the clearing of the marks the sweeps
+        // left in the records, and for a joint that no sweep touched (no solved body is on it) the updates of all the iterations.
+        internal void DispatchFinalDual()
+        {
+            ComputeShader shader = shaders.Dual;
+            shader.SetInt(ClearMarksId, 1);
+            shader.SetInt(LastSweepId, (int)lastDualSweep);
+            shader.SetInt(FinalUpdatesId, settings.iterations);
             DispatchConstraintKernel(dualKernel);
         }
 
