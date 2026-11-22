@@ -254,6 +254,7 @@ namespace McKrill.Avbd.Tests
             AssertBuffer(buffers.Shape, oracle.Shape, "Shape", when);
             AssertBuffer(buffers.Meta, oracle.Meta, "Meta", when);
             AssertBuffer(buffers.Range, oracle.Range, "Range", when);
+            PoseMirror.Assert(buffers, when);
         }
 
         // Synchronous readback is fine in a test. The simulation never reads back.

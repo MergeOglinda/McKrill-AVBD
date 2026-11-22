@@ -29,6 +29,7 @@ namespace McKrill.Avbd
         static readonly int CommandCountId = Shader.PropertyToID("_CommandCount");
         static readonly int CommandsId = Shader.PropertyToID("_Commands");
         static readonly int BodyStateId = Shader.PropertyToID("_BodyState");
+        static readonly int BodyPoseId = Shader.PropertyToID("_BodyPose");
         static readonly int BodyInertialId = Shader.PropertyToID("_BodyInertial");
         static readonly int BodyMassId = Shader.PropertyToID("_BodyMass");
         static readonly int BodyMotionId = Shader.PropertyToID("_BodyMotion");
@@ -45,6 +46,7 @@ namespace McKrill.Avbd
         readonly HashSet<int> structuralSlots = new HashSet<int>();
 
         GraphicsBuffer state;
+        GraphicsBuffer pose;
         GraphicsBuffer inertial;
         GraphicsBuffer mass;
         GraphicsBuffer motion;
@@ -77,6 +79,7 @@ namespace McKrill.Avbd
             try
             {
                 state = Create(capacity, BodyRecordStrides.State);
+                pose = Create(capacity, BodyRecordStrides.Pose);
                 inertial = Create(capacity, BodyRecordStrides.Inertial);
                 mass = Create(capacity, BodyRecordStrides.Mass);
                 motion = Create(capacity, BodyRecordStrides.Motion);
@@ -138,6 +141,10 @@ namespace McKrill.Avbd
         // Read-only by convention: only stage E writes the fields it owns (design doc, section 1).
 
         public GraphicsBuffer State => state;
+
+        /// <summary>The current pose of every body (position, rotation), 32 B per body: a copy of the pose in <see cref="State"/> that the kernels that write it keep in step.</summary>
+        public GraphicsBuffer Pose => pose;
+
         public GraphicsBuffer Inertial => inertial;
         public GraphicsBuffer Mass => mass;
         public GraphicsBuffer Motion => motion;
@@ -296,12 +303,13 @@ namespace McKrill.Avbd
         void BindBodyBuffers(int kernel) => BindTo(shader, kernel);
 
         /// <summary>
-        /// Binds all seven body arrays to a kernel under the standard names (_BodyState, _BodyInertial, _BodyMass,
+        /// Binds all eight body arrays to a kernel under the standard names (_BodyState, _BodyPose, _BodyInertial, _BodyMass,
         /// _BodyMotion, _BodyShape, _BodyMeta, _BodyRange). A kernel that does not declare one of them ignores it.
         /// </summary>
         internal void BindTo(ComputeShader target, int kernel)
         {
             target.SetBuffer(kernel, BodyStateId, state);
+            target.SetBuffer(kernel, BodyPoseId, pose);
             target.SetBuffer(kernel, BodyInertialId, inertial);
             target.SetBuffer(kernel, BodyMassId, mass);
             target.SetBuffer(kernel, BodyMotionId, motion);
@@ -323,6 +331,7 @@ namespace McKrill.Avbd
             disposed = true;
 
             Release(ref state);
+            Release(ref pose);
             Release(ref inertial);
             Release(ref mass);
             Release(ref motion);

@@ -25,6 +25,16 @@ struct BodyStateRecord
     float4 startRotation;
 };
 
+// 32 B, hot. A copy of the current pose (position and rotation) of BodyStateRecord, for the readers that only need that half of it: the primal and dual
+// stages read the pose of the neighbors of a joint or spring, and a 32 B record puts twice as many bodies in a cache line as the 64 B state record. Every
+// kernel that writes BodyStateRecord.position or .rotation writes this record too (stage E, Predict, the group mover and the primal sweep); nothing
+// else writes it, so the two never differ. Free slots hold the same values as the state record.
+struct BodyPoseRecord
+{
+    float4 position; // xyz = center of mass, w unused
+    float4 rotation; // unit quaternion (x, y, z, w)
+};
+
 // 32 B, hot. Inertial target. Written by stage P only.
 struct BodyInertialRecord
 {

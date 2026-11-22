@@ -61,6 +61,7 @@ namespace McKrill.Avbd
     internal static class BodyRecordStrides
     {
         public const int State = 64;
+        public const int Pose = 32;
         public const int Inertial = 32;
         public const int Mass = 16;
         public const int Motion = 48;
@@ -68,7 +69,7 @@ namespace McKrill.Avbd
         public const int Meta = 32;
         public const int Range = 16;
 
-        public const int Total = State + Inertial + Mass + Motion + Shape + Meta + Range;
+        public const int Total = State + Pose + Inertial + Mass + Motion + Shape + Meta + Range;
         public const int Largest = 64;
     }
 
@@ -89,6 +90,21 @@ namespace McKrill.Avbd
         public float4 startPosition;
 
         public float4 startRotation;
+    }
+
+    /// <summary>
+    /// Hot. A copy of the current pose of <see cref="BodyStateRecord"/> (position and rotation) for the readers that need nothing else of a body: the primal
+    /// and dual stages read the pose of the neighbors of a joint or spring, and 32 B records put twice as many bodies in a cache line as the 64 B state
+    /// records. Every kernel that writes the pose of the state record writes this too, so the two never differ.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BodyPoseRecord
+    {
+        /// <summary>xyz = position of the center of mass, w unused.</summary>
+        public float4 position;
+
+        /// <summary>Unit quaternion (x, y, z, w).</summary>
+        public float4 rotation;
     }
 
     /// <summary>Hot. Inertial target of the step. Written by stage P only; stage E never touches it.</summary>

@@ -314,6 +314,7 @@ namespace McKrill.Avbd.Tests
                 Meta = new BodyMetaRecord[buffers.Capacity],
             };
             buffers.State.GetData(s.State);
+            PoseMirror.Assert(buffers, "after a move");
             buffers.Motion.GetData(s.Motion);
             buffers.Mass.GetData(s.Mass);
             buffers.Shape.GetData(s.Shape);

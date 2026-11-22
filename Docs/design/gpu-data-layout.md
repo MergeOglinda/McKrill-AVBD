@@ -184,11 +184,12 @@ These rules apply to every GPU buffer. No struct is defined until they are writt
 
 ## 3. Body arrays
 
-Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Seven arrays, indexed by body slot, 224 B per body in total. Each record follows the packing rules in section 2 (float4 and uint4 words only, unused lanes zero). The C# mirrors are in `Runtime/Layout/BodyRecords.cs`, the HLSL in `Shaders/Include/AvbdBodyRecords.hlsl`.
+Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Eight arrays, indexed by body slot, 256 B per body in total. Each record follows the packing rules in section 2 (float4 and uint4 words only, unused lanes zero). The C# mirrors are in `Runtime/Layout/BodyRecords.cs`, the HLSL in `Shaders/Include/AvbdBodyRecords.hlsl`.
 
 | Array | Stride | Words | Class | Written by | Read by |
 | --- | --- | --- | --- | --- | --- |
 | State | 64 B | position, rotation, step-start position, step-start rotation | Hot | E (spawn, pose edits), P, V | S, B, N, V, D, U, R |
+| Pose | 32 B | position, rotation (a copy of the first two words of State) | Hot | E, P, the group mover, V (every writer of State's pose) | V, D |
 | Inertial | 32 B | inertial position, inertial rotation | Hot | P | V |
 | Mass | 16 B | principal moments (xyz), mass (w) | Hot | E | V |
 | Motion | 48 B | linear velocity, angular velocity, previous linear velocity | Cold | E, U | B, P, Z |
@@ -198,6 +199,7 @@ Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Seven arr
 
 Decisions made here, where section 1 left them open:
 
+- **Compact pose array.** The primal and dual stages read the pose of the neighbors of a joint or spring by slot, and of the 64 B State record they use only the first 32 B. `Pose` is a 32 B copy of position and rotation (`BodyPoseRecord`, `_BodyPose`), so twice as many bodies fit in a cache line (and in the cache). It is a mirror: State stays the one record with the step-start pose, which a manifold needs (and the narrow phase and the velocity stage read), and every kernel that writes State's pose writes the copy too (`WriteFreeSlot`, spawn and pose edits in `AvbdBodyEdits.compute`, `Predict`, the group mover's `Move` and `HoldApply`, and `Primal`, which writes 32 B more per solved body), so the two never differ (`PoseMirror` in the tests checks it after those stages). Readers of the copy: the joint and spring stamps of `Primal` and `Dual` (current pose). `ConstraintInit` (start pose), the manifold stamps and `DualContact` (start pose of both bodies), the narrow phase, the broad phase, the velocity stage and the ray cast still read State. Cost: 32 B per body of memory, 32 B per solved body per primal sweep of writes; saving: half the bytes and half the cache lines per neighbor pose of a joint or spring. Not measured.
 - **Step-start pose is interleaved with the pose** in the 64 B State record, so the partner gather in V and D is one record, not two arrays. The record is two sectors; V writes only the first two words.
 - **Slot order is spatial when a scene is spawned in one batch.** Finding 8: partner poses are read by slot, so the order of the slots decides how far apart neighbors are in memory. `AvbdBodyBuffers.SpawnBatch(descriptors, handles)` allocates the slots in Z-curve (Morton) order of the body positions (`SpatialOrder`: 21 bits per axis on a cube grid over the bounding box of the batch, ties in input order) and returns the handles in the order of the descriptors, so joints and visuals that hold handles need no change. The order is made once, when the bodies are spawned; nothing is remapped while the simulation runs (a runtime permutation of the iteration order was tried in PR #27 and was slower). It only works on fresh slots: the allocator reuses freed slots first, so a batch spawned into a buffer with holes is placed in Morton order into whatever slots are free. Bodies spawned one by one with `Spawn` keep the order of the calls. Not measured; the performance tests `Scenario5_BrickRing110k` and `Scenario1_Shots2m_PlasticYieldOff` use it, and their `_BuilderOrder` variants are the baseline.
 - **Previous linear velocity is in the Motion record** (finding 9). Motion is 48 B. It is read by P and Z by slot through the active list and is cold (once per step), so rule P3 does not require 32 B alignment for it. P3 names V, D and N as the strict gathers.
@@ -213,7 +215,7 @@ Matrix changes from this step: E also writes the step-start pose (spawn and pose
 
 `BodyBufferCapacity` (`Runtime/Buffers/BodyBufferCapacity.cs`) holds the cost and the limits of the body arrays.
 
-- Cost: 224 B per body, so 1,000,000 bodies take 224 MB for the body arrays alone.
+- Cost: 256 B per body, so 1,000,000 bodies take 256 MB for the body arrays alone.
 - Limit: the largest array is 64 B per body, so the capacity is capped at `int.MaxValue / 64` = 33,554,431 bodies to keep every buffer under 2 GiB. This is far below `0x7FFFFFFF`, so rule P6 holds.
 - Minimum capacity is 1. Capacity is fixed when the buffers are created (section 7).
 - The edit command buffer (128 B per command, 1024 commands by default) is separate and small.
