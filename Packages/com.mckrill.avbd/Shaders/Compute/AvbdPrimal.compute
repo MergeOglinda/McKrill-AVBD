@@ -97,10 +97,16 @@ void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float
     float3 penaltyLin = c.penaltyLin.xyz;
     float3 penaltyAng = c.penaltyAng.xyz;
 
+    // The Jacobians of the joint are written out, not multiplied: the linear one is sgn * I and the angular one is a skew matrix (S = skew(s), with
+    // s = -rWorldA for body A and rWorldB for body B, sgn = +1 for A and -1 for B), and the penalty matrices are diagonal. That makes
+    //   J_lin^T K J_lin = K,   J_ang^T K J_ang = S^T K S (symmetric),   J_ang^T K J_lin = sgn * S^T K,   J_lin^T F = sgn * F,   J_ang^T F = F x s,
+    // and no 3x3 product, transpose or temporary matrix is built. The entries are the ones the generic matrix products give (checked against them on the CPU).
+    float sgn = isA ? 1.0 : -1.0;
+
     // Linear constraint
     if (dot(penaltyLin, penaltyLin) > 0.0)
     {
-        float3x3 K = AvbdDiagonal(penaltyLin);
+        float3 k = penaltyLin;
         float3 C = anchorA - anchorB;
 
         // Stabilization
@@ -109,37 +115,36 @@ void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float
 
         float3 F = penaltyLin * C + c.lambdaLin.xyz;
 
-        // Jacobians for the body being solved.
-        float sgn = isA ? 1.0 : -1.0;
-        float3x3 jLin = sgn * AvbdIdentity3();
-        float3x3 jAng;
-        if (isA)
-            jAng = AvbdSkew(-rWorldA);
-        else
-            jAng = AvbdSkew(rWorldB);
+        float3 sv = isA ? -rWorldA : rWorldB;
+        float3 sq = sv * sv;
+        float xy = -sv.x * sv.y;
+        float xz = -sv.x * sv.z;
+        float yz = -sv.y * sv.z;
 
-        float3x3 jLinT = transpose(jLin);
-        float3x3 jAngT = transpose(jAng);
-        float3x3 jAngTk = mul(jAngT, K);
-
-        sys.lhsLin += mul(mul(jLinT, K), jLin);
-        sys.lhsAng += mul(jAngTk, jAng);
-        sys.lhsCross += mul(jAngTk, jLin);
+        sys.lhsLin += AvbdDiagonal(k);
+        sys.lhsAng += float3x3(k.y * sq.z + k.z * sq.y, k.z * xy, k.y * xz,
+                               k.z * xy, k.x * sq.z + k.z * sq.x, k.x * yz,
+                               k.y * xz, k.x * yz, k.x * sq.y + k.y * sq.x);
+        sys.lhsCross += float3x3(0.0, sgn * sv.z * k.y, -sgn * sv.y * k.z,
+                                 -sgn * sv.z * k.x, 0.0, sgn * sv.x * k.z,
+                                 sgn * sv.y * k.x, -sgn * sv.x * k.y, 0.0);
 
         // Diagonal approximation for higher-order terms: the sum over k of F[k] * G(k, r), with G the geometric stiffness of a
-        // ball-socket joint (diag(-r[k]) plus r added to column k), which is -dot(F, r) I + r F^T.
-        float3 r = isA ? rWorldA : -rWorldB;
-        float3x3 H = -dot(F, r) * AvbdIdentity3() + AvbdOuter(r, F);
-        sys.lhsAng += AvbdDiagonalize(H);
+        // ball-socket joint (diag(-r[k]) plus r added to column k), which is -dot(F, r) I + r F^T. Only the lengths of its columns are used.
+        float3 r = -sv;
+        float d = dot(F, r);
+        float3 col0 = float3(r.x * F.x - d, r.y * F.x, r.z * F.x);
+        float3 col1 = float3(r.x * F.y, r.y * F.y - d, r.z * F.y);
+        float3 col2 = float3(r.x * F.z, r.y * F.z, r.z * F.z - d);
+        sys.lhsAng += AvbdDiagonal(float3(length(col0), length(col1), length(col2)));
 
-        sys.rhsLin += mul(jLinT, F);
-        sys.rhsAng += mul(jAngT, F);
+        sys.rhsLin += sgn * F;
+        sys.rhsAng += cross(F, sv);
     }
 
     // Angular constraint
     if (dot(penaltyAng, penaltyAng) > 0.0)
     {
-        float3x3 K = AvbdDiagonal(penaltyAng);
         float4 rest = float4(0.0, 0.0, 0.0, 1.0);
 #if defined(AVBD_PLASTIC_JOINTS)
         if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC)
@@ -153,12 +158,9 @@ void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float
 
         float3 F = penaltyAng * C + c.lambdaAng.xyz;
 
-        float sgn = isA ? 1.0 : -1.0;
-        float3x3 jAng = (sgn * torqueArm) * AvbdIdentity3();
-        float3x3 jAngT = transpose(jAng);
-
-        sys.lhsAng += mul(mul(jAngT, K), jAng);
-        sys.rhsAng += mul(jAngT, F);
+        // J_ang = sgn * torqueArm * I
+        sys.lhsAng += AvbdDiagonal(penaltyAng * (torqueArm * torqueArm));
+        sys.rhsAng += (sgn * torqueArm) * F;
     }
 }
 
