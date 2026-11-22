@@ -207,12 +207,34 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint tid, uint
 
     float4 rest = float4(0.0, 0.0, 0.0, 1.0); // rest rotation of the angular row: loaded below, or returned by the dual update that has just made it
     bool haveRest = false;
+
+    // The plastic data this stamp needs is requested here, right after the poses and before anything uses them: a use of a pose waits for it, and a read
+    // issued after that use would be one more round trip to memory. The dual update needs the limits and the rest rotation of the plastic record, the
+    // stamp alone only the rest rotation of a joint with an angular row.
+#if defined(AVBD_FUSED_DUAL)
+    bool dualNow = _DualSweep != 0u && !(flags & AVBD_CONSTRAINT_FLAG_BROKEN) && asuint(c.reserved.w) != _DualSweep;
+    JointPlasticRead plasticRead;
+    plasticRead.limits = float4(0.0, 0.0, 0.0, 0.0);
+    plasticRead.rest = rest;
+    if (dualNow)
+        plasticRead = AvbdJointPlasticRead(c, flags);
+#endif
+#if defined(AVBD_PLASTIC_JOINTS)
+    float4 restLoaded = rest;
+    bool needRest = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) && dot(c.penaltyAng.xyz, c.penaltyAng.xyz) > 0.0;
+#if defined(AVBD_FUSED_DUAL)
+    needRest = needRest && !dualNow;
+#endif
+    if (needRest)
+        restLoaded = _Plastic[c.ident.w].rest;
+#endif
+
 #if defined(AVBD_FUSED_DUAL)
     // The dual update of the sweep before, with the poses read above: neither body of the joint has moved in this sweep (see the keyword above). A joint
     // that is broken has none. The record is stored with the mark in the word that no other stage uses; the stamp below reads the updated joint.
-    if (_DualSweep != 0u && !(flags & AVBD_CONSTRAINT_FLAG_BROKEN) && asuint(c.reserved.w) != _DualSweep)
+    if (dualNow)
     {
-        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, rest);
+        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, plasticRead, rest);
         AvbdJointDualStore(entry, c, result, rest);
         c.reserved.w = asfloat(_DualSweep);
         _Constraints[entry].reserved.w = c.reserved.w;
@@ -283,7 +305,7 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint tid, uint
     {
 #if defined(AVBD_PLASTIC_JOINTS)
         if (!haveRest && (flags & AVBD_CONSTRAINT_FLAG_PLASTIC))
-            rest = _Plastic[c.ident.w].rest;
+            rest = restLoaded;
 #endif
         float3 C = AvbdJointAngularError(rotA, rotB, rest) * torqueArm; // rotA is the identity for a world joint
 

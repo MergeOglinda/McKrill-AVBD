@@ -11,6 +11,15 @@
 //   RWStructuredBuffer<PlasticRecord>    _Plastic;     (only with AVBD_PLASTIC_JOINTS)
 // and includes AvbdConstraintRecords.hlsl, AvbdPlasticRecords.hlsl, AvbdSolverParams.hlsl and AvbdMath.hlsl.
 
+// What the dual update reads of the plastic record: the limits (every plastic joint) and the rest rotation (an angular one). The caller requests them with
+// AvbdJointPlasticRead as soon as it has the record, together with the poses of the two bodies, and hands them to AvbdJointDual: read inside the update, after
+// the poses have been used, they cost one more round trip to memory, because a use of the poses has to wait for them before the next read can be issued.
+struct JointPlasticRead
+{
+    float4 limits; // x = angular yield, y = bend limit, z = linear yield, w = stretch limit
+    float4 rest;   // rest rotation of the angular row (the identity unless the joint is plastic)
+};
+
 // What a dual update did to the record, for AvbdJointDualStore.
 struct JointDualResult
 {
@@ -19,9 +28,25 @@ struct JointDualResult
     bool yieldedLin;   // the linear row yielded: the anchor on A and C0 of the linear row changed
 };
 
+JointPlasticRead AvbdJointPlasticRead(ConstraintRecord c, uint flags)
+{
+    JointPlasticRead r;
+    r.limits = float4(0.0, 0.0, 0.0, 0.0);
+    r.rest = float4(0.0, 0.0, 0.0, 1.0);
+#if defined(AVBD_PLASTIC_JOINTS)
+    if (flags & (AVBD_CONSTRAINT_FLAG_PLASTIC | AVBD_CONSTRAINT_FLAG_PLASTIC_LIN))
+    {
+        r.limits = _Plastic[c.ident.w].limits;
+        if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC)
+            r.rest = _Plastic[c.ident.w].rest;
+    }
+#endif
+    return r;
+}
+
 // Updates `c`, a joint that is not broken, for the poses of its two bodies (a world body A is the origin with the identity rotation). `rest` returns the
 // rest rotation of the angular row (the identity unless the joint is plastic): what the primal stage needs next. Writes nothing.
-JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA, float4 rotA, float3 posB, float4 rotB, out float4 rest)
+JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA, float4 rotA, float3 posB, float4 rotB, JointPlasticRead plasticRead, out float4 rest)
 {
     float alpha = AVBD_ALPHA;
     bool hasA = c.ident.x != AVBD_INVALID;
@@ -36,16 +61,13 @@ JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA,
 
     rest = float4(0.0, 0.0, 0.0, 1.0);
 #if defined(AVBD_PLASTIC_JOINTS)
-    // Of the 64 B plastic record only the limits (every plastic joint) and the rest rotation (an angular one) are read here: restStart and the anchor origin
-    // (reserved) are read in the branches that need them, which a joint takes only in the step it breaks or yields, so most calls read half the record.
-    float4 limits = float4(0.0, 0.0, 0.0, 0.0); // x = angular yield, y = bend limit, z = linear yield, w = stretch limit
+    // Of the 64 B plastic record only the limits (every plastic joint) and the rest rotation (an angular one) are read, by the caller (JointPlasticRead):
+    // restStart and the anchor origin (reserved) are read in the branches that need them, which a joint takes only in the step it breaks or yields, so
+    // most calls read half the record.
+    float4 limits = plasticRead.limits; // x = angular yield, y = bend limit, z = linear yield, w = stretch limit
     bool isPlastic = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) != 0u;
-    if (flags & (AVBD_CONSTRAINT_FLAG_PLASTIC | AVBD_CONSTRAINT_FLAG_PLASTIC_LIN))
-    {
-        limits = _Plastic[c.ident.w].limits;
-        if (isPlastic)
-            rest = _Plastic[c.ident.w].rest;
-    }
+    if (isPlastic)
+        rest = plasticRead.rest;
     bool yielded = false;
     bool yieldedLin = false;
 #endif
