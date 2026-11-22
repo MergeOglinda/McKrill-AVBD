@@ -1571,9 +1571,6 @@ namespace McKrill.Avbd.Samples
             GUILayout.Space(4f);
             GUILayout.Label("bodies " + (staticCount + chunkBlockCount + shots.Count) + "   shots " + shots.Count + "/" + maxShots);
             GUILayout.Label("joints broken " + (constraints != null ? constraints.BrokenCount : 0) + " / " + jointCount);
-            GUILayout.Label("step " + stepMs.ToString("0.00") + " ms (CPU side)   frame " + frameMs.ToString("0.0") + " ms");
-            if (behindRealTime)
-                GUILayout.Label("running slower than real time");
 
             GUILayout.Space(4f);
             GUILayout.Label("Left click: shoot, explode, click to select and click again to throw, or hold to grab (the mode buttons)\nSpace: pause   R: reset\nRight drag: look   W A S D Q E: move (Shift: faster)\nMouse wheel: move forward and back");
@@ -1600,6 +1597,9 @@ namespace McKrill.Avbd.Samples
 
             GUILayout.BeginArea(new Rect(Screen.width / scale - width - margin, margin, width, Screen.height / scale - 2f * margin));
             GUILayout.BeginVertical(GUI.skin.box);
+            GUILayout.Label("step " + stepMs.ToString("0.00") + " ms (CPU side)   frame " + frameMs.ToString("0.0") + " ms");
+            if (behindRealTime)
+                GUILayout.Label("running slower than real time");
             GUILayout.Label("Objects (Reset reads the files again)", boldLabel);
             foreach (string line in objectLines)
                 GUILayout.Label(line);
