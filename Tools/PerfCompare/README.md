@@ -34,3 +34,18 @@ The same comparison, but each side is a **folder** with the result files (`*.xml
 - It imports `compare_perf.py` from the same folder, so keep the two together.
 
 Tests of both: `python3 -I Tools/PerfCompare/test_multi_compare_perf.py` (synthetic result files).
+
+## Automated A/B runs: `run_perf_ab.ps1`
+
+```
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline origin/main -Candidate origin/my-branch [-Runs 8] [-Warmup] [-TestFilter "Scenario5_BrickRing110k"]
+```
+
+Windows PowerShell 5.1 or PowerShell 7, with git, Python 3 and the Unity editor version of the project installed (Unity Hub folder, or `-UnityPath`). The script:
+
+1. resolves both refs and checks each out in its own git worktree under `-WorkRoot` (default: `mckrill-avbd-perf` next to the repository), so each side is a separate Unity project with its own `Library`; keep the folder, because the second invocation then skips the long first import. The worktrees are scratch folders: local changes in them are discarded;
+2. imports each project once in batch mode (no tests), which stops the script early when a side does not compile;
+3. runs the suite `-Runs` times per side (default 8), one Unity process per run, alternating who goes first (A B, B A, ...). `-Warmup` adds a discarded run per side first;
+4. runs `multi_compare_perf.py` on the two result folders.
+
+The output goes to `<OutRoot>\<timestamp>\`: `baseline\runNN.xml` and `.log`, `candidate\...`, `meta.json` (refs, commits, GPU, editor) and `comparison.csv`. A run without a result file, a result with a failed test or with another number of test cases than `-ExpectedTests` (default 5) is listed at the end and makes the exit code 1. The tests need a GPU: the script never passes `-nographics`, and the machine should be idle while it runs. Use `origin/<branch>` to take the remote state of a branch (the script fetches first unless `-NoFetch`); a plain name is the local branch.
