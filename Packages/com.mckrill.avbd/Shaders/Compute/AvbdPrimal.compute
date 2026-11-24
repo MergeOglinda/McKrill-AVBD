@@ -76,7 +76,7 @@ struct PrimalSystem
 
 // Pose of body slot `id`. The body being solved is passed in, the others are read from the compact pose array (a joint or spring needs nothing else of
 // the neighbor, and 32 B records put twice as many bodies in a cache line as the 64 B state records). A manifold also needs the start-of-step pose
-// of both bodies, which only the state record has, so it reads the state record (LoadPoseFromState) and one line serves both.
+// of both bodies, which only the state record has, so StampManifold reads the state record of both bodies once, and one line serves both.
 // A body A of AVBD_INVALID is the world: origin and identity rotation.
 void LoadPose(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos, out float4 rot)
 {
@@ -95,27 +95,6 @@ void LoadPose(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos
         BodyPoseRecord p = _BodyPose[id];
         pos = p.position.xyz;
         rot = p.rotation;
-    }
-}
-
-// The same from the state record, for the manifolds.
-void LoadPoseFromState(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos, out float4 rot)
-{
-    if (id == self)
-    {
-        pos = selfPos;
-        rot = selfRot;
-    }
-    else if (id == AVBD_INVALID)
-    {
-        pos = float3(0.0, 0.0, 0.0);
-        rot = float4(0.0, 0.0, 0.0, 1.0);
-    }
-    else
-    {
-        BodyStateRecord s = _BodyState[id];
-        pos = s.position.xyz;
-        rot = s.rotation;
     }
 }
 
@@ -306,13 +285,24 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
 
     bool isA = pair.ident.x == slot;
 
-    float3 posA, posB;
-    float4 rotA, rotB;
-    LoadPoseFromState(pair.ident.x, slot, selfPos, selfRot, posA, rotA);
-    LoadPoseFromState(pair.ident.y, slot, selfPos, selfRot, posB, rotB);
-
+    // The state record of each body is read once: the pose and the start-of-step pose come from the same line. The body being solved has its own
+    // pose in registers, which is what the record holds as well (the sweep writes it back at the end), so that one is not taken from the record.
     BodyStateRecord stateA = _BodyState[pair.ident.x];
     BodyStateRecord stateB = _BodyState[pair.ident.y];
+    float3 posA = stateA.position.xyz;
+    float4 rotA = stateA.rotation;
+    float3 posB = stateB.position.xyz;
+    float4 rotB = stateB.rotation;
+    if (pair.ident.x == slot)
+    {
+        posA = selfPos;
+        rotA = selfRot;
+    }
+    if (pair.ident.y == slot)
+    {
+        posB = selfPos;
+        rotB = selfRot;
+    }
     float3 dqALin = posA - stateA.startPosition.xyz;
     float3 dqBLin = posB - stateB.startPosition.xyz;
     float3 dqAAng = AvbdQuatDifference(rotA, stateA.startRotation);
