@@ -16,7 +16,7 @@
 
 // Compiled in when the solver fuses the dual update of the joints into the sweeps (AvbdSolver.FuseDualUpdate): the dual update of a joint after sweep k
 // then runs at the start of sweep k + 1, in the thread of the first body of the joint that is solved in that sweep, which writes the joint and marks it
-// with the id of the sweep (reserved.w), and the other body finds the mark and only stamps. The first body is the one with the lower color, and when it
+// with the id of the sweep (c0Ang.w), and the other body finds the mark and only stamps. The first body is the one with the lower color, and when it
 // runs, neither body of the joint has moved in sweep k + 1, so the joint sees the poses of the end of sweep k, as it does in the separate dual dispatch.
 // A dispatch (_DualSweep) of 0 does no dual update: the first sweep of a step, and the sweeps a test dispatches alone. The Dual kernel runs once after
 // the last sweep (AvbdDual.compute), for the sweep that has no sweep after it, and clears the marks.
@@ -40,6 +40,7 @@ StructuredBuffer<BodyMetaRecord>       _BodyMeta;
 StructuredBuffer<BodyRangeRecord>      _BodyRange;
 #if defined(AVBD_FUSED_DUAL)
 RWStructuredBuffer<ConstraintRecord>   _Constraints;    // joints and springs (written by the dual update of the first body of a joint in a sweep)
+StructuredBuffer<FractureRecord>       _Fracture;       // fracture thresholds, four joints per record (read by the dual update, for a joint with a FRACTURABLE flag)
 #if defined(AVBD_PLASTIC_JOINTS)
 RWStructuredBuffer<PlasticRecord>      _Plastic;        // rest rotation of the joints with the PLASTIC flag, by ident.w
 #endif
@@ -137,16 +138,20 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
     // issued after that use would be one more round trip to memory. The dual update needs the limits and the rest rotation of the plastic record, the
     // stamp alone only the rest rotation of a joint with an angular row.
 #if defined(AVBD_FUSED_DUAL)
-    bool dualNow = _DualSweep != 0u && !(flags & AVBD_CONSTRAINT_FLAG_BROKEN) && asuint(c.reserved.w) != _DualSweep;
+    bool dualNow = _DualSweep != 0u && !(flags & AVBD_CONSTRAINT_FLAG_BROKEN) && asuint(c.c0Ang.w) != _DualSweep;
     JointPlasticRead plasticRead;
     plasticRead.limits = float4(0.0, 0.0, 0.0, 0.0);
     plasticRead.rest = rest;
+    float2 fracture = float2(0.0, 0.0);
     if (dualNow)
+    {
         plasticRead = AvbdJointPlasticRead(c, flags);
+        fracture = AvbdJointFractureRead(entry, flags);
+    }
 #endif
 #if defined(AVBD_PLASTIC_JOINTS)
     float4 restLoaded = rest;
-    bool needRest = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) && dot(c.penaltyAng.xyz, c.penaltyAng.xyz) > 0.0;
+    bool needRest = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) && dot(AvbdPenaltyAng(c), AvbdPenaltyAng(c)) > 0.0;
 #if defined(AVBD_FUSED_DUAL)
     needRest = needRest && !dualNow;
 #endif
@@ -159,10 +164,10 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
     // that is broken has none. The record is stored with the mark in the word that no other stage uses; the stamp below reads the updated joint.
     if (dualNow)
     {
-        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, plasticRead, rest);
-        AvbdJointDualStore(entry, c, result, rest);
-        c.reserved.w = asfloat(_DualSweep);
-        _Constraints[entry].reserved.w = c.reserved.w;
+        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, plasticRead, fracture, rest);
+        AvbdJointDualStore(entry, c, result, rest); // may store c0Ang (a yield in the angle), whose w is the old mark: the mark is set after it
+        c.c0Ang.w = asfloat(_DualSweep);
+        _Constraints[entry].c0Ang.w = c.c0Ang.w;
         flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
         haveRest = true;
     }
@@ -177,8 +182,8 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
     float3 anchorA = hasA ? rWorldA + posA : rA; // world joint: rA is the fixed world point
     float3 anchorB = rWorldB + posB;
 
-    float3 penaltyLin = c.penaltyLin.xyz;
-    float3 penaltyAng = c.penaltyAng.xyz;
+    float3 penaltyLin = AvbdPenaltyLin(c);
+    float3 penaltyAng = AvbdPenaltyAng(c);
 
     // The Jacobians of the joint are written out, not multiplied: the linear one is sgn * I and the angular one is a skew matrix (S = skew(s), with
     // s = -rWorldA for body A and rWorldB for body B, sgn = +1 for A and -1 for B), and the penalty matrices are diagonal. That makes
@@ -196,7 +201,7 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
         if (flags & AVBD_CONSTRAINT_FLAG_HARD_LIN)
             C -= c.c0Lin.xyz * alpha;
 
-        float3 F = penaltyLin * C + c.lambdaLin.xyz;
+        float3 F = penaltyLin * C + AvbdLambdaLin(c);
 
         float3 sv = isA ? -rWorldA : rWorldB;
         float3 sq = sv * sv;
@@ -238,7 +243,7 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
         if (flags & AVBD_CONSTRAINT_FLAG_HARD_ANG)
             C -= c.c0Ang.xyz * alpha;
 
-        float3 F = penaltyAng * C + c.lambdaAng.xyz;
+        float3 F = penaltyAng * C + AvbdLambdaAng(c);
 
         // J_ang = sgn * torqueArm * I
         sys.lhsAng += AvbdDiagonal(penaltyAng * (torqueArm * torqueArm));
@@ -494,7 +499,7 @@ bool SolveLdlt6(uint body)
 
 // Entries of the body's list that a lane reads before it stamps any of them: the entries and the joint or spring records of the whole batch are requested
 // together, so their latencies overlap instead of following one another (list entry, then record, then the neighbor's pose, per stamp). Each record in
-// flight is 160 B of registers: 1 gives the plain one-at-a-time loop, and a larger batch buys more loads in flight with more registers.
+// flight is 128 B of registers: 1 gives the plain one-at-a-time loop, and a larger batch buys more loads in flight with more registers.
 #define AVBD_PRIMAL_BATCH 1u
 
 // AVBD_PRIMAL_LANES threads solve one body. Lane l stamps the entries l, l + AVBD_PRIMAL_LANES, ... of the body's list into its own partial system;

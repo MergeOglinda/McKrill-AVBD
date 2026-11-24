@@ -15,7 +15,7 @@ namespace McKrill.Avbd
 
     /// <summary>
     /// The extra state of a plastic joint, in a buffer of its own that only joints with <see cref="ConstraintFlags.Plastic"/> or <see cref="ConstraintFlags.PlasticLinear"/> read: a joint without
-    /// it keeps the 160 B <see cref="ConstraintRecord"/> and its memory traffic. The joint finds its record at <c>ident.w</c>. The buffer exists only if
+    /// it keeps the 128 B <see cref="GpuConstraintRecord"/> and its memory traffic. The joint finds its record at <c>ident.w</c>. The buffer exists only if
     /// the constraint buffers were made with a plastic capacity (see <see cref="AvbdConstraintBuffers"/>), and the kernels that read it are
     /// separate compiled variants (AVBD_PLASTIC_JOINTS in AvbdDual.compute and AvbdPrimal.compute). Field-by-field mirror of PlasticRecord in
     /// AvbdPlasticRecords.hlsl.

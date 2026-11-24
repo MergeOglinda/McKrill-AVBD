@@ -55,6 +55,7 @@ namespace McKrill.Avbd
         const string FusedDualKeyword = "AVBD_FUSED_DUAL";
         static readonly int PlasticId = Shader.PropertyToID("_Plastic");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
+        static readonly int FractureId = Shader.PropertyToID("_Fracture");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
         static readonly int ColorBodiesId = Shader.PropertyToID("_ColorBodies");
         static readonly int ColorWorkId = Shader.PropertyToID("_ColorWork");
@@ -471,6 +472,8 @@ namespace McKrill.Avbd
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, primalKernel);
             shader.SetBuffer(primalKernel, RecordsId, constraints.Records);
+            if (fusedDual)
+                shader.SetBuffer(primalKernel, FractureId, constraints.Fractures); // only the variant that runs the dual update reads it
             BindPlastic(shader, primalKernel);
             shader.SetBuffer(primalKernel, ContactPairsId, constraints.ContactPairsBuffer);
             shader.SetBuffer(primalKernel, ContactPointsId, constraints.ContactPointsBuffer);
@@ -595,6 +598,8 @@ namespace McKrill.Avbd
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, kernel);
             shader.SetBuffer(kernel, RecordsId, constraints.Records);
+            if (kernel == dualKernel)
+                shader.SetBuffer(kernel, FractureId, constraints.Fractures); // the fracture thresholds: only the dual update reads them
             BindPlastic(shader, kernel);
             AvbdDispatch.Linear(shader, kernel, constraints.RecordCount);
         }

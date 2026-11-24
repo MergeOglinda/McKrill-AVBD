@@ -59,7 +59,9 @@ namespace McKrill.Avbd
         }
 
         readonly AvbdBodyBuffers bodies;
-        readonly ConstraintRecord[] records;
+        readonly ConstraintRecord[] records;     // the CPU form of every record (the master of everything but the solver state, which the GPU owns)
+        readonly FractureRecord[] fractureRecords; // the fracture thresholds of the records, in the form of the GPU array
+        GpuConstraintRecord[] packStaging;         // packs a chunk of records for an upload, and unpacks one on a read-back
         readonly List<Spec> pending = new List<Spec>();
         readonly AvbdGraphColoring coloring;
         readonly AvbdConstraintLists lists;
@@ -69,6 +71,7 @@ namespace McKrill.Avbd
         GraphColoringOrder coloringOrder = GraphColoringOrder.Hashed;
 
         GraphicsBuffer recordBuffer;
+        GraphicsBuffer fractureBuffer;     // fracture thresholds, four joints per 32 B record (read only by the dual update, for a joint with a fracture flag)
         GraphicsBuffer listBuffer;
         GraphicsBuffer colorBuffer;
         GraphicsBuffer statusBuffer;
@@ -135,6 +138,7 @@ namespace McKrill.Avbd
                 freePairs[s].ident = new uint4(AvbdConst.Invalid, AvbdConst.Invalid, 0u, 0u);
             dirtyBits = new uint[Math.Max(1, (bodies.Capacity + 31) / 32)];
             records = new ConstraintRecord[capacity];
+            fractureRecords = new FractureRecord[ConstraintRecordCodec.FractureRecordCount(capacity)];
 
             AvbdShaderSet shaders = shaderSet != null ? shaderSet : AvbdShaderSet.Load();
             if (shaders == null)
@@ -145,6 +149,7 @@ namespace McKrill.Avbd
             try
             {
                 recordBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity, ConstraintRecordStrides.Constraint);
+                fractureBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, fractureRecords.Length, ConstraintRecordStrides.Fracture);
                 listBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (capacity + contactSlots) * 2, sizeof(uint));
                 contactPairBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slotCount, ContactRecordStrides.Pair);
                 contactPointBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, slotCount * ContactLayout.MaxContactsPerPair, ContactRecordStrides.Point);
@@ -168,7 +173,7 @@ namespace McKrill.Avbd
 
             // Rule P9: nothing is assumed to be zeroed. The contact points are the exception: a point is read only if its pair's count says it
             // exists, and the pair records (all free) are initialized here.
-            recordBuffer.SetData(records, 0, 0, capacity);
+            UploadRecords(0, capacity);
             if (plasticBuffer != null)
             {
                 for (int i = 0; i < plasticRecords.Length; i++)
@@ -283,11 +288,11 @@ namespace McKrill.Avbd
             if (uploadedCount == 0)
                 return 0;
 
-            var all = new ConstraintRecord[uploadedCount];
+            var all = new GpuConstraintRecord[uploadedCount]; // only the ident is needed, so there is nothing to unpack
             recordBuffer.GetData(all, 0, 0, uploadedCount);
             for (int i = 0; i < all.Length; i++)
             {
-                ConstraintRecord r = all[i];
+                GpuConstraintRecord r = all[i];
                 if (ConstraintFlagLayout.KindOf(r.ident.z) != ConstraintKind.Joint || (ConstraintFlagLayout.FlagsOf(r.ident.z) & ConstraintFlags.Broken) != 0)
                     continue;
                 if (r.ident.x == AvbdConst.Invalid || r.ident.y == AvbdConst.Invalid)
@@ -367,7 +372,82 @@ namespace McKrill.Avbd
         internal int RecordCount => uploadedCount;
 
         /// <summary>The joints and springs (the contacts are in <see cref="ContactPairsBuffer"/> and <see cref="ContactPointsBuffer"/>).</summary>
+        /// <remarks>
+        /// The records are in the 128 B GPU form, <see cref="GpuConstraintRecord"/>, not <see cref="ConstraintRecord"/>: read them back with <see cref="ReadRecords(ConstraintRecord[], int, int)"/>
+        /// and write them with <see cref="WriteRecords(ConstraintRecord[], int, int)"/>, which convert.
+        /// </remarks>
         internal GraphicsBuffer Records => recordBuffer;
+
+        /// <summary>The fracture thresholds of the joints, four per record (<see cref="FractureRecord"/>), bound by the passes that run the dual update.</summary>
+        internal GraphicsBuffer Fractures => fractureBuffer;
+
+        /// <summary>
+        /// Reads records [first, first + count) back from the GPU in the CPU form, into the same places of <paramref name="destination"/>. Waits for the GPU.
+        /// The fracture thresholds come from the CPU copy (they never change on the GPU).
+        /// </summary>
+        internal void ReadRecords(ConstraintRecord[] destination, int first, int count)
+        {
+            ThrowIfDisposed();
+            const int Chunk = 1 << 16;
+            for (int done = 0; done < count; done += Chunk)
+            {
+                int n = Math.Min(Chunk, count - done);
+                EnsureStaging(n);
+                recordBuffer.GetData(packStaging, 0, first + done, n);
+                for (int i = 0; i < n; i++)
+                {
+                    ConstraintRecordCodec.GetFracture(fractureRecords, first + done + i, out float linear, out float angular);
+                    destination[first + done + i] = ConstraintRecordCodec.Unpack(packStaging[i], linear, angular);
+                }
+            }
+        }
+
+        /// <summary>Reads the first <paramref name="destination"/>.Length records back in the CPU form (<see cref="ReadRecords(ConstraintRecord[], int, int)"/>).</summary>
+        internal void ReadRecords(ConstraintRecord[] destination) => ReadRecords(destination, 0, destination.Length);
+
+        /// <summary>
+        /// Writes records [first, first + count) of <paramref name="source"/> to the GPU (and the CPU copy), packed. For tests that change records the GPU holds.
+        /// Nothing is rebuilt: the lists and the coloring stay as they are.
+        /// </summary>
+        internal void WriteRecords(ConstraintRecord[] source, int first, int count)
+        {
+            ThrowIfDisposed();
+            Array.Copy(source, first, records, first, count);
+            UploadRecords(first, count);
+        }
+
+        /// <summary>Writes the first <paramref name="source"/>.Length records (<see cref="WriteRecords(ConstraintRecord[], int, int)"/>).</summary>
+        internal void WriteRecords(ConstraintRecord[] source) => WriteRecords(source, 0, source.Length);
+
+        void EnsureStaging(int count)
+        {
+            if (packStaging == null || packStaging.Length < count)
+                packStaging = new GpuConstraintRecord[count];
+        }
+
+        // Packs records [first, first + count) of the CPU array into the GPU form and uploads them, in chunks (the staging array stays small), with the
+        // fracture records that hold their thresholds (a record also holds the thresholds of its neighbors, which are already in the CPU copy).
+        void UploadRecords(int first, int count)
+        {
+            if (count <= 0)
+                return;
+            const int Chunk = 1 << 16;
+            for (int done = 0; done < count; done += Chunk)
+            {
+                int n = Math.Min(Chunk, count - done);
+                EnsureStaging(n);
+                for (int i = 0; i < n; i++)
+                {
+                    int index = first + done + i;
+                    packStaging[i] = ConstraintRecordCodec.Pack(records[index]);
+                    ConstraintRecordCodec.SetFracture(fractureRecords, index, records[index].reserved.x, records[index].c0Ang.w);
+                }
+                recordBuffer.SetData(packStaging, 0, first + done, n);
+            }
+            int firstFracture = first >> 2;
+            int lastFracture = (first + count - 1) >> 2;
+            fractureBuffer.SetData(fractureRecords, firstFracture, firstFracture, lastFracture - firstFracture + 1);
+        }
         internal GraphicsBuffer List => listBuffer;
         internal GraphicsBuffer ColorBodies => colorBuffer;
 
@@ -653,7 +733,7 @@ namespace McKrill.Avbd
 
             if (recordCount > uploadedCount)
             {
-                recordBuffer.SetData(records, uploadedCount, uploadedCount, recordCount - uploadedCount);
+                UploadRecords(uploadedCount, recordCount - uploadedCount);
                 uploadedCount = recordCount;
             }
             if (plasticBuffer != null && plasticCount > plasticUploaded)
@@ -890,6 +970,7 @@ namespace McKrill.Avbd
             disposed = true;
 
             Release(ref recordBuffer);
+            Release(ref fractureBuffer);
             Release(ref listBuffer);
             Release(ref colorBuffer);
             Release(ref statusBuffer);

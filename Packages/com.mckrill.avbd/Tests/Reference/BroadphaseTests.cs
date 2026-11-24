@@ -450,9 +450,9 @@ namespace McKrill.Avbd.Tests
                 // lists. With contacts the step does that (AvbdConstraintBuffers reads the broken flags back and RefreshContactTopology
                 // drops the joint), which is the reference solver's timing (it removes a broken joint one step after it broke).
                 var records = new ConstraintRecord[constraints.Records.count];
-                constraints.Records.GetData(records);
+                constraints.ReadRecords(records);
                 records[0].ident.z |= (uint)ConstraintFlags.Broken;
-                constraints.Records.SetData(records);
+                constraints.WriteRecords(records);
                 broadphase.Run(buffers, constraints);
                 AssertSameSets(expected, ToSet(broadphase.ReadPairs()), "after the joint broke");
 

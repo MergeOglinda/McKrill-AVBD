@@ -183,7 +183,7 @@ namespace McKrill.Avbd.Tests
 
             var records = new ConstraintRecord[constraints.Capacity];
             if (constraints.RecordCount > 0)
-                constraints.Records.GetData(records, 0, 0, constraints.RecordCount);
+                constraints.ReadRecords(records, 0, constraints.RecordCount);
 
             var oracle = new ConstraintTopology();
             if (constraints.HasContacts)

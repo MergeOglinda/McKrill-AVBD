@@ -40,6 +40,7 @@
 StructuredBuffer<BodyStateRecord>      _BodyState;
 StructuredBuffer<BodyPoseRecord>       _BodyPose;      // the current pose of every body, 32 B per body (a copy of the pose in _BodyState)
 RWStructuredBuffer<ConstraintRecord>   _Constraints;
+StructuredBuffer<FractureRecord>       _Fracture;      // fracture thresholds, four joints per record (read by the Dual kernel, only for a joint with a FRACTURABLE flag)
 #if defined(AVBD_PLASTIC_JOINTS)
 RWStructuredBuffer<PlasticRecord>      _Plastic;       // rest rotation and limits of the joints with the PLASTIC flag, by ident.w
 #endif
@@ -55,7 +56,7 @@ uint _ClearMarks;  // Dual: nonzero after a step whose sweeps ran the dual updat
 uint _LastSweep;   // Dual, with _ClearMarks: the id of the last sweep that ran a dual update (0 if none did)
 uint _FinalUpdates; // Dual, with _ClearMarks: the number of iterations of the step: the updates that a joint no sweep touched has missed
 
-// The dual update of one joint, shared with the primal kernel. Needs _Constraints and _Plastic, declared above.
+// The dual update of one joint, shared with the primal kernel. Needs _Constraints, _Fracture and _Plastic, declared above.
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdJointDual.hlsl"
 
 // Pose of body slot `id`: the start-of-step pose or the current pose. A body of AVBD_INVALID is the world. The current pose comes from the compact pose array
@@ -107,7 +108,7 @@ void ConstraintInit(uint3 id : SV_DispatchThreadID)
     float3 anchorA = hasA ? AvbdQuatRotate(rotA, c.anchorA.xyz) + posA : c.anchorA.xyz; // world joint: a fixed world point
     float3 anchorB = AvbdQuatRotate(rotB, c.anchorB.xyz) + posB;
 
-    // Constraint function at the start of the step, C(x-). The w lanes (torque arm, fracture threshold) stay.
+    // Constraint function at the start of the step, C(x-). The w lanes (torque arm, mark of the fused dual update) stay.
     float4 rest = float4(0.0, 0.0, 0.0, 1.0);
 #if defined(AVBD_PLASTIC_JOINTS)
     if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC)
@@ -118,10 +119,10 @@ void ConstraintInit(uint3 id : SV_DispatchThreadID)
     c.c0Ang.xyz = AvbdJointAngularError(rotA, rotB, rest) * torqueArm;
 
     // Warm start the multipliers and penalties (Eq. 19); penalties are clamped to a safe range.
-    float3 lambdaLin = c.lambdaLin.xyz * AVBD_ALPHA * AVBD_GAMMA;
-    float3 lambdaAng = c.lambdaAng.xyz * AVBD_ALPHA * AVBD_GAMMA;
-    float3 penaltyLin = clamp(c.penaltyLin.xyz * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
-    float3 penaltyAng = clamp(c.penaltyAng.xyz * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+    float3 lambdaLin = AvbdLambdaLin(c) * AVBD_ALPHA * AVBD_GAMMA;
+    float3 lambdaAng = AvbdLambdaAng(c) * AVBD_ALPHA * AVBD_GAMMA;
+    float3 penaltyLin = clamp(AvbdPenaltyLin(c) * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+    float3 penaltyAng = clamp(AvbdPenaltyAng(c) * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
 
     // Clamp to the material stiffness. A hard constraint has no cap here: its penalty is already limited by the maximum.
     if (!(flags & AVBD_CONSTRAINT_FLAG_HARD_LIN))
@@ -129,10 +130,7 @@ void ConstraintInit(uint3 id : SV_DispatchThreadID)
     if (!(flags & AVBD_CONSTRAINT_FLAG_HARD_ANG))
         penaltyAng = min(penaltyAng, c.anchorB.www);
 
-    c.lambdaLin.xyz = lambdaLin;
-    c.lambdaAng.xyz = lambdaAng;
-    c.penaltyLin.xyz = penaltyLin;
-    c.penaltyAng.xyz = penaltyAng;
+    AvbdSetConstraintState(c, penaltyLin, penaltyAng, lambdaLin, lambdaAng);
     _Constraints[index] = c;
 }
 
@@ -146,15 +144,19 @@ void Dual(uint3 id : SV_DispatchThreadID)
     ConstraintRecord c = _Constraints[index];
 
     // The last update of a step whose sweeps ran the dual update themselves (AVBD_FUSED_DUAL in AvbdPrimal.compute). The sweeps marked every joint they
-    // updated with the id of the sweep in reserved.w, and the records leave the step without a mark: cleared before the test below, because a joint that
+    // updated with the id of the sweep in c0Ang.w, and the records leave the step without a mark: cleared before the test below, because a joint that
     // broke is marked too. A joint that the last sweep did not mark was not touched by any sweep (no solved body is on it, so its poses did not change
     // and no sweep updated it): it gets the updates of all the iterations now, one after the other, which is what separate dispatches would have given it.
     uint updates = 1u;
     if (_ClearMarks != 0u)
     {
-        uint mark = asuint(c.reserved.w);
+        uint mark = asuint(c.c0Ang.w);
         if (mark != 0u)
-            _Constraints[index].reserved.w = 0.0;
+        {
+            // The local copy too: the update below stores the whole c0Ang (with its w) back when a joint yields in its angle.
+            c.c0Ang.w = 0.0;
+            _Constraints[index].c0Ang.w = 0.0;
+        }
         if (_LastSweep != 0u && mark != _LastSweep)
             updates = max(_FinalUpdates, 1u);
     }
@@ -171,6 +173,7 @@ void Dual(uint3 id : SV_DispatchThreadID)
 
     // The plastic data of the first update is requested with the poses, before they are used (see JointPlasticRead).
     JointPlasticRead plasticRead = AvbdJointPlasticRead(c, flags);
+    float2 fracture = AvbdJointFractureRead(index, flags); // requested with them; the thresholds never change
 
     [loop]
     for (uint k = 0u; k < updates; k++)
@@ -181,7 +184,7 @@ void Dual(uint3 id : SV_DispatchThreadID)
         if (k > 0u)
             plasticRead = AvbdJointPlasticRead(c, flags); // an earlier update may have moved the rest rotation (the record is written back each time)
         float4 rest;
-        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, plasticRead, rest);
+        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, plasticRead, fracture, rest);
         AvbdJointDualStore(index, c, result, rest);
     }
 }
