@@ -48,6 +48,11 @@
       "displayName": "JSON Mesh Import Demo",
       "description": "Spawns the objects of a list of voxel files (JSON made from an STL mesh by Tools/Voxelize/voxelize_stl.py), 5 m apart: every voxel is a box and neighboring voxels are linked by fracturing ball-socket joints. Shoot boxes at them or blow them up.",
       "path": "Samples~/JsonMeshImportDemo"
+    },
+    {
+      "displayName": "Voxel Impact Demo",
+      "description": "The 34 880-voxel, 241 872-joint scene of the performance test Scenario6_VoxelImpact35k: two cubes, two spheres and two toruses made of fracturing voxels collide head-on at 50 m/s. Shoot boxes at them, change the speed and the joint settings.",
+      "path": "Samples~/VoxelImpactDemo"
     }
   ]
 }
