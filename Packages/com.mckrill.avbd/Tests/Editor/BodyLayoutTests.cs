@@ -269,6 +269,18 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void PlasticRecord_PutsTheWordsReadEveryIterationInTheFirstSector()
+        {
+            // The primal and dual stages read rest and limits of a plastic joint in every iteration, restStart and reserved only when it yields or breaks:
+            // the first two words are the first 32 B, so a read of the hot half touches one sector (a record starts at a multiple of 64 B).
+            int Offset(string name) => UnsafeUtility.GetFieldOffset(typeof(PlasticRecord).GetField(name));
+            Assert.AreEqual(0, Offset("rest"));
+            Assert.AreEqual(16, Offset("limits"));
+            Assert.AreEqual(32, Offset("restStart"));
+            Assert.AreEqual(48, Offset("reserved"));
+        }
+
+        [Test]
         public void MakePlastic_FlagsTheJointAndStartsAtTheIdentityRest()
         {
             ConstraintRecord joint = ConstraintRecordFactory.Joint(1u, 2u, float3.zero, float3.zero, float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity, 1f);

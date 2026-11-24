@@ -6,7 +6,10 @@ namespace McKrill.Avbd
     /// <summary>Stride of the plastic joint array in bytes. Tests assert that the record struct has exactly this size.</summary>
     internal static class PlasticRecordStrides
     {
-        /// <summary>Four 16 B words: a multiple of 32 B, because the primal and dual stages gather it by the joint's slot (rule P3).</summary>
+        /// <summary>
+        /// Four 16 B words: a multiple of 32 B, because the primal and dual stages gather it by the joint's slot (rule P3). The two words that are read every
+        /// iteration (rest, limits) come first, so they are one 32 B sector; the two that are read when a joint yields or breaks (restStart, reserved) are the second.
+        /// </summary>
         public const int Plastic = 64;
     }
 
@@ -30,11 +33,12 @@ namespace McKrill.Avbd
     [StructLayout(LayoutKind.Sequential)]
     internal struct PlasticRecord
     {
+        // The first 32 B (one sector) are what the primal and dual stages read of every plastic joint in every iteration: the rest rotation and the limits.
+        // The second 32 B are read only in the step in which a joint breaks or yields. A record is 64 B at a multiple of 64 B, so the two halves are two
+        // sectors and a read of the hot half touches one.
+
         /// <summary>Rest rotation, a unit quaternion (x, y, z, w): body B is at rest when its rotation is <c>rotA * rest</c>. Identity at creation. Owner: stage D.</summary>
         public float4 rest;
-
-        /// <summary>The rest rotation at creation, the origin the bend is measured from. Written once, at creation.</summary>
-        public float4 restStart;
 
         /// <summary>
         /// x = angular yield threshold (norm of the angular multiplier; read only with <see cref="ConstraintFlags.Plastic"/>), y = bend limit in radians (read only
@@ -42,6 +46,9 @@ namespace McKrill.Avbd
         /// <see cref="ConstraintFlags.PlasticLinear"/>), w = stretch limit in meters (read only with <see cref="ConstraintFlags.StretchBreak"/>).
         /// </summary>
         public float4 limits;
+
+        /// <summary>The rest rotation at creation, the origin the bend is measured from. Written once, at creation. Read only when a joint yields (to test the bend limit).</summary>
+        public float4 restStart;
 
         /// <summary>xyz = the anchor on body A at creation (a world point if A is the world), the origin the stretch is measured from. Written once, at creation (with <see cref="ConstraintFlags.PlasticLinear"/>). w unused.</summary>
         public float4 reserved;

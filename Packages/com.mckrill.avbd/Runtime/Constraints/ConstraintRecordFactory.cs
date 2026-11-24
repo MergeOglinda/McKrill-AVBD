@@ -101,8 +101,8 @@ namespace McKrill.Avbd
             return new PlasticRecord
             {
                 rest = new float4(0f, 0f, 0f, 1f),
-                restStart = new float4(0f, 0f, 0f, 1f),
                 limits = new float4(storedYield, storedBend, storedYieldLinear, storedStretch),
+                restStart = new float4(0f, 0f, 0f, 1f),
                 reserved = new float4(joint.anchorA.xyz, 0f),
             };
         }
