@@ -11,7 +11,7 @@
 StructuredBuffer<BodyStateRecord>   _BodyState;
 RWStructuredBuffer<BodyMotionRecord> _BodyMotion;
 StructuredBuffer<BodyMassRecord>    _BodyMass;
-StructuredBuffer<BodyMetaRecord>    _BodyMeta;
+StructuredBuffer<uint>               _BodyFlags;
 
 uint _Base;
 uint _Count; // slots to process: [0, _Count)
@@ -24,7 +24,7 @@ void Velocity(uint3 id : SV_DispatchThreadID)
         return;
 
     // Free slots hold no body and stay cleared.
-    uint flags = _BodyMeta[slot].ident.x;
+    uint flags = _BodyFlags[slot];
     if (flags & AVBD_BODY_FLAG_FREE)
         return;
 

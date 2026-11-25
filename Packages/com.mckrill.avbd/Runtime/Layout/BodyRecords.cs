@@ -69,7 +69,13 @@ namespace McKrill.Avbd
         public const int Meta = 32;
         public const int Range = 16;
 
-        public const int Total = State + Pose + Inertial + Mass + Motion + Shape + Meta + Range;
+        /// <summary>The flags word of a body (<see cref="BodyFlagLayout"/>), one uint per body: an array of its own, so that a kernel that only asks whether a body is live and solved reads 4 B and not a 32 B meta record.</summary>
+        public const int Flags = 4;
+
+        /// <summary>The graph color of a body, one uint per body, for the same reason. Written by stage C (and cleared by stage E).</summary>
+        public const int Color = 4;
+
+        public const int Total = State + Pose + Inertial + Mass + Motion + Shape + Meta + Range + Flags + Color;
         public const int Largest = 64;
     }
 
@@ -138,14 +144,18 @@ namespace McKrill.Avbd
         public float4 sizeFriction;
     }
 
-    /// <summary>Cold. Identity and state words.</summary>
+    /// <summary>
+    /// Cold. Identity and state words. The flags word and the graph color are not here: they are the arrays <c>_BodyFlags</c> and <c>_BodyColor</c>
+    /// (<see cref="BodyRecordStrides.Flags"/>, <see cref="BodyRecordStrides.Color"/>), one uint per body, which the hot kernels read. The words
+    /// <c>ident.x</c> and <c>state.x</c> are kept so that the record keeps its size and the names of the others; they are always 0.
+    /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct BodyMetaRecord
     {
-        /// <summary>x = flags (low 24 bits) and shape kind (high 8 bits), y = group mask, z = appearance id, w unused.</summary>
+        /// <summary>x = unused (always 0: the flags word is in <c>_BodyFlags</c>), y = group mask, z = appearance id, w unused.</summary>
         public uint4 ident;
 
-        /// <summary>x = graph color, y = sleep counter, zw unused. Written by stages C and Z.</summary>
+        /// <summary>x = unused (always 0: the graph color is in <c>_BodyColor</c>), y = sleep counter, zw unused. Written by stage Z.</summary>
         public uint4 state;
     }
 

@@ -10,7 +10,7 @@
 
 StructuredBuffer<BodyStateRecord> _BodyState;
 StructuredBuffer<BodyShapeRecord> _BodyShape;
-StructuredBuffer<BodyMetaRecord>  _BodyMeta;
+StructuredBuffer<uint>             _BodyFlags;
 
 RWStructuredBuffer<uint> _RayHit; // [0]: the bits of the nearest hit distance, or of the maximum distance if nothing was hit
 
@@ -33,7 +33,7 @@ void Cast(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    if (_BodyMeta[slot].ident.x & AVBD_BODY_FLAG_FREE)
+    if (_BodyFlags[slot] & AVBD_BODY_FLAG_FREE)
         return;
 
     // The ray in the box's frame, where the box is axis-aligned and centered at the origin: the slab method.

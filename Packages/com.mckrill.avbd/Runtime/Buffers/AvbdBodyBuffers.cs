@@ -36,6 +36,8 @@ namespace McKrill.Avbd
         static readonly int BodyShapeId = Shader.PropertyToID("_BodyShape");
         static readonly int BodyMetaId = Shader.PropertyToID("_BodyMeta");
         static readonly int BodyRangeId = Shader.PropertyToID("_BodyRange");
+        static readonly int BodyFlagsId = Shader.PropertyToID("_BodyFlags");
+        static readonly int BodyColorId = Shader.PropertyToID("_BodyColor");
 
         readonly BodyEditQueue queue;
         readonly ComputeShader shader;
@@ -53,6 +55,8 @@ namespace McKrill.Avbd
         GraphicsBuffer shape;
         GraphicsBuffer meta;
         GraphicsBuffer range;
+        GraphicsBuffer flags;
+        GraphicsBuffer color;
         GraphicsBuffer commands;
         bool disposed;
 
@@ -86,6 +90,8 @@ namespace McKrill.Avbd
                 shape = Create(capacity, BodyRecordStrides.Shape);
                 meta = Create(capacity, BodyRecordStrides.Meta);
                 range = Create(capacity, BodyRecordStrides.Range);
+                flags = Create(capacity, BodyRecordStrides.Flags);
+                color = Create(capacity, BodyRecordStrides.Color);
                 commands = Create(commandBatchSize, EditCommandStride.Size);
             }
             catch
@@ -151,6 +157,12 @@ namespace McKrill.Avbd
         public GraphicsBuffer Shape => shape;
         public GraphicsBuffer Meta => meta;
         public GraphicsBuffer Range => range;
+
+        /// <summary>The flags word of every body (<see cref="BodyFlagLayout"/>: flags in the low 24 bits, the shape kind in the high 8), one uint per body.</summary>
+        public GraphicsBuffer Flags => flags;
+
+        /// <summary>The graph color of every body, one uint per body: <see cref="AvbdConst.Invalid"/> for a body that is not solved.</summary>
+        public GraphicsBuffer Color => color;
 
         // ---- edits (recorded now, applied by ApplyEdits) ------------------------------------------------
 
@@ -303,8 +315,8 @@ namespace McKrill.Avbd
         void BindBodyBuffers(int kernel) => BindTo(shader, kernel);
 
         /// <summary>
-        /// Binds all eight body arrays to a kernel under the standard names (_BodyState, _BodyPose, _BodyInertial, _BodyMass,
-        /// _BodyMotion, _BodyShape, _BodyMeta, _BodyRange). A kernel that does not declare one of them ignores it.
+        /// Binds all ten body arrays to a kernel under the standard names (_BodyState, _BodyPose, _BodyInertial, _BodyMass,
+        /// _BodyMotion, _BodyShape, _BodyMeta, _BodyRange, _BodyFlags, _BodyColor). A kernel that does not declare one of them ignores it.
         /// </summary>
         internal void BindTo(ComputeShader target, int kernel)
         {
@@ -316,6 +328,8 @@ namespace McKrill.Avbd
             target.SetBuffer(kernel, BodyShapeId, shape);
             target.SetBuffer(kernel, BodyMetaId, meta);
             target.SetBuffer(kernel, BodyRangeId, range);
+            target.SetBuffer(kernel, BodyFlagsId, flags);
+            target.SetBuffer(kernel, BodyColorId, color);
         }
 
         void ThrowIfDisposed()
@@ -338,6 +352,8 @@ namespace McKrill.Avbd
             Release(ref shape);
             Release(ref meta);
             Release(ref range);
+            Release(ref flags);
+            Release(ref color);
             Release(ref commands);
         }
 

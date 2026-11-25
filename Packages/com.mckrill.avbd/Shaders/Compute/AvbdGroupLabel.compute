@@ -10,7 +10,8 @@
 
 StructuredBuffer<BodyStateRecord>   _BodyState;
 StructuredBuffer<BodyShapeRecord>   _BodyShape;
-RWStructuredBuffer<BodyMetaRecord>  _BodyMeta;
+StructuredBuffer<uint>             _BodyFlags;
+RWStructuredBuffer<BodyMetaRecord>  _BodyMeta;   // the group mask (ident.y)
 
 float4 _LabelCenter; // xyz: the point, w: the radius
 uint4  _LabelBits;   // x: bits to set, y: bits to clear
@@ -25,8 +26,7 @@ void Label(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    BodyMetaRecord meta = _BodyMeta[slot];
-    if (meta.ident.x & AVBD_BODY_FLAG_FREE)
+    if (_BodyFlags[slot] & AVBD_BODY_FLAG_FREE)
         return;
 
     // The point in the box's frame, where the box is axis-aligned and centered at the origin: the distance to it is the length of what sticks out.
@@ -36,5 +36,5 @@ void Label(uint3 id : SV_DispatchThreadID)
     if (dot(outside, outside) > _LabelCenter.w * _LabelCenter.w)
         return;
 
-    _BodyMeta[slot].ident.y = (meta.ident.y | _LabelBits.x) & ~_LabelBits.y;
+    _BodyMeta[slot].ident.y = (_BodyMeta[slot].ident.y | _LabelBits.x) & ~_LabelBits.y;
 }

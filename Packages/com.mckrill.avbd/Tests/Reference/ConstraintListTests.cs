@@ -172,14 +172,14 @@ namespace McKrill.Avbd.Tests
         static void AssertListsMatchOracle(AvbdBodyBuffers buffers, AvbdConstraintBuffers constraints, string what)
         {
             int bodyCount = buffers.HighWaterMark;
-            var meta = new BodyMetaRecord[buffers.Capacity];
+            var flags = new uint[buffers.Capacity];
             var mass = new BodyMassRecord[buffers.Capacity];
-            buffers.Meta.GetData(meta);
+            buffers.Flags.GetData(flags);
             buffers.Mass.GetData(mass);
             var solved = new bool[bodyCount];
             const uint notSolved = (uint)BodyFlags.Free | (uint)BodyFlags.Kinematic;
             for (int s = 0; s < bodyCount; s++)
-                solved[s] = (meta[s].ident.x & notSolved) == 0u && mass[s].momentMass.w > 0f;
+                solved[s] = (flags[s] & notSolved) == 0u && mass[s].momentMass.w > 0f;
 
             var records = new ConstraintRecord[constraints.Capacity];
             if (constraints.RecordCount > 0)

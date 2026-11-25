@@ -819,6 +819,7 @@ namespace McKrill.Avbd.Tests
             buffers.Mass.GetData(bodies.Mass);
             buffers.Shape.GetData(bodies.Shape);
             buffers.Meta.GetData(bodies.Meta);
+            buffers.Flags.GetData(bodies.Flags);
             return bodies;
         }
 

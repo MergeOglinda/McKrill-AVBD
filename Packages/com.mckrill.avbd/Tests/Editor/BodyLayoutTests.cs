@@ -29,6 +29,8 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(BodyRecordStrides.Shape, UnsafeUtility.SizeOf<BodyShapeRecord>());
             Assert.AreEqual(BodyRecordStrides.Meta, UnsafeUtility.SizeOf<BodyMetaRecord>());
             Assert.AreEqual(BodyRecordStrides.Range, UnsafeUtility.SizeOf<BodyRangeRecord>());
+            Assert.AreEqual(sizeof(uint), BodyRecordStrides.Flags, "the flags word is one uint per body");
+            Assert.AreEqual(sizeof(uint), BodyRecordStrides.Color, "the graph color is one uint per body");
             Assert.AreEqual(EditCommandStride.Size, UnsafeUtility.SizeOf<EditCommand>());
         }
 
@@ -55,9 +57,9 @@ namespace McKrill.Avbd.Tests
         [Test]
         public void Total_IsTheSumOfTheArrays()
         {
-            Assert.AreEqual(256, BodyRecordStrides.Total);
+            Assert.AreEqual(264, BodyRecordStrides.Total);
             Assert.AreEqual(BodyRecordStrides.Total, BodyBufferCapacity.BytesPerBody);
-            Assert.AreEqual(256000L, BodyBufferCapacity.BodyArrayBytes(1000));
+            Assert.AreEqual(264000L, BodyBufferCapacity.BodyArrayBytes(1000));
             Assert.AreEqual(BodyRecordStrides.Largest, Math.Max(
                 Math.Max(BodyRecordStrides.State, BodyRecordStrides.Inertial),
                 Math.Max(Math.Max(BodyRecordStrides.Mass, BodyRecordStrides.Motion),

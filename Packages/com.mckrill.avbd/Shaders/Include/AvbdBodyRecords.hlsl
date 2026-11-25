@@ -62,11 +62,14 @@ struct BodyShapeRecord
     float4 sizeFriction;
 };
 
-// 32 B, cold.
+// 32 B, cold. The flags word and the graph color are not in this record: they are the arrays _BodyFlags (flags | kind << 24, see the AVBD_BODY_FLAG_*
+// bits above) and _BodyColor (the graph color, AVBD_INVALID for a body that is not solved), one uint per body, because the hot kernels ask every body
+// whether it is live and solved, and the coloring reads the color of random neighbors: 4 B in a sector of their own and not in a 32 B record.
+// Declare them as StructuredBuffer<uint> (RWStructuredBuffer<uint> where the kernel writes them). ident.x and state.x of this record are always 0.
 struct BodyMetaRecord
 {
-    uint4 ident; // x = flags | kind << 24, y = group mask, z = appearance id, w unused
-    uint4 state; // x = graph color, y = sleep counter, zw unused
+    uint4 ident; // x = unused (the flags word is _BodyFlags), y = group mask, z = appearance id, w unused
+    uint4 state; // x = unused (the graph color is _BodyColor), y = sleep counter, zw unused
 };
 
 // 16 B, hot. Range in the constraint list.

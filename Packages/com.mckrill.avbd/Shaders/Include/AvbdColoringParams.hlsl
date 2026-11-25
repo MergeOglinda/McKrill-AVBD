@@ -6,7 +6,7 @@
 // Most colors a graph may use. A body that would need more is given the last color and the overflow word is set.
 #define AVBD_COLOR_MAX 64
 
-// Value of the graph-color field (Meta.state.x) of a solved body that has no color yet. A body that is not solved keeps AVBD_INVALID.
+// Value of the graph color (_BodyColor) of a solved body that has no color yet. A body that is not solved keeps AVBD_INVALID.
 #define AVBD_COLOR_PENDING 0xFFFFFFFEu
 
 // Layout of the work buffer, in 32-bit words: control words, then the body count of every color, then the next free entry of every color

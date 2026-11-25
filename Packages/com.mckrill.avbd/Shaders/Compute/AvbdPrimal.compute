@@ -36,7 +36,7 @@ RWStructuredBuffer<BodyStateRecord>    _BodyState;
 RWStructuredBuffer<BodyPoseRecord>     _BodyPose;       // the current pose of every body, 32 B per body: what the neighbors of a joint or spring are read from
 StructuredBuffer<BodyInertialRecord>   _BodyInertial;
 StructuredBuffer<BodyMassRecord>       _BodyMass;
-StructuredBuffer<BodyMetaRecord>       _BodyMeta;
+StructuredBuffer<uint>                 _BodyFlags;      // flags | kind << 24 of every body, one uint per body
 StructuredBuffer<BodyRangeRecord>      _BodyRange;
 #if defined(AVBD_FUSED_DUAL)
 RWStructuredBuffer<ConstraintRecord>   _Constraints;    // joints and springs (written by the dual update of the first body of a joint in a sweep)
@@ -520,7 +520,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
         // Everything the body needs is requested at once, before any of it is tested: the reads depend on the slot only, so they are in flight together
         // instead of one after the other (flags, then mass, then pose, then the range of the list). A body that is skipped below has wasted a few reads.
-        uint bodyFlags = _BodyMeta[slot].ident.x;
+        uint bodyFlags = _BodyFlags[slot];
         momentMass = _BodyMass[slot].momentMass;
         BodyStateRecord state = _BodyState[slot];
         range = _BodyRange[slot].range.xy;

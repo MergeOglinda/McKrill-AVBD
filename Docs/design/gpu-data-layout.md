@@ -184,7 +184,7 @@ These rules apply to every GPU buffer. No struct is defined until they are writt
 
 ## 3. Body arrays
 
-Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Eight arrays, indexed by body slot, 256 B per body in total. Each record follows the packing rules in section 2 (float4 and uint4 words only, unused lanes zero). The C# mirrors are in `Runtime/Layout/BodyRecords.cs`, the HLSL in `Shaders/Include/AvbdBodyRecords.hlsl`.
+Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Ten arrays, indexed by body slot, 264 B per body in total. Each record follows the packing rules in section 2 (float4 and uint4 words only, unused lanes zero); the two arrays of 4 B (Flags and Color) are the scalar exception of the rule table, like an index list. The C# mirrors are in `Runtime/Layout/BodyRecords.cs`, the HLSL in `Shaders/Include/AvbdBodyRecords.hlsl`.
 
 | Array | Stride | Words | Class | Written by | Read by |
 | --- | --- | --- | --- | --- | --- |
@@ -194,7 +194,9 @@ Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Eight arr
 | Mass | 16 B | principal moments (xyz), mass (w) | Hot | E | V |
 | Motion | 48 B | linear velocity, angular velocity, previous linear velocity | Cold | E, U | B, P, Z |
 | Shape | 16 B | size (xyz), friction (w) | Cold | E | B, N, R |
-| Meta | 32 B | flags and kind, group mask, appearance id; graph color, sleep counter | Cold | E (first word group), C, Z | B, N, P, R |
+| Meta | 32 B | group mask, appearance id; sleep counter (the words that held the flags and the graph color are unused) | Cold | E, Z | P, group mover and labeler |
+| Flags | 4 B | flags (low 24 bits) and shape kind (high 8), one uint per body | Hot | E | everything that asks whether a body is live or solved (S, P, V, B, N, G, C, R, group mover and labeler) |
+| Color | 4 B | graph color, one uint per body | Hot | C, E (clears it) | C |
 | Range | 16 B | constraint-list offset, count and number of contact entries | Hot | G | V |
 
 Decisions made here, where section 1 left them open:
@@ -206,7 +208,8 @@ Decisions made here, where section 1 left them open:
 - **Friction is in the spare lane of the size vector** (rule P4). Its stages (E, N) are a subset of the size stages (E, B, N, R).
 - **Mass and the three principal moments share one word.** V reads them together.
 - **Appearance id** is in the Meta record (finding 7). Group mask is there too.
-- **Free slots**: the Free flag is set, the appearance id and the graph color are `AVBD_INVALID`, the mass is zero and rotations are identity (rule P9).
+- **Flags and graph color are arrays of their own** (`_BodyFlags`, `_BodyColor`, one uint per body). They used to be words of the 32 B Meta record, so a kernel that asked whether a body was live and solved loaded a 32 B sector for 4 B, and the coloring loaded one for the color of every neighbor it looked at. In a 4 B array a sector holds the words of 8 bodies. The Meta record keeps its size and its other words (`ident.x` and `state.x` are always 0).
+- **Free slots**: the Free flag is set, the appearance id and the graph color (in `_BodyColor`) are `AVBD_INVALID`, the mass is zero and rotations are identity (rule P9).
 - **Mass 0 means static.** A static body needs no flag. Static colliders in the sense of section 1 (the separate table) are still step 4.
 
 Matrix changes from this step: E also writes the step-start pose (spawn and pose edits, so a teleport leaves no motion streak and a new body has a valid start pose before P runs), and E writes the previous linear velocity (spawn and velocity edits, so the adaptive warm start sees no acceleration). E never writes the inertial target.
@@ -215,7 +218,7 @@ Matrix changes from this step: E also writes the step-start pose (spawn and pose
 
 `BodyBufferCapacity` (`Runtime/Buffers/BodyBufferCapacity.cs`) holds the cost and the limits of the body arrays.
 
-- Cost: 256 B per body, so 1,000,000 bodies take 256 MB for the body arrays alone.
+- Cost: 264 B per body, so 1,000,000 bodies take 264 MB for the body arrays alone.
 - Limit: the largest array is 64 B per body, so the capacity is capped at `int.MaxValue / 64` = 33,554,431 bodies to keep every buffer under 2 GiB. This is far below `0x7FFFFFFF`, so rule P6 holds.
 - Minimum capacity is 1. Capacity is fixed when the buffers are created (section 7).
 - The edit command buffer (128 B per command, 1024 commands by default) is separate and small.
@@ -262,7 +265,7 @@ Done so far: **overflow**. Capacity is fixed. `Spawn` on a full buffer returns t
 
 - Creating it allocates the arrays and runs the `ClearBodies` kernel over every slot (rule P9; chunked, so more than 65,535 thread groups are covered).
 - `Spawn`, `Remove` and the `Set*` methods only record edits on the CPU. `ApplyEdits()` drains the queue, uploads the commands in chunks of the command batch size and dispatches the `ApplyEdits` kernel once per chunk.
-- The other stages bind the arrays through the read-only properties `State`, `Inertial`, `Mass`, `Motion`, `Shape`, `Meta` and `Range`. Only stage E writes the fields it owns.
+- The other stages bind the arrays through the read-only properties `State`, `Pose`, `Inertial`, `Mass`, `Motion`, `Shape`, `Meta`, `Range`, `Flags` and `Color`. Only stage E writes the fields it owns.
 - Nothing is read back during a step. Tests read back synchronously.
 - The owner is single-threaded (main thread) and `IDisposable`.
 
@@ -425,7 +428,7 @@ The previous velocity is what stage P reads for the adaptive warm start, so a st
 
 `AvbdColoring.compute` colors the graph of solved bodies and buckets the bodies by color, replacing the CPU coloring of `ConstraintTopology`. The graph has one node per solved body and one edge per constraint between two solved bodies. Fixed bodies and world pins create no edge. The adjacency is read from the per-body lists (stage G).
 
-**Algorithm: Jones-Plassmann.** Every body has a priority, a strict total order. A body colors itself once every neighbor of higher priority has a color, and takes the lowest color none of its neighbors has. All bodies that are ready color in the same round; one round is one dispatch. The result does not depend on the thread order inside a round: a body only sees final colors of its higher-priority neighbors, and a lower-priority neighbor cannot be colored before it. The result is therefore the sequential greedy first-fit coloring of the priority order. The color is written to `Meta.state.x`; a solved body without a color holds `AVBD_COLOR_PENDING`, a body that is not solved holds `AVBD_INVALID`.
+**Algorithm: Jones-Plassmann.** Every body has a priority, a strict total order. A body colors itself once every neighbor of higher priority has a color, and takes the lowest color none of its neighbors has. All bodies that are ready color in the same round; one round is one dispatch. The result does not depend on the thread order inside a round: a body only sees final colors of its higher-priority neighbors, and a lower-priority neighbor cannot be colored before it. The result is therefore the sequential greedy first-fit coloring of the priority order. The color is written to the array `_BodyColor`; a solved body without a color holds `AVBD_COLOR_PENDING`, a body that is not solved holds `AVBD_INVALID`.
 
 **Priority order.** `GraphColoringOrder.SlotOrder`: a higher slot colors first, which is exactly the reference solver's coloring, so the colored sweep is the same sequence of updates as `ReferenceSolver` in `Colored` mode and the GPU solver can be compared with it. The cost is the number of rounds, the length of the longest chain with falling slots: a rope built in slot order needs one round per link. `GraphColoringOrder.Hashed` orders by a hash of the slot: a few rounds for any chain, a valid but different coloring (so different from the reference). `AvbdConstraintBuffers.ColoringOrder` selects it.
 
@@ -680,7 +683,7 @@ A fracture value above the yield value only catches a load that jumps past it wi
 - Colors come from a greedy first-fit coloring: bodies from the highest slot down, lowest color not used by a colored neighbor. This is the reference's `GraphColoring`, and `ConstraintTopologyTests` checks the two against each other. Fixed bodies and world pins create no edge. `ConstraintTopology` still computes this coloring on the CPU, as the oracle of stage C; the solver uses the GPU coloring (stage C above), which gives the same colors in the default order.
 - Bodies are bucketed by color in one list; the start and size of each color are on the GPU (stage C) and the host only knows the number of colors, so a color is one indirect dispatch.
 
-**The lists are built on the GPU** (stage G, section 11), and so are the coloring and the buckets (stage C). `ConstraintTopology` is the CPU oracle for both. `Rebuild()` applies the pending body edits and reads the sizes and poses of the bodies back only when new constraints must be completed (the torque arm, the spring's rest length), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending or when the set of solved bodies changed (section 11, stage U). Known limits: constraints cannot be removed, removing a body that has constraints is not supported, and without contacts the lists are rebuilt only by `Rebuild()`, so a joint that fractures (stage D) stays in the lists and the coloring until then (with contacts the lists are rebuilt every step and drop it; section 13). The graph color is written to the Meta record by stage C (`Meta.state.x`).
+**The lists are built on the GPU** (stage G, section 11), and so are the coloring and the buckets (stage C). `ConstraintTopology` is the CPU oracle for both. `Rebuild()` applies the pending body edits and reads the sizes and poses of the bodies back only when new constraints must be completed (the torque arm, the spring's rest length), so it is for when the constraint set changes, not for every frame. `AvbdSolver.Step()` calls it when constraints are pending or when the set of solved bodies changed (section 11, stage U). Known limits: constraints cannot be removed, removing a body that has constraints is not supported, and without contacts the lists are rebuilt only by `Rebuild()`, so a joint that fractures (stage D) stays in the lists and the coloring until then (with contacts the lists are rebuilt every step and drop it; section 13). The graph color is written to the `_BodyColor` array by stage C.
 
 ### Tests
 

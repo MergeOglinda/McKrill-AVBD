@@ -25,7 +25,8 @@ RWStructuredBuffer<BodyStateRecord>    _BodyState;
 RWStructuredBuffer<BodyPoseRecord>     _BodyPose;      // a copy of the pose in _BodyState (see BodyPoseRecord)
 RWStructuredBuffer<BodyInertialRecord> _BodyInertial;
 StructuredBuffer<BodyMassRecord>       _BodyMass;
-StructuredBuffer<BodyMetaRecord>       _BodyMeta;
+StructuredBuffer<uint>                 _BodyFlags;
+StructuredBuffer<BodyMetaRecord>       _BodyMeta;       // the group mask (ident.y), for the force fields
 
 #ifdef AVBD_EXPLOSIONS
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdExplosions.hlsl"
@@ -212,7 +213,7 @@ void PredictSlot(uint slot)
         return;
 
     // Free slots, kinematic bodies and static bodies (mass 0) are not predicted and keep their pose.
-    uint flags = _BodyMeta[slot].ident.x;
+    uint flags = _BodyFlags[slot];
     if (flags & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
         return;
     float mass = _BodyMass[slot].momentMass.w;
@@ -314,7 +315,7 @@ void ForceFieldAccumulate(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
+    if (_BodyFlags[slot] & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
         return;
     if (!(_BodyMass[slot].momentMass.w > 0.0))
         return;

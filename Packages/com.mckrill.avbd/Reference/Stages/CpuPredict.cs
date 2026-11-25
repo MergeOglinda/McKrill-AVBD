@@ -20,7 +20,7 @@ namespace McKrill.Avbd.Reference
 
             for (int slot = 0; slot < count; slot++)
             {
-                uint flags = bodies.Meta[slot].ident.x;
+                uint flags = bodies.Flags[slot];
                 if ((flags & ((uint)BodyFlags.Free | (uint)BodyFlags.Kinematic)) != 0u)
                     continue;
                 if (!(bodies.Mass[slot].momentMass.w > 0f))

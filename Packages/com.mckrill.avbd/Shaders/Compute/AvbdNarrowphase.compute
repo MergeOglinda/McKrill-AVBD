@@ -41,7 +41,7 @@
 StructuredBuffer<BodyStateRecord>    _BodyState;
 StructuredBuffer<BodyMassRecord>     _BodyMass;
 StructuredBuffer<BodyShapeRecord>    _BodyShape;
-StructuredBuffer<BodyMetaRecord>     _BodyMeta;
+StructuredBuffer<uint>                _BodyFlags;
 RWStructuredBuffer<ContactPairRecord>  _ContactPairs;  // per manifold slot: the bodies (AVBD_INVALID: free slot), the contact count, the stick bits, the normal and the friction
 RWStructuredBuffer<ContactPointRecord> _ContactPoints; // AVBD_MAX_CONTACTS points per slot
 RWStructuredBuffer<uint>             _PairTable;    // pair hash table: a slot index, or AVBD_INVALID
@@ -230,8 +230,8 @@ void Narrowphase(uint3 id : SV_DispatchThreadID)
     if (oldCount > AVBD_MAX_CONTACTS)
         oldCount = 0u;
 
-    uint metaA = _BodyMeta[a].ident.x;
-    uint metaB = _BodyMeta[b].ident.x;
+    uint metaA = _BodyFlags[a];
+    uint metaB = _BodyFlags[b];
     float massA = _BodyMass[a].momentMass.w;
     float massB = _BodyMass[b].momentMass.w;
 

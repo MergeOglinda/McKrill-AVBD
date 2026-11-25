@@ -75,7 +75,7 @@
 StructuredBuffer<BodyStateRecord>   _BodyState;
 StructuredBuffer<BodyMassRecord>    _BodyMass;
 StructuredBuffer<BodyShapeRecord>   _BodyShape;
-StructuredBuffer<BodyMetaRecord>    _BodyMeta;
+StructuredBuffer<uint>               _BodyFlags;
 StructuredBuffer<BodyRangeRecord>   _BodyRange;
 StructuredBuffer<ConstraintRecord>  _Constraints;
 StructuredBuffer<uint>              _ConstraintList;
@@ -101,7 +101,7 @@ uint _StaticPairCapacity;
 
 uint Classify(uint slot)
 {
-    uint flags = _BodyMeta[slot].ident.x;
+    uint flags = _BodyFlags[slot];
     if (flags & AVBD_BODY_FLAG_FREE)
         return CLASS_FREE;
     if (!(flags & AVBD_BODY_FLAG_KINEMATIC) && _BodyMass[slot].momentMass.w > 0.0)
