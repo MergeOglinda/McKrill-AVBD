@@ -6,6 +6,7 @@
 //   PredictExplosions        first applies the explosions queued for this step (AvbdSolver.Explode) to the velocities.
 //   PredictForces            adds the acceleration of the force fields (AvbdSolver.AddForceField) to the inertial target.
 //   PredictForcesExplosions  both: the explosions first, and the force fields see the velocity they left.
+//   ResolveExplosions        before any of those, when an explosion is anchored to a body: turns its local center into a world one, from the pose at the start of the step.
 //   ForceFieldClear, ForceFieldAccumulate   before a predict with spring fields: the centroid of the group of each spring (see AvbdForceFields.hlsl).
 //   BuildSolveHeader         once per step, after the constraint init: the 32 B record per body that the primal sweep reads (BodySolveRecord).
 // The code and the buffers of the explosions and of the force fields only exist in the kernels that use them, so a step without either runs exactly
@@ -15,6 +16,7 @@
 #pragma kernel PredictExplosions AVBD_EXPLOSIONS
 #pragma kernel PredictForces AVBD_FORCES
 #pragma kernel PredictForcesExplosions AVBD_FORCES AVBD_EXPLOSIONS
+#pragma kernel ResolveExplosions AVBD_EXPLOSIONS AVBD_RESOLVE_EXPLOSIONS
 #pragma kernel ForceFieldClear AVBD_FORCES
 #pragma kernel ForceFieldAccumulate AVBD_FORCES
 #pragma kernel BuildSolveHeader
@@ -37,7 +39,11 @@ StructuredBuffer<BodyMetaRecord>       _BodyMeta;       // the group mask (ident
 
 RWStructuredBuffer<BodyMotionRecord>   _BodyMotion; // the explosions change the velocities
 StructuredBuffer<BodyShapeRecord>      _BodyShape;
+#ifdef AVBD_RESOLVE_EXPLOSIONS
+RWStructuredBuffer<ExplosionRecord>    _Explosions;     // the kernel that resolves the anchored centers writes them back
+#else
 StructuredBuffer<ExplosionRecord>      _Explosions;
+#endif
 uint _ExplosionCount;                              // explosions in this step: [0, _ExplosionCount)
 
 // Applies every explosion to the body: its velocity changes by the impulse divided by its mass, away from the center, and the impulse acting
@@ -361,3 +367,31 @@ void BuildSolveHeader(uint3 id : SV_DispatchThreadID)
     r.info = uint4(_BodyFlags[slot], range.x, range.y, 0u);
     _BodySolve[slot] = r;
 }
+
+#ifdef AVBD_RESOLVE_EXPLOSIONS
+// Before the predict of a step with an explosion that is anchored to a body (AvbdSolver.Explode(body, ...)): the world center of the explosion is where the
+// point of the body is at the start of the step, from the pose the last step left (predict has not moved anything yet, so every explosion sees the
+// same poses, and the center is where the body is drawn). A body that was removed since the explosion was queued gives no explosion (radius 0).
+[numthreads(AVBD_MAX_EXPLOSIONS, 1, 1)]
+void ResolveExplosions(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _ExplosionCount)
+        return;
+
+    ExplosionRecord e = _Explosions[id.x];
+    if (e.anchorSlot == 0u)
+        return;
+
+    uint slot = e.anchorSlot - 1u;
+    if (_BodyFlags[slot] & AVBD_BODY_FLAG_FREE)
+    {
+        e.centerRadius.w = 0.0;
+    }
+    else
+    {
+        BodyPoseRecord s = _BodyPose[slot];
+        e.centerRadius.xyz = s.position.xyz + AvbdQuatRotate(s.rotation, e.anchorLocal.xyz);
+    }
+    _Explosions[id.x] = e;
+}
+#endif

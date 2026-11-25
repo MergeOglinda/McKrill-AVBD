@@ -1157,9 +1157,11 @@ namespace McKrill.Avbd.Samples
         }
 
         // An explosion where the ray from the center of the camera meets a body, pushed explosionDepth meters further along the ray. The ray is cast on the GPU
-        // (AvbdRaycaster) against the poses where they are, so the CPU never reads them: only the distance of the nearest hit comes back, a few frames later, and
-        // then the explosion is queued (AvbdSolver.Explode). The package applies it in the predict stage of the next step, so while the simulation is paused
-        // it waits for the next Step. The radius, force and depth of the click are the ones in the panel when it is clicked.
+        // (AvbdRaycaster) against the poses where they are, so the CPU never reads them: the answer (the nearest body, and the hit point and the direction of the ray in
+        // the frame of that body) comes back a few frames later, and then the explosion is queued (AvbdSolver.Explode). The answer is late and the blocks move in the
+        // meantime, so the explosion is queued relative to the block: the package turns it into a world position at the start of the step that applies it, from the
+        // pose of the block then, so it goes off at the point of the block that was clicked, where that point is now. The package applies it in the predict stage of
+        // the next step, so while the simulation is paused it waits for the next Step. The radius, force and depth of the click are the ones in the panel when it is clicked.
         void Explode()
         {
             if (cam == null)
@@ -1174,20 +1176,32 @@ namespace McKrill.Avbd.Samples
             int version = simulationVersion; // a Reset before the answer arrives makes it stale
 
             explosionStatus = "Casting the ray...";
-            raycaster.Cast(origin, direction, RayMaxDistance, (hit, distance) =>
+            raycaster.Cast(origin, direction, RayMaxDistance, hit =>
             {
                 if (version != simulationVersion || solver == null)
                     return;
-                if (!hit)
+                if (!hit.hit)
                 {
                     explosionStatus = "No explosion: the ray from the camera hit nothing.";
                     return;
                 }
 
-                float3 center = origin + math.normalizesafe(direction) * (distance + depth);
+                string waits = paused ? " (waits for the next step)" : "";
+                if (hit.body.IsValid)
+                {
+                    // Depth goes along the ray in the frame of the block, so the center is a fixed point of the block, inside it, however the block turns.
+                    float3 local = hit.localPoint + math.normalizesafe(hit.localDirection) * depth;
+                    explosionStatus = solver.Explode(hit.body, local, radius, force)
+                        ? "Explosion on block " + hit.body.Slot + ", " + hit.distance.ToString("0.0") + " m to the surface" + waits
+                        : "Not queued: too many explosions for one step.";
+                    return;
+                }
+
+                // The block was removed before the answer arrived (or the ray hit nothing that has a handle): the explosion goes where the ray met it.
+                float3 center = origin + math.normalizesafe(direction) * (hit.distance + depth);
                 explosionStatus = solver.Explode(center, radius, force)
                     ? "Explosion at (" + center.x.ToString("0.0") + ", " + center.y.ToString("0.0") + ", " + center.z.ToString("0.0") + "), "
-                        + distance.ToString("0.0") + " m to the surface" + (paused ? " (waits for the next step)" : "")
+                        + hit.distance.ToString("0.0") + " m to the surface" + waits
                     : "Not queued: too many explosions for one step.";
             });
         }

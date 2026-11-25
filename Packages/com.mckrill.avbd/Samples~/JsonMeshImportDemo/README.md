@@ -37,7 +37,7 @@ The same as in the *GPU Fracture Wall Demo*, except for the volley (there is no 
 
 | Input | Action |
 | --- | --- |
-| Left click (outside the panels) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits; in throw mode, click to select a voxel and every voxel joined to it, click again to throw them; in grab mode, **hold** to grab the blocks around the point the ray hits and move them (the point stays at the center of the screen at the distance where it was grabbed) |
+| Left click (outside the panels) | Shoot a box in the direction the camera looks; in explosion mode, set off an explosion where the camera ray hits (the ray cast on the GPU answers a few frames later, so the explosion is placed relative to the block that was hit and goes off at that point of the block, where it is when the step applies it); in throw mode, click to select a voxel and every voxel joined to it, click again to throw them; in grab mode, **hold** to grab the blocks around the point the ray hits and move them (the point stays at the center of the screen at the distance where it was grabbed) |
 | Right drag | Look around |
 | `W` `A` `S` `D`, `Q` `E` | Move, down and up. `Shift` is three times faster |
 | Mouse wheel | Move forward and back |

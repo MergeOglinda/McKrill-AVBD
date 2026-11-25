@@ -11,13 +11,15 @@
 // (half its diagonal) away from the center of mass, in a direction hashed from the slot.
 #define AVBD_EXPLOSION_KICK 0.25
 
-// 32 B. One explosion, applied in the step it was queued in.
+// 48 B. One explosion, applied in the step it was queued in.
 struct ExplosionRecord
 {
     float4 centerRadius; // xyz = center, w = radius: a body whose center of mass is farther away is not touched
     float  impulse;      // N s that a body at the center would receive (its velocity changes by impulse / mass)
     uint   seed;         // makes the hashed kicks of different explosions different
-    float2 padding;
+    uint   anchorSlot;   // slot + 1 of the body the center is relative to, 0 for a center in world space
+    float  padding;
+    float4 anchorLocal;  // xyz = the center in the frame of the anchor body (center of mass, body axes)
 };
 
 // A 32-bit integer hash (PCG), the same arithmetic as AvbdExplosion.Hash on the CPU.

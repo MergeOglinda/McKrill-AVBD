@@ -1,4 +1,5 @@
 using NUnit.Framework;
+using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
 
@@ -83,17 +84,80 @@ namespace McKrill.Avbd.Tests
                 Assert.Throws<System.ArgumentException>(() => raycaster.Cast(float3.zero, float3.zero, Max, (h, d) => { }));
                 Assert.Throws<System.ArgumentException>(() => raycaster.Cast(new float3(float.NaN, 0f, 0f), new float3(1f, 0f, 0f), Max, (h, d) => { }));
                 Assert.Throws<System.ArgumentException>(() => raycaster.Cast(float3.zero, new float3(1f, 0f, 0f), 0f, (h, d) => { }));
-                Assert.Throws<System.ArgumentNullException>(() => raycaster.Cast(float3.zero, new float3(1f, 0f, 0f), Max, null));
+                Assert.Throws<System.ArgumentNullException>(() => raycaster.Cast(float3.zero, new float3(1f, 0f, 0f), Max, (System.Action<bool, float>)null));
+                Assert.Throws<System.ArgumentNullException>(() => raycaster.Cast(float3.zero, new float3(1f, 0f, 0f), Max, (System.Action<AvbdRayHit>)null));
+            }
+        }
+
+        [Test]
+        public void Cast_NamesTheNearestBody_AndGivesTheHitPointAndTheDirectionInItsFrame()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(16))
+            using (var raycaster = new AvbdRaycaster(buffers))
+            {
+                buffers.Spawn(BodyDescriptor.Box(new float3(2f), 1f, new float3(0f, 0f, 10f)));
+                BodyDescriptor turned = BodyDescriptor.Box(new float3(2f), 1f, new float3(0f, 0f, 5f));
+                turned.rotation = quaternion.RotateY(math.radians(90f)); // local +x points along world -z
+                BodyHandle nearest = buffers.Spawn(turned);
+
+                AvbdRayHit hit = Decoded(buffers, raycaster, new float3(0f), new float3(0f, 0f, 3f), Max, buffers.RemovalSerial);
+
+                Assert.IsTrue(hit.hit);
+                Assert.AreEqual(4f, hit.distance, 1e-4f);
+                Assert.AreEqual(nearest, hit.body);
+                // The hit is on the face at world z = 4, 1 m in front of the center: local +x. The ray runs along world +z: local -x.
+                Assert.AreEqual(0f, math.distance(new float3(1f, 0f, 0f), hit.localPoint), 1e-4f, "local point " + hit.localPoint);
+                Assert.AreEqual(0f, math.distance(new float3(-1f, 0f, 0f), hit.localDirection), 1e-4f, "local direction " + hit.localDirection);
+            }
+        }
+
+        [Test]
+        public void Cast_AMiss_HasNoBody_AndARemovedBodyIsNotNamed()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(16))
+            using (var raycaster = new AvbdRaycaster(buffers))
+            {
+                BodyHandle h = buffers.Spawn(BodyDescriptor.Box(new float3(2f), 1f, new float3(0f, 0f, 5f)));
+
+                AvbdRayHit miss = Decoded(buffers, raycaster, new float3(0f), new float3(0f, 1f, 0f), Max, buffers.RemovalSerial);
+                Assert.IsFalse(miss.hit);
+                Assert.IsFalse(miss.body.IsValid);
+
+                // The answer is computed with the body in place, and the body is removed before the answer is read: the hit stays, the body is not named.
+                uint removalsAtCast = buffers.RemovalSerial;
+                raycaster.DispatchCast(new float3(0f), new float3(0f, 0f, 1f), Max);
+                Assert.IsTrue(buffers.Remove(h));
+                AvbdRayHit late = Decode(raycaster, Max, buffers, removalsAtCast);
+                Assert.IsTrue(late.hit);
+                Assert.AreEqual(4f, late.distance, 1e-4f);
+                Assert.IsFalse(late.body.IsValid, "the body was removed after the cast");
             }
         }
 
         // ---- helpers --------------------------------------------------------------------------------------------
 
+        // Runs the cast and decodes the whole result at once.
+        static AvbdRayHit Decoded(AvbdBodyBuffers buffers, AvbdRaycaster raycaster, float3 origin, float3 direction, float max, uint removalsAtCast)
+        {
+            raycaster.DispatchCast(origin, direction, max);
+            return Decode(raycaster, max, buffers, removalsAtCast);
+        }
+
+        static AvbdRayHit Decode(AvbdRaycaster raycaster, float max, AvbdBodyBuffers buffers, uint removalsAtCast)
+        {
+            var words = new uint[AvbdRaycaster.ResultWords];
+            raycaster.ResultBuffer.GetData(words);
+            using (var native = new NativeArray<uint>(words, Allocator.Temp))
+                return AvbdRaycaster.Decode(native, max, buffers, removalsAtCast);
+        }
+
         // Runs the cast and reads the one-word result back at once (the tests do not wait for frames). NaN means a miss.
         static float Cast(AvbdBodyBuffers buffers, AvbdRaycaster raycaster, float3 origin, float3 direction, float max)
         {
             raycaster.DispatchCast(origin, direction, max);
-            var bits = new uint[1];
+            var bits = new uint[AvbdRaycaster.ResultWords];
             raycaster.ResultBuffer.GetData(bits);
             return bits[0] == math.asuint(max) ? float.NaN : math.asfloat(bits[0]);
         }

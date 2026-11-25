@@ -1,8 +1,11 @@
-// Ray against every body's box, on the GPU. The nearest hit distance is kept as the bits of a float in a one-element uint buffer: for floats
-// from 0 up the bits sort like the values, so InterlockedMin finds the nearest hit without a sort. Used by AvbdRaycaster.
+// Ray against every body's box, on the GPU. The nearest hit distance is kept as the bits of a float in a uint buffer: for floats
+// from 0 up the bits sort like the values, so InterlockedMin finds the nearest hit without a sort. Then the body that was hit is found, and the hit
+// point and the ray direction in its frame. Used by AvbdRaycaster.
 
 #pragma kernel Clear
 #pragma kernel Cast
+#pragma kernel CastBody
+#pragma kernel Finish
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
@@ -12,7 +15,7 @@ StructuredBuffer<BodyPoseRecord>  _BodyPose;
 StructuredBuffer<BodyShapeRecord> _BodyShape;
 StructuredBuffer<uint>             _BodyFlags;
 
-RWStructuredBuffer<uint> _RayHit; // [0]: the bits of the nearest hit distance, or of the maximum distance if nothing was hit
+RWStructuredBuffer<uint> _RayHit; // 8 words, see below
 
 float4 _RayOrigin;    // xyz: origin, w: the farthest distance that counts
 float4 _RayDirection; // xyz: unit direction
@@ -20,23 +23,36 @@ float4 _RayDirection; // xyz: unit direction
 uint _Base;
 uint _Count; // slots to process: [0, _Count)
 
+// Result layout (_RayHit, 8 words = 32 B, read back by AvbdRaycaster):
+//   [0]    the bits of the nearest hit distance, or of the maximum distance if nothing was hit   (Clear, Cast)
+//   [1]    the slot of the body that was hit, 0xFFFFFFFF if none                                 (CastBody)
+//   [2..4] the hit point in the frame of that body (origin at its center of mass, its axes), as float bits   (Finish)
+//   [5..7] the unit direction of the ray in that frame, as float bits                                       (Finish)
+// Cast finds the nearest distance without a sort (InterlockedMin on the bits), CastBody finds which body it was (the lowest slot among equal
+// distances), Finish computes the local point and direction of that one body. Three dispatches, in order.
+#define AVBD_RAY_NO_BODY 0xFFFFFFFFu
+
 [numthreads(1, 1, 1)]
 void Clear(uint3 id : SV_DispatchThreadID)
 {
     _RayHit[0] = asuint(_RayOrigin.w);
+    _RayHit[1] = AVBD_RAY_NO_BODY;
+    [unroll]
+    for (uint i = 2u; i < 8u; i++)
+        _RayHit[i] = 0u;
 }
 
-[numthreads(AVBD_GROUP_SIZE, 1, 1)]
-void Cast(uint3 id : SV_DispatchThreadID)
+// The ray against the box of a body, in the box's frame, where the box is axis-aligned and centered at the origin: the slab method. On a hit, t is the
+// distance along the ray (0 if it starts inside the box), localHit the hit point and localDirection the unit direction, both in the box's frame.
+bool RayBox(uint slot, out float t, out float3 localHit, out float3 localDirection)
 {
-    uint slot = _Base + id.x;
-    if (slot >= _Count)
-        return;
+    t = 0.0;
+    localHit = float3(0.0, 0.0, 0.0);
+    localDirection = float3(0.0, 0.0, 0.0);
 
     if (_BodyFlags[slot] & AVBD_BODY_FLAG_FREE)
-        return;
+        return false;
 
-    // The ray in the box's frame, where the box is axis-aligned and centered at the origin: the slab method.
     BodyPoseRecord s = _BodyPose[slot];
     float4 inverse = AvbdQuatConjugate(s.rotation);
     float3 o = AvbdQuatRotate(inverse, _RayOrigin.xyz - s.position.xyz);
@@ -51,7 +67,7 @@ void Cast(uint3 id : SV_DispatchThreadID)
         if (abs(d[axis]) < 1e-8)
         {
             if (abs(o[axis]) > halfSize[axis])
-                return; // parallel to the slab and outside it
+                return false; // parallel to the slab and outside it
             continue;
         }
         float t1 = (-halfSize[axis] - o[axis]) / d[axis];
@@ -61,9 +77,61 @@ void Cast(uint3 id : SV_DispatchThreadID)
     }
 
     if (tNear > tFar || tFar < 0.0)
-        return; // misses, or the box is behind the ray
+        return false; // misses, or the box is behind the ray
 
-    float t = max(tNear, 0.0); // a ray that starts inside the box hits it at 0
-    if (t < _RayOrigin.w)
+    t = max(tNear, 0.0); // a ray that starts inside the box hits it at 0
+    if (!(t < _RayOrigin.w))
+        return false;
+
+    localHit = o + d * t;
+    localDirection = d;
+    return true;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void Cast(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    float t;
+    float3 localHit, localDirection;
+    if (RayBox(slot, t, localHit, localDirection))
         InterlockedMin(_RayHit[0], asuint(t));
+}
+
+// Which body gave the nearest distance. The test is within 2 ulps of the minimum and not an exact match, so that a compiler that rounds the same
+// arithmetic differently in the two kernels cannot lose the body; the lowest slot wins, so the answer does not depend on the order of the threads.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void CastBody(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    float t;
+    float3 localHit, localDirection;
+    if (RayBox(slot, t, localHit, localDirection) && asuint(t) <= _RayHit[0] + 2u)
+        InterlockedMin(_RayHit[1], slot);
+}
+
+[numthreads(1, 1, 1)]
+void Finish(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _RayHit[1];
+    if (slot == AVBD_RAY_NO_BODY)
+        return;
+
+    float t;
+    float3 localHit, localDirection;
+    if (!RayBox(slot, t, localHit, localDirection))
+        return;
+
+    _RayHit[2] = asuint(localHit.x);
+    _RayHit[3] = asuint(localHit.y);
+    _RayHit[4] = asuint(localHit.z);
+    _RayHit[5] = asuint(localDirection.x);
+    _RayHit[6] = asuint(localDirection.y);
+    _RayHit[7] = asuint(localDirection.z);
 }

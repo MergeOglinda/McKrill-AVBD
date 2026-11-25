@@ -49,6 +49,10 @@ namespace McKrill.Avbd
 
         public bool IsAlive(BodyHandle handle) => allocator.IsAlive(handle);
 
+        public uint FreeSerial => allocator.FreeSerial;
+
+        public bool TryGetHandleSince(int slot, uint since, out BodyHandle handle) => allocator.TryGetHandleSince(slot, since, out handle);
+
         // ---- edits ------------------------------------------------------------------------------------
 
         /// <summary>

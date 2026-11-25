@@ -504,6 +504,91 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void Gpu_ExplosionRelativeToABody_GoesOffAtThatPointOfTheBody_AsAWorldExplosionThere()
+        {
+            RequireCompute();
+            var rng = new System.Random(17);
+            AvbdSolverSettings settings = AvbdSolverSettings.Default;
+            var oracle = new CpuBodyArrays(Capacity);
+            var applied = new List<EditCommand>();
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            {
+                BodyHandle anchor = BodyHandle.Invalid;
+                for (int i = 0; i < 40; i++)
+                {
+                    BodyDescriptor d = BodyDescriptor.Box(new float3(F(rng, 0.5f, 1.5f), F(rng, 0.5f, 1.5f), F(rng, 0.5f, 1.5f)), F(rng, 0.5f, 2f), V(rng, 6f));
+                    d.rotation = quaternion.EulerXYZ(F(rng, 0f, 6f), F(rng, 0f, 6f), F(rng, 0f, 6f));
+                    BodyHandle h = buffers.Spawn(d);
+                    if (i == 5)
+                        anchor = h;
+                }
+                buffers.ApplyEdits(applied);
+                oracle.Apply(applied);
+
+                // The center is a point of a turned body that is not at its own center of mass: the world position follows from its pose.
+                float3 local = new float3(0.4f, -0.3f, 0.2f);
+                BodyStateRecord a = oracle.State[anchor.Slot];
+                float3 world = a.position.xyz + math.rotate(new quaternion(a.rotation), local);
+
+                using (var solver = new AvbdSolver(buffers, settings))
+                {
+                    Assert.IsTrue(solver.Explode(anchor, local, 8f, 30f));
+                    Assert.AreEqual(1, solver.PendingExplosionCount);
+                    var blasts = new[] { Blast(world, 8f, 30f, 0u) };
+
+                    CpuPredict.Run(oracle, settings, buffers.HighWaterMark, blasts, blasts.Length);
+                    solver.DispatchPredict();
+                    Assert.AreEqual(0, solver.PendingExplosionCount);
+                }
+
+                var motion = new BodyMotionRecord[Capacity];
+                buffers.Motion.GetData(motion);
+                int moved = 0;
+                for (int slot = 0; slot < buffers.HighWaterMark; slot++)
+                {
+                    AssertNear(oracle.Motion[slot].linearVel, motion[slot].linearVel, 1e-3f, "slot " + slot + " velocity");
+                    AssertNear(oracle.Motion[slot].angularVel, motion[slot].angularVel, 1e-2f, "slot " + slot + " angular velocity");
+                    if (math.any(oracle.Motion[slot].linearVel != float4.zero))
+                        moved++;
+                }
+                Assert.Greater(moved, 3, "the scene is meant to have bodies in reach");
+            }
+        }
+
+        [Test]
+        public void Gpu_ExplosionRelativeToABody_IsDropped_ForAStaleHandle_AndForABodyRemovedBeforeTheStep()
+        {
+            RequireCompute();
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            using (var solver = new AvbdSolver(buffers, AvbdSolverSettings.Default))
+            {
+                BodyHandle gone = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(0f, 0f, 0f)));
+                BodyHandle other = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(1f, 0f, 0f)));
+                BodyHandle removedLater = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(2f, 0f, 0f)));
+                buffers.ApplyEdits();
+                Assert.IsTrue(buffers.Remove(gone));
+
+                Assert.IsFalse(solver.Explode(gone, float3.zero, 5f, 10f), "a removed body");
+                Assert.IsFalse(solver.Explode(BodyHandle.Invalid, float3.zero, 5f, 10f), "no body");
+                Assert.AreEqual(0, solver.PendingExplosionCount);
+                Assert.Throws<ArgumentException>(() => solver.Explode(other, new float3(float.NaN, 0f, 0f), 5f, 10f));
+                Assert.Throws<ArgumentException>(() => solver.Explode(other, float3.zero, 0f, 10f));
+
+                // Queued while it was alive, removed before the step applies it: nothing is hit (not even the bodies next to it).
+                Assert.IsTrue(solver.Explode(removedLater, float3.zero, 5f, 10f));
+                Assert.IsTrue(buffers.Remove(removedLater));
+                buffers.ApplyEdits();
+                solver.DispatchPredict();
+
+                var motion = new BodyMotionRecord[Capacity];
+                buffers.Motion.GetData(motion);
+                for (int slot = 0; slot < buffers.HighWaterMark; slot++)
+                    Assert.IsTrue(math.all(motion[slot].linearVel == float4.zero), "slot " + slot + " must not have been hit");
+            }
+        }
+
+        [Test]
         public void Gpu_Explosion_IsOneShot_AndTheNextPredictLeavesTheVelocityAlone()
         {
             RequireCompute();
