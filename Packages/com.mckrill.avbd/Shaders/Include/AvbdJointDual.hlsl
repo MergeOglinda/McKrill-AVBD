@@ -9,7 +9,17 @@
 // The including shader declares, before including this file:
 //   RWStructuredBuffer<ConstraintRecord> _Constraints;
 //   RWStructuredBuffer<PlasticRecord>    _Plastic;     (only with AVBD_PLASTIC_JOINTS)
+//   StructuredBuffer<FractureRecord>     _Fracture;
 // and includes AvbdConstraintRecords.hlsl, AvbdPlasticRecords.hlsl, AvbdSolverParams.hlsl and AvbdMath.hlsl.
+
+// What the dual update reads of the plastic record: the limits (every plastic joint) and the rest rotation (an angular one). The caller requests them with
+// AvbdJointPlasticRead as soon as it has the record, together with the poses of the two bodies, and hands them to AvbdJointDual: read inside the update, after
+// the poses have been used, they cost one more round trip to memory, because a use of the poses has to wait for them before the next read can be issued.
+struct JointPlasticRead
+{
+    float4 limits; // x = angular yield, y = bend limit, z = linear yield, w = stretch limit
+    float4 rest;   // rest rotation of the angular row (the identity unless the joint is plastic)
+};
 
 // What a dual update did to the record, for AvbdJointDualStore.
 struct JointDualResult
@@ -19,9 +29,39 @@ struct JointDualResult
     bool yieldedLin;   // the linear row yielded: the anchor on A and C0 of the linear row changed
 };
 
+// The fracture thresholds of joint `index`: x = linear, y = angular. Zero for a joint that is not fracturable, which reads nothing. The caller requests
+// them with the poses and hands them to AvbdJointDual, like the plastic data.
+float2 AvbdJointFractureRead(uint index, uint flags)
+{
+    float2 threshold = float2(0.0, 0.0);
+    if (flags & (AVBD_CONSTRAINT_FLAG_FRACTURABLE | AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN))
+    {
+        FractureRecord r = _Fracture[index >> 2u];
+        float4 pair = (index & 2u) ? r.b : r.a;
+        threshold = (index & 1u) ? pair.zw : pair.xy;
+    }
+    return threshold;
+}
+
+JointPlasticRead AvbdJointPlasticRead(ConstraintRecord c, uint flags)
+{
+    JointPlasticRead r;
+    r.limits = float4(0.0, 0.0, 0.0, 0.0);
+    r.rest = float4(0.0, 0.0, 0.0, 1.0);
+#if defined(AVBD_PLASTIC_JOINTS)
+    if (flags & (AVBD_CONSTRAINT_FLAG_PLASTIC | AVBD_CONSTRAINT_FLAG_PLASTIC_LIN))
+    {
+        r.limits = _Plastic[c.ident.w].limits;
+        if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC)
+            r.rest = _Plastic[c.ident.w].rest;
+    }
+#endif
+    return r;
+}
+
 // Updates `c`, a joint that is not broken, for the poses of its two bodies (a world body A is the origin with the identity rotation). `rest` returns the
 // rest rotation of the angular row (the identity unless the joint is plastic): what the primal stage needs next. Writes nothing.
-JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA, float4 rotA, float3 posB, float4 rotB, out float4 rest)
+JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA, float4 rotA, float3 posB, float4 rotB, JointPlasticRead plasticRead, float2 fracture, out float4 rest)
 {
     float alpha = AVBD_ALPHA;
     bool hasA = c.ident.x != AVBD_INVALID;
@@ -29,23 +69,22 @@ JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA,
     float3 anchorA = hasA ? AvbdQuatRotate(rotA, c.anchorA.xyz) + posA : c.anchorA.xyz;
     float3 anchorB = AvbdQuatRotate(rotB, c.anchorB.xyz) + posB;
 
-    float3 penaltyLin = c.penaltyLin.xyz;
-    float3 penaltyAng = c.penaltyAng.xyz;
-    float3 lambdaLin = c.lambdaLin.xyz;
-    float3 lambdaAng = c.lambdaAng.xyz;
+    float3 penaltyLin = AvbdPenaltyLin(c);
+    float3 penaltyAng = AvbdPenaltyAng(c);
+    float3 lambdaLin = AvbdLambdaLin(c);
+    float3 lambdaAng = AvbdLambdaAng(c);
+    float fractureLin = fracture.x; // thresholds of the multipliers; read only by a joint with the FRACTURABLE flags
+    float fractureAng = fracture.y;
 
     rest = float4(0.0, 0.0, 0.0, 1.0);
 #if defined(AVBD_PLASTIC_JOINTS)
-    // Of the 64 B plastic record only the limits (every plastic joint) and the rest rotation (an angular one) are read here: restStart and the anchor origin
-    // (reserved) are read in the branches that need them, which a joint takes only in the step it breaks or yields, so most calls read half the record.
-    float4 limits = float4(0.0, 0.0, 0.0, 0.0); // x = angular yield, y = bend limit, z = linear yield, w = stretch limit
+    // Of the 64 B plastic record only the limits (every plastic joint) and the rest rotation (an angular one) are read, by the caller (JointPlasticRead):
+    // restStart and the anchor origin (reserved) are read in the branches that need them, which a joint takes only in the step it breaks or yields, so
+    // most calls read half the record.
+    float4 limits = plasticRead.limits; // x = angular yield, y = bend limit, z = linear yield, w = stretch limit
     bool isPlastic = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) != 0u;
-    if (flags & (AVBD_CONSTRAINT_FLAG_PLASTIC | AVBD_CONSTRAINT_FLAG_PLASTIC_LIN))
-    {
-        limits = _Plastic[c.ident.w].limits;
-        if (isPlastic)
-            rest = _Plastic[c.ident.w].rest;
-    }
+    if (isPlastic)
+        rest = plasticRead.rest;
     bool yielded = false;
     bool yieldedLin = false;
 #endif
@@ -76,7 +115,7 @@ JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA,
         {
             // Squared norms: no square root unless the row yields.
             float forceSq = dot(lambdaLin, lambdaLin);
-            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && forceSq > c.reserved.x * c.reserved.x;
+            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && forceSq > fractureLin * fractureLin;
             if (forceSq > limits.z * limits.z && !fractures)
             {
                 lambdaLin *= limits.z * rsqrt(forceSq);
@@ -112,7 +151,7 @@ JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA,
         if (isPlastic)
         {
             float forceSq = dot(lambdaAng, lambdaAng);
-            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && forceSq > c.c0Ang.w * c.c0Ang.w;
+            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && forceSq > fractureAng * fractureAng;
             if (forceSq > limits.x * limits.x && !fractures)
             {
                 lambdaAng *= limits.x * rsqrt(forceSq);
@@ -148,8 +187,8 @@ JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA,
 
     // Fracture tests of the two rows, and the bend and stretch limits of a plastic joint
     bool breaks = bentOff || stretchedOff
-        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && dot(lambdaAng, lambdaAng) > c.c0Ang.w * c.c0Ang.w)
-        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && dot(lambdaLin, lambdaLin) > c.reserved.x * c.reserved.x);
+        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && dot(lambdaAng, lambdaAng) > fractureAng * fractureAng)
+        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && dot(lambdaLin, lambdaLin) > fractureLin * fractureLin);
     if (breaks)
     {
         penaltyLin = float3(0.0, 0.0, 0.0);
@@ -167,10 +206,7 @@ JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA,
     }
 #endif
 
-    c.penaltyLin.xyz = penaltyLin;
-    c.penaltyAng.xyz = penaltyAng;
-    c.lambdaLin.xyz = lambdaLin;
-    c.lambdaAng.xyz = lambdaAng;
+    AvbdSetConstraintState(c, penaltyLin, penaltyAng, lambdaLin, lambdaAng);
 
     JointDualResult result;
     result.breaks = breaks;
@@ -184,16 +220,15 @@ JointDualResult AvbdJointDual(inout ConstraintRecord c, uint flags, float3 posA,
     return result;
 }
 
-// Write back only what the update can have changed. The four state words (the penalties and multipliers, which are next to each other in the record)
-// change in every call; the others only in the call in which a joint breaks (the flags), yields in its angle (C0 of the angular row) or yields in its
-// stretch (the anchor on A and C0 of the linear row). Storing the whole 160 B record would write the six unchanged words again on every call of every
-// joint, which is more than half of what this stage writes.
+// Write back only what the update can have changed. The three state words (the penalties and multipliers, the last 48 B of the record) change in every
+// call; the others only in the call in which a joint breaks (the flags), yields in its angle (C0 of the angular row) or yields in its stretch (the anchor
+// on A and C0 of the linear row). Storing the whole 128 B record would write the five unchanged words again on every call of every joint, which is more
+// than half of what this stage writes. The w of c0Ang is the mark of the fused dual update: the caller that sets it does so after this store.
 void AvbdJointDualStore(uint index, ConstraintRecord c, JointDualResult result, float4 rest)
 {
-    _Constraints[index].penaltyLin = c.penaltyLin;
-    _Constraints[index].penaltyAng = c.penaltyAng;
-    _Constraints[index].lambdaLin = c.lambdaLin;
-    _Constraints[index].lambdaAng = c.lambdaAng;
+    _Constraints[index].state0 = c.state0;
+    _Constraints[index].state1 = c.state1;
+    _Constraints[index].state2 = c.state2;
     if (result.breaks)
         _Constraints[index].ident.z = c.ident.z;
 #if defined(AVBD_PLASTIC_JOINTS)

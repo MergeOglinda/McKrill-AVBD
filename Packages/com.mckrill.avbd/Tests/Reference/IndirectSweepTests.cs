@@ -87,11 +87,11 @@ namespace McKrill.Avbd.Tests
 
                 // The buckets fill [start, start + size) of every color with that color's bodies only.
                 uint[] bucketed = constraints.ReadColorBodies();
-                var meta = new BodyMetaRecord[256];
-                buffers.Meta.GetData(meta);
+                var gpuColors = new uint[256];
+                buffers.Color.GetData(gpuColors);
                 for (int c = 0; c < 2; c++)
                     for (int k = 0; k < schedule.Counts[c]; k++)
-                        Assert.AreEqual((uint)c, meta[bucketed[schedule.Starts[c] + k]].state.x, "color " + c + ", entry " + k);
+                        Assert.AreEqual((uint)c, gpuColors[bucketed[schedule.Starts[c] + k]], "color " + c + ", entry " + k);
             }
         }
 

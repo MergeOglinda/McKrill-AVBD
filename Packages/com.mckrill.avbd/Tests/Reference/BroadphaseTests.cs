@@ -450,9 +450,9 @@ namespace McKrill.Avbd.Tests
                 // lists. With contacts the step does that (AvbdConstraintBuffers reads the broken flags back and RefreshContactTopology
                 // drops the joint), which is the reference solver's timing (it removes a broken joint one step after it broke).
                 var records = new ConstraintRecord[constraints.Records.count];
-                constraints.Records.GetData(records);
+                constraints.ReadRecords(records);
                 records[0].ident.z |= (uint)ConstraintFlags.Broken;
-                constraints.Records.SetData(records);
+                constraints.WriteRecords(records);
                 broadphase.Run(buffers, constraints);
                 AssertSameSets(expected, ToSet(broadphase.ReadPairs()), "after the joint broke");
 
@@ -528,6 +528,39 @@ namespace McKrill.Avbd.Tests
                 AssertSameSets(CpuBroadphase.Pairs(ReadBodies(buffers), scene.bodyCount, scene.constraints, scene.constraintCount), packed, "packed");
                 Assert.GreaterOrEqual(packed.Count, first.Count);
                 Assert.IsFalse(first.SetEquals(packed), "the bodies moved, the pairs must change");
+            }
+        }
+
+        [Test]
+        public void Gpu_StoresTheBoundingSphereOfEveryLiveBody()
+        {
+            RequireCompute();
+            var solver = new ReferenceSolver();
+            DenseRandom(solver, 77, 100);
+            SceneArrays scene = ConstraintTestScenes.FromReference(solver, Capacity);
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 128))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), Capacity, BigBin, BigBin))
+            {
+                Fill(buffers, constraints, scene);
+                Assert.AreEqual(AvbdBroadphase.SphereStride, broadphase.Spheres.stride);
+                Assert.AreEqual(Capacity, broadphase.Spheres.count);
+
+                broadphase.Run(buffers, constraints);
+                var spheres = new float4[Capacity];
+                broadphase.Spheres.GetData(spheres);
+                CpuBodyArrays bodies = ReadBodies(buffers);
+
+                for (int s = 0; s < scene.bodyCount; s++)
+                {
+                    Assert.IsFalse(bodies.IsFree(s), "slot " + s);
+                    float3 position = bodies.State[s].position.xyz;
+                    Assert.AreEqual(position.x, spheres[s].x, "x of slot " + s);
+                    Assert.AreEqual(position.y, spheres[s].y, "y of slot " + s);
+                    Assert.AreEqual(position.z, spheres[s].z, "z of slot " + s);
+                    Assert.AreEqual(CpuBroadphase.Radius(bodies, s), spheres[s].w, "radius of slot " + s);
+                }
             }
         }
 
@@ -819,6 +852,7 @@ namespace McKrill.Avbd.Tests
             buffers.Mass.GetData(bodies.Mass);
             buffers.Shape.GetData(bodies.Shape);
             buffers.Meta.GetData(bodies.Meta);
+            buffers.Flags.GetData(bodies.Flags);
             return bodies;
         }
 

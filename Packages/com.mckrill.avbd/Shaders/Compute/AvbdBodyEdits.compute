@@ -15,6 +15,8 @@ RWStructuredBuffer<BodyMotionRecord>   _BodyMotion;
 RWStructuredBuffer<BodyShapeRecord>    _BodyShape;
 RWStructuredBuffer<BodyMetaRecord>     _BodyMeta;
 RWStructuredBuffer<BodyRangeRecord>    _BodyRange;
+RWStructuredBuffer<uint>               _BodyFlags;    // flags | kind << 24 of every body (not in _BodyMeta)
+RWStructuredBuffer<uint>               _BodyColor;    // graph color of every body (not in _BodyMeta); AVBD_INVALID until stage C colors the body
 StructuredBuffer<EditCommand>          _Commands;
 
 uint _Capacity;     // number of body slots
@@ -62,9 +64,12 @@ void WriteFreeSlot(uint slot)
     sh.sizeFriction = float4(0, 0, 0, 0);
     _BodyShape[slot] = sh;
 
+    _BodyFlags[slot] = AvbdFreeFlagsWord(AVBD_KIND_BOX << AVBD_BODY_KIND_SHIFT);
+    _BodyColor[slot] = AVBD_INVALID;
+
     BodyMetaRecord meta;
-    meta.ident = uint4(AvbdFreeFlagsWord(AVBD_KIND_BOX << AVBD_BODY_KIND_SHIFT), 0, AVBD_INVALID, 0);
-    meta.state = uint4(AVBD_INVALID, 0, 0, 0);
+    meta.ident = uint4(0, 0, AVBD_INVALID, 0);
+    meta.state = uint4(0, 0, 0, 0);
     _BodyMeta[slot] = meta;
 
     BodyRangeRecord r;
@@ -107,9 +112,12 @@ void ApplySpawn(uint slot, EditCommand c)
     _BodyShape[slot] = sh;
 
     // The slot is live now: clear the Free bit, keep the kind and the Kinematic bit from the command.
+    _BodyFlags[slot] = c.meta.x & ~AVBD_BODY_FLAG_FREE;
+    _BodyColor[slot] = AVBD_INVALID;
+
     BodyMetaRecord meta;
-    meta.ident = uint4(c.meta.x & ~AVBD_BODY_FLAG_FREE, c.meta.y, c.meta.z, 0);
-    meta.state = uint4(AVBD_INVALID, 0, 0, 0);
+    meta.ident = uint4(0, c.meta.y, c.meta.z, 0);
+    meta.state = uint4(0, 0, 0, 0);
     _BodyMeta[slot] = meta;
 
     BodyRangeRecord r;
@@ -123,9 +131,12 @@ void ApplyRemove(uint slot)
     m.momentMass = float4(0, 0, 0, 0);
     _BodyMass[slot] = m;
 
-    BodyMetaRecord meta = _BodyMeta[slot];
-    meta.ident = uint4(AvbdFreeFlagsWord(meta.ident.x), 0, AVBD_INVALID, 0);
-    meta.state = uint4(AVBD_INVALID, 0, 0, 0);
+    _BodyFlags[slot] = AvbdFreeFlagsWord(_BodyFlags[slot]);
+    _BodyColor[slot] = AVBD_INVALID;
+
+    BodyMetaRecord meta;
+    meta.ident = uint4(0, 0, AVBD_INVALID, 0);
+    meta.state = uint4(0, 0, 0, 0);
     _BodyMeta[slot] = meta;
 
     BodyRangeRecord r;
@@ -176,17 +187,18 @@ void ApplySet(uint slot, EditCommand c)
         _BodyMass[slot] = m;
     }
 
-    if (fields & (AVBD_EDIT_FIELD_GROUPMASK | AVBD_EDIT_FIELD_APPEARANCE | AVBD_EDIT_FIELD_KINEMATIC))
+    if (fields & (AVBD_EDIT_FIELD_GROUPMASK | AVBD_EDIT_FIELD_APPEARANCE))
     {
         BodyMetaRecord meta = _BodyMeta[slot];
         if (fields & AVBD_EDIT_FIELD_GROUPMASK)
             meta.ident.y = c.meta.y;
         if (fields & AVBD_EDIT_FIELD_APPEARANCE)
             meta.ident.z = c.meta.z;
-        if (fields & AVBD_EDIT_FIELD_KINEMATIC)
-            meta.ident.x = (meta.ident.x & ~AVBD_BODY_FLAG_KINEMATIC) | (c.meta.x & AVBD_BODY_FLAG_KINEMATIC);
         _BodyMeta[slot] = meta;
     }
+
+    if (fields & AVBD_EDIT_FIELD_KINEMATIC)
+        _BodyFlags[slot] = (_BodyFlags[slot] & ~AVBD_BODY_FLAG_KINEMATIC) | (c.meta.x & AVBD_BODY_FLAG_KINEMATIC);
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]

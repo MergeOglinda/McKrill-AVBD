@@ -29,6 +29,9 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(BodyRecordStrides.Shape, UnsafeUtility.SizeOf<BodyShapeRecord>());
             Assert.AreEqual(BodyRecordStrides.Meta, UnsafeUtility.SizeOf<BodyMetaRecord>());
             Assert.AreEqual(BodyRecordStrides.Range, UnsafeUtility.SizeOf<BodyRangeRecord>());
+            Assert.AreEqual(BodyRecordStrides.Solve, UnsafeUtility.SizeOf<BodySolveRecord>());
+            Assert.AreEqual(sizeof(uint), BodyRecordStrides.Flags, "the flags word is one uint per body");
+            Assert.AreEqual(sizeof(uint), BodyRecordStrides.Color, "the graph color is one uint per body");
             Assert.AreEqual(EditCommandStride.Size, UnsafeUtility.SizeOf<EditCommand>());
         }
 
@@ -38,7 +41,7 @@ namespace McKrill.Avbd.Tests
             int[] all =
             {
                 BodyRecordStrides.State, BodyRecordStrides.Pose, BodyRecordStrides.Inertial, BodyRecordStrides.Mass, BodyRecordStrides.Motion,
-                BodyRecordStrides.Shape, BodyRecordStrides.Meta, BodyRecordStrides.Range, EditCommandStride.Size,
+                BodyRecordStrides.Shape, BodyRecordStrides.Meta, BodyRecordStrides.Range, BodyRecordStrides.Solve, EditCommandStride.Size,
             };
             foreach (int stride in all)
             {
@@ -47,7 +50,7 @@ namespace McKrill.Avbd.Tests
             }
 
             // Records the solver stages gather by body id: 16 B or a multiple of 32 B.
-            int[] gathered = { BodyRecordStrides.State, BodyRecordStrides.Pose, BodyRecordStrides.Inertial, BodyRecordStrides.Mass, BodyRecordStrides.Shape, BodyRecordStrides.Range };
+            int[] gathered = { BodyRecordStrides.State, BodyRecordStrides.Pose, BodyRecordStrides.Inertial, BodyRecordStrides.Mass, BodyRecordStrides.Shape, BodyRecordStrides.Range, BodyRecordStrides.Solve };
             foreach (int stride in gathered)
                 Assert.IsTrue(stride == 16 || stride % 32 == 0, "gathered stride " + stride + " breaks rule P3");
         }
@@ -55,9 +58,9 @@ namespace McKrill.Avbd.Tests
         [Test]
         public void Total_IsTheSumOfTheArrays()
         {
-            Assert.AreEqual(256, BodyRecordStrides.Total);
+            Assert.AreEqual(296, BodyRecordStrides.Total);
             Assert.AreEqual(BodyRecordStrides.Total, BodyBufferCapacity.BytesPerBody);
-            Assert.AreEqual(256000L, BodyBufferCapacity.BodyArrayBytes(1000));
+            Assert.AreEqual(296000L, BodyBufferCapacity.BodyArrayBytes(1000));
             Assert.AreEqual(BodyRecordStrides.Largest, Math.Max(
                 Math.Max(BodyRecordStrides.State, BodyRecordStrides.Inertial),
                 Math.Max(Math.Max(BodyRecordStrides.Mass, BodyRecordStrides.Motion),
@@ -174,6 +177,7 @@ namespace McKrill.Avbd.Tests
             AssertStructMatches(records, "BodyShapeRecord", typeof(BodyShapeRecord));
             AssertStructMatches(records, "BodyMetaRecord", typeof(BodyMetaRecord));
             AssertStructMatches(records, "BodyRangeRecord", typeof(BodyRangeRecord));
+            AssertStructMatches(records, "BodySolveRecord", typeof(BodySolveRecord));
             AssertStructMatches(commands, "EditCommand", typeof(EditCommand));
         }
 
@@ -182,10 +186,60 @@ namespace McKrill.Avbd.Tests
         [Test]
         public void ConstraintRecord_HasTheDocumentedSize_AndFollowsRuleP3()
         {
-            Assert.AreEqual(ConstraintRecordStrides.Constraint, UnsafeUtility.SizeOf<ConstraintRecord>());
-            Assert.AreEqual(160, ConstraintRecordStrides.Constraint);
+            // The GPU record is 128 B: eight 16 B words, four whole sectors, one cache line. The CPU form the oracles compute with is the 160 B one.
+            Assert.AreEqual(ConstraintRecordStrides.Constraint, UnsafeUtility.SizeOf<GpuConstraintRecord>());
+            Assert.AreEqual(128, ConstraintRecordStrides.Constraint);
             Assert.AreEqual(0, ConstraintRecordStrides.Constraint % 32, "constraints are gathered by id, so the stride must be a multiple of 32 (rule P3)");
             Assert.Less(ConstraintRecordStrides.Constraint, 2048);
+            Assert.AreEqual(ConstraintRecordStrides.Logical, UnsafeUtility.SizeOf<ConstraintRecord>());
+            Assert.AreEqual(160, ConstraintRecordStrides.Logical);
+
+            // The fracture thresholds of four joints (two floats each) are 32 B.
+            Assert.AreEqual(ConstraintRecordStrides.Fracture, UnsafeUtility.SizeOf<FractureRecord>());
+            Assert.AreEqual(32, ConstraintRecordStrides.Fracture);
+            Assert.AreEqual(0, ConstraintRecordStrides.Fracture % 32, "rule P3");
+        }
+
+        [Test]
+        public void ConstraintRecordCodec_RoundTripsARecord_AndKeepsTheFractureThresholdsOfNeighborsApart()
+        {
+            var record = new ConstraintRecord
+            {
+                ident = new uint4(1u, 2u, ConstraintFlagLayout.Pack(ConstraintFlags.HardLinear | ConstraintFlags.Fracturable, ConstraintKind.Joint), 7u),
+                anchorA = new float4(1f, 2f, 3f, 4f),
+                anchorB = new float4(5f, 6f, 7f, 8f),
+                c0Lin = new float4(9f, 10f, 11f, 12f),
+                c0Ang = new float4(13f, 14f, 15f, 16f),    // w = angular fracture threshold
+                penaltyLin = new float4(17f, 18f, 19f, 0f),
+                penaltyAng = new float4(20f, 21f, 22f, 0f),
+                lambdaLin = new float4(23f, 24f, 25f, 0f),
+                lambdaAng = new float4(26f, 27f, 28f, 0f),
+                reserved = new float4(29f, 0f, 0f, 30f),   // x = linear fracture threshold, w = mark of the fused dual update
+            };
+
+            GpuConstraintRecord gpu = ConstraintRecordCodec.Pack(record);
+            // The words the HLSL reads: the mark takes the w of c0Ang, and the penalties and multipliers are 12 floats in three words with no padding.
+            Assert.AreEqual(new float4(13f, 14f, 15f, 30f), gpu.c0Ang);
+            Assert.AreEqual(new float4(17f, 18f, 19f, 20f), gpu.state0);
+            Assert.AreEqual(new float4(21f, 22f, 23f, 24f), gpu.state1);
+            Assert.AreEqual(new float4(25f, 26f, 27f, 28f), gpu.state2);
+            Assert.AreEqual(record, ConstraintRecordCodec.Unpack(gpu, 29f, 16f));
+
+            // Every joint of a fracture record keeps its own two thresholds.
+            const int joints = 9;
+            var fracture = new FractureRecord[ConstraintRecordCodec.FractureRecordCount(joints)];
+            Assert.AreEqual(3, fracture.Length);
+            for (int j = 0; j < joints; j++)
+                ConstraintRecordCodec.SetFracture(fracture, j, 100f + j, 200f + j);
+            for (int j = 0; j < joints; j++)
+            {
+                ConstraintRecordCodec.GetFracture(fracture, j, out float linear, out float angular);
+                Assert.AreEqual(100f + j, linear, "linear threshold of joint " + j);
+                Assert.AreEqual(200f + j, angular, "angular threshold of joint " + j);
+            }
+            // The lanes the HLSL picks: joint j is lane j & 3 of record j >> 2, a for lanes 0 and 1 and b for 2 and 3, (linear, angular) pairs.
+            Assert.AreEqual(new float4(104f, 204f, 105f, 205f), fracture[1].a);
+            Assert.AreEqual(new float4(106f, 206f, 107f, 207f), fracture[1].b);
         }
 
         [Test]
@@ -230,7 +284,9 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)ConstraintKind.Joint, d["AVBD_CONSTRAINT_KIND_JOINT"]);
             Assert.AreEqual((uint)ConstraintKind.Spring, d["AVBD_CONSTRAINT_KIND_SPRING"]);
 
-            AssertStructMatches(ReadInclude("AvbdConstraintRecords.hlsl"), "ConstraintRecord", typeof(ConstraintRecord));
+            // The HLSL record is the GPU form (128 B), not the CPU form the oracles use.
+            AssertStructMatches(ReadInclude("AvbdConstraintRecords.hlsl"), "ConstraintRecord", typeof(GpuConstraintRecord));
+            AssertStructMatches(ReadInclude("AvbdConstraintRecords.hlsl"), "FractureRecord", typeof(FractureRecord));
         }
 
         [Test]
@@ -266,6 +322,18 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(0, PlasticRecordStrides.Plastic % 32, "plastic records are gathered by slot, so the stride must be a multiple of 32 (rule P3)");
 
             AssertStructMatches(ReadInclude("AvbdPlasticRecords.hlsl"), "PlasticRecord", typeof(PlasticRecord));
+        }
+
+        [Test]
+        public void PlasticRecord_PutsTheWordsReadEveryIterationInTheFirstSector()
+        {
+            // The primal and dual stages read rest and limits of a plastic joint in every iteration, restStart and reserved only when it yields or breaks:
+            // the first two words are the first 32 B, so a read of the hot half touches one sector (a record starts at a multiple of 64 B).
+            int Offset(string name) => UnsafeUtility.GetFieldOffset(typeof(PlasticRecord).GetField(name));
+            Assert.AreEqual(0, Offset("rest"));
+            Assert.AreEqual(16, Offset("limits"));
+            Assert.AreEqual(32, Offset("restStart"));
+            Assert.AreEqual(48, Offset("reserved"));
         }
 
         [Test]

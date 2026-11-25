@@ -43,7 +43,8 @@ namespace McKrill.Avbd.Tests
                     Assert.AreEqual(before.Motion[h.Slot].angularVel, after.Motion[h.Slot].angularVel);
                     Assert.AreEqual(before.Mass[h.Slot].momentMass, after.Mass[h.Slot].momentMass, "mass and moments");
                     Assert.AreEqual(before.Shape[h.Slot].sizeFriction, after.Shape[h.Slot].sizeFriction, "shape");
-                    Assert.AreEqual(before.Meta[h.Slot].ident, after.Meta[h.Slot].ident, "flags and group mask");
+                    Assert.AreEqual(before.Meta[h.Slot].ident, after.Meta[h.Slot].ident, "group mask");
+                    Assert.AreEqual(before.Flags[h.Slot], after.Flags[h.Slot], "flags");
                 }
             }
         }
@@ -209,7 +210,8 @@ namespace McKrill.Avbd.Tests
                     Assert.AreEqual(before.State[h.Slot].rotation, after.State[h.Slot].rotation);
                     Assert.AreEqual(before.Mass[h.Slot].momentMass, after.Mass[h.Slot].momentMass, "mass and moments");
                     Assert.AreEqual(before.Shape[h.Slot].sizeFriction, after.Shape[h.Slot].sizeFriction, "shape");
-                    Assert.AreEqual(before.Meta[h.Slot].ident, after.Meta[h.Slot].ident, "flags and group mask");
+                    Assert.AreEqual(before.Meta[h.Slot].ident, after.Meta[h.Slot].ident, "group mask");
+                    Assert.AreEqual(before.Flags[h.Slot], after.Flags[h.Slot], "flags");
                 }
                 Assert.AreEqual(before.Motion[other.Slot].linearVel, after.Motion[other.Slot].linearVel, "another group keeps its velocity");
             }
@@ -301,6 +303,7 @@ namespace McKrill.Avbd.Tests
             public BodyMassRecord[] Mass;
             public BodyShapeRecord[] Shape;
             public BodyMetaRecord[] Meta;
+            public uint[] Flags;
         }
 
         static Snapshot Read(AvbdBodyBuffers buffers)
@@ -312,6 +315,7 @@ namespace McKrill.Avbd.Tests
                 Mass = new BodyMassRecord[buffers.Capacity],
                 Shape = new BodyShapeRecord[buffers.Capacity],
                 Meta = new BodyMetaRecord[buffers.Capacity],
+                Flags = new uint[buffers.Capacity],
             };
             buffers.State.GetData(s.State);
             PoseMirror.Assert(buffers, "after a move");
@@ -319,6 +323,7 @@ namespace McKrill.Avbd.Tests
             buffers.Mass.GetData(s.Mass);
             buffers.Shape.GetData(s.Shape);
             buffers.Meta.GetData(s.Meta);
+            buffers.Flags.GetData(s.Flags);
             return s;
         }
 

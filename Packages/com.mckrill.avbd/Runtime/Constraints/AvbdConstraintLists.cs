@@ -57,7 +57,7 @@ namespace McKrill.Avbd
         GraphicsBuffer other;  // one per list entry, sorted: the body on the other side of the constraint
         bool disposed;
 
-        static readonly int BodyMetaId = Shader.PropertyToID("_BodyMeta");
+        static readonly int BodyFlagsId = Shader.PropertyToID("_BodyFlags");
         static readonly int BodyMassId = Shader.PropertyToID("_BodyMass");
         static readonly int BodyRangeId = Shader.PropertyToID("_BodyRange");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
@@ -133,7 +133,7 @@ namespace McKrill.Avbd
             bool contacts = slotCount > 0 && contactPairs != null && poolControl != null && poolArgs != null;
             foreach (int kernel in allKernels)
             {
-                shader.SetBuffer(kernel, BodyMetaId, bodies.Meta);
+                shader.SetBuffer(kernel, BodyFlagsId, bodies.Flags);
                 shader.SetBuffer(kernel, BodyMassId, bodies.Mass);
                 shader.SetBuffer(kernel, BodyRangeId, bodies.Range);
                 shader.SetBuffer(kernel, RecordsId, records);

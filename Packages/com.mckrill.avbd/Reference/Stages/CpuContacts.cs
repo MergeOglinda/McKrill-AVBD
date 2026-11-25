@@ -67,7 +67,7 @@ namespace McKrill.Avbd.Reference
 
         static bool IsSolved(CpuBodyArrays bodies, int slot)
         {
-            uint flags = bodies.Meta[slot].ident.x;
+            uint flags = bodies.Flags[slot];
             return (flags & ((uint)BodyFlags.Free | (uint)BodyFlags.Kinematic)) == 0u && bodies.Mass[slot].momentMass.w > 0f;
         }
 
@@ -85,8 +85,8 @@ namespace McKrill.Avbd.Reference
             int pair = (int)ContactLayout.PairIndex(a, b);
             uint oldCount = PairCounts[pair];
 
-            bool freeA = (bodies.Meta[a].ident.x & (uint)BodyFlags.Free) != 0u;
-            bool freeB = (bodies.Meta[b].ident.x & (uint)BodyFlags.Free) != 0u;
+            bool freeA = (bodies.Flags[a] & (uint)BodyFlags.Free) != 0u;
+            bool freeB = (bodies.Flags[b] & (uint)BodyFlags.Free) != 0u;
             if (freeA || freeB || (!IsSolved(bodies, a) && !IsSolved(bodies, b)))
             {
                 PairCounts[pair] = 0;

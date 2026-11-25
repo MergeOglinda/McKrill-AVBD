@@ -24,6 +24,7 @@ namespace McKrill.Avbd
         readonly int predictForcesExplosionsKernel;
         readonly int forceFieldClearKernel;
         readonly int forceFieldAccumulateKernel;
+        readonly int solveHeaderKernel;
         readonly int primalKernel;
         readonly int initKernel;
         readonly int dualKernel;
@@ -55,6 +56,7 @@ namespace McKrill.Avbd
         const string FusedDualKeyword = "AVBD_FUSED_DUAL";
         static readonly int PlasticId = Shader.PropertyToID("_Plastic");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
+        static readonly int FractureId = Shader.PropertyToID("_Fracture");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
         static readonly int ColorBodiesId = Shader.PropertyToID("_ColorBodies");
         static readonly int ColorWorkId = Shader.PropertyToID("_ColorWork");
@@ -127,6 +129,7 @@ namespace McKrill.Avbd
             predictForcesExplosionsKernel = shaders.Predict.FindKernel("PredictForcesExplosions");
             forceFieldClearKernel = shaders.Predict.FindKernel("ForceFieldClear");
             forceFieldAccumulateKernel = shaders.Predict.FindKernel("ForceFieldAccumulate");
+            solveHeaderKernel = shaders.Predict.FindKernel("BuildSolveHeader");
 
             if (shaders.Primal == null)
                 throw new System.InvalidOperationException("The AvbdShaderSet has no primal shader.");
@@ -203,6 +206,7 @@ namespace McKrill.Avbd
                 constraints.RefreshContactTopology();
             }
             DispatchConstraintInit();
+            DispatchSolveHeader();
             bool fused = FuseDualUpdate && constraints.RecordCount > 0;
             lastDualSweep = 0u;
             for (int it = 0; it < settings.iterations; it++)
@@ -471,6 +475,8 @@ namespace McKrill.Avbd
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, primalKernel);
             shader.SetBuffer(primalKernel, RecordsId, constraints.Records);
+            if (fusedDual)
+                shader.SetBuffer(primalKernel, FractureId, constraints.Fractures); // only the variant that runs the dual update reads it
             BindPlastic(shader, primalKernel);
             shader.SetBuffer(primalKernel, ContactPairsId, constraints.ContactPairsBuffer);
             shader.SetBuffer(primalKernel, ContactPointsId, constraints.ContactPointsBuffer);
@@ -484,6 +490,19 @@ namespace McKrill.Avbd
                 shader.SetInt(ColorId, color);
                 shader.DispatchIndirect(primalKernel, constraints.ColorArgs, (uint)(color * AvbdGraphColoring.ArgsStride));
             }
+        }
+
+        // Stage V, once per step before the first sweep: gathers the flags, the moments and mass and the range in the constraint list of every body into
+        // the 32 B record (BodySolveRecord) that the sweeps read, in place of those three arrays. Run it after the edits, the lists, the colors and the
+        // predict of the step, and again after anything that changes a body's flags, mass or list before a sweep that is dispatched alone (the tests do).
+        internal void DispatchSolveHeader()
+        {
+            if (constraints == null)
+                return;
+
+            ComputeShader shader = shaders.Predict;
+            bodies.BindTo(shader, solveHeaderKernel);
+            AvbdDispatch.Linear(shader, solveHeaderKernel, bodies.HighWaterMark);
         }
 
         // Stage D, once per step after stage P: evaluates every joint at the start-of-step pose and warm-starts its variables.
@@ -595,6 +614,8 @@ namespace McKrill.Avbd
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, kernel);
             shader.SetBuffer(kernel, RecordsId, constraints.Records);
+            if (kernel == dualKernel)
+                shader.SetBuffer(kernel, FractureId, constraints.Fractures); // the fracture thresholds: only the dual update reads them
             BindPlastic(shader, kernel);
             AvbdDispatch.Linear(shader, kernel, constraints.RecordCount);
         }

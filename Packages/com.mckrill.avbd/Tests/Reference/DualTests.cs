@@ -661,7 +661,7 @@ namespace McKrill.Avbd.Tests
                 var state = new BodyStateRecord[Capacity];
                 buffers.State.GetData(state);
                 var records = new ConstraintRecord[128];
-                constraints.Records.GetData(records);
+                constraints.ReadRecords(records);
 
                 for (int s = 0; s < scene.bodyCount; s++)
                 {
@@ -797,7 +797,7 @@ namespace McKrill.Avbd.Tests
                 constraints.Rebuild();
 
                 var records = new ConstraintRecord[8];
-                constraints.Records.GetData(records);
+                constraints.ReadRecords(records);
                 Assert.IsTrue((ConstraintFlagLayout.FlagsOf(records[rigid].ident.z) & ConstraintFlags.Plastic) == 0, "a rigid joint takes no plastic slot");
                 Assert.AreEqual(0u, records[first].ident.w);
                 Assert.AreEqual(1u, records[second].ident.w);
@@ -839,7 +839,7 @@ namespace McKrill.Avbd.Tests
                 tilt = math.atan2(-hanging.y, hanging.x); // how far the box has swung down from the level
 
                 var records = new ConstraintRecord[4];
-                constraints.Records.GetData(records);
+                constraints.ReadRecords(records);
                 broken = (ConstraintFlagLayout.FlagsOf(records[0].ident.z) & ConstraintFlags.Broken) != 0;
                 rest = plastic ? constraints.ReadPlastic()[0].rest : new float4(0f, 0f, 0f, 1f);
             }
@@ -918,7 +918,7 @@ namespace McKrill.Avbd.Tests
                 constraints.Rebuild();
 
                 var records = new ConstraintRecord[8];
-                constraints.Records.GetData(records);
+                constraints.ReadRecords(records);
                 ConstraintFlags f0 = ConstraintFlagLayout.FlagsOf(records[fracturing].ident.z);
                 Assert.IsTrue((f0 & ConstraintFlags.FracturableLinear) != 0 && (f0 & ConstraintFlags.Fracturable) == 0 && (f0 & ConstraintFlags.PlasticLinear) == 0);
                 Assert.AreEqual(25f, records[fracturing].reserved.x);
@@ -964,7 +964,7 @@ namespace McKrill.Avbd.Tests
                 drop = 3f - state[(int)b.Slot].position.y;
 
                 var records = new ConstraintRecord[4];
-                constraints.Records.GetData(records);
+                constraints.ReadRecords(records);
                 broken = (ConstraintFlagLayout.FlagsOf(records[0].ident.z) & ConstraintFlags.Broken) != 0;
                 stretch = math.length(records[0].anchorA.xyz - new float3(0f, -1f, 0f));
             }
@@ -1024,12 +1024,12 @@ namespace McKrill.Avbd.Tests
                 constraints.Rebuild();
 
                 var before = new ConstraintRecord[4];
-                constraints.Records.GetData(before);
+                constraints.ReadRecords(before);
 
                 new AvbdSolver(buffers, AvbdSolverSettings.Default, null, constraints).Step();
 
                 var after = new ConstraintRecord[4];
-                constraints.Records.GetData(after);
+                constraints.ReadRecords(after);
                 Assert.AreEqual(before[0], after[0], "a spring record never changes");
             }
         }

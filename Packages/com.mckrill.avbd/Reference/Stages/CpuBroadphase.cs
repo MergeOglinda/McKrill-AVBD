@@ -25,7 +25,7 @@ namespace McKrill.Avbd.Reference
 
         public static BodyClass Classify(CpuBodyArrays bodies, int slot)
         {
-            uint flags = bodies.Meta[slot].ident.x;
+            uint flags = bodies.Flags[slot];
             if ((flags & (uint)BodyFlags.Free) != 0u)
                 return BodyClass.Free;
             if ((flags & (uint)BodyFlags.Kinematic) == 0u && bodies.Mass[slot].momentMass.w > 0f)

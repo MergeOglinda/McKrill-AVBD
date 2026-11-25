@@ -14,7 +14,7 @@ namespace McKrill.Avbd.Reference
 
             for (int slot = 0; slot < count; slot++)
             {
-                uint flags = bodies.Meta[slot].ident.x;
+                uint flags = bodies.Flags[slot];
                 if ((flags & (uint)BodyFlags.Free) != 0u)
                     continue;
 

@@ -73,6 +73,9 @@ namespace McKrill.Avbd
         /// <summary>Bytes of one <see cref="PairRecord"/>.</summary>
         public const int PairStride = 16;
 
+        /// <summary>Bytes of one entry of the bounding sphere array (<c>_BodySphere</c>): the position and the radius, a float4.</summary>
+        public const int SphereStride = 16;
+
         // The table is scanned in blocks of ScanGroup cells, and the sums of the blocks by one group: at most ScanGroup blocks.
         const int MinGridCells = ScanGroup;
         const int MaxGridCells = ScanGroup * ScanGroup;
@@ -87,6 +90,7 @@ namespace McKrill.Avbd
         GraphicsBuffer gridCursor;
         GraphicsBuffer gridSorted;
         GraphicsBuffer gridBlocks;
+        GraphicsBuffer bodySphere;
         GraphicsBuffer bodyCell;
         GraphicsBuffer largeList;
         GraphicsBuffer pairs;
@@ -108,6 +112,7 @@ namespace McKrill.Avbd
         static readonly int GridCursorId = Shader.PropertyToID("_GridCursor");
         static readonly int GridSortedId = Shader.PropertyToID("_GridSorted");
         static readonly int GridBlocksId = Shader.PropertyToID("_GridBlocks");
+        static readonly int BodySphereId = Shader.PropertyToID("_BodySphere");
         static readonly int BodyCellId = Shader.PropertyToID("_BodyCell");
         static readonly int LargeListId = Shader.PropertyToID("_LargeList");
         static readonly int PairsId = Shader.PropertyToID("_Pairs");
@@ -155,6 +160,7 @@ namespace McKrill.Avbd
             gridCursor = new GraphicsBuffer(GraphicsBuffer.Target.Structured, gridCells, sizeof(uint));
             gridSorted = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
             gridBlocks = new GraphicsBuffer(GraphicsBuffer.Target.Structured, gridCells / ScanGroup, sizeof(uint));
+            bodySphere = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, SphereStride);
             bodyCell = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, 4 * sizeof(uint));
             largeList = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bodyCapacity, sizeof(uint));
             pairs = new GraphicsBuffer(GraphicsBuffer.Target.Structured, dynamicPairCapacity + staticPairCapacity, PairStride);
@@ -165,6 +171,9 @@ namespace McKrill.Avbd
 
         /// <summary>The pair list: the dynamic-dynamic bin at [0, DynamicPairCapacity), then the dynamic-static bin.</summary>
         internal GraphicsBuffer Pairs => pairs;
+
+        /// <summary>The bounding spheres written by the last <see cref="Run"/>: per slot a float4 (position xyz, radius w); valid for the bodies that are in the grid or the large list.</summary>
+        internal GraphicsBuffer Spheres => bodySphere;
 
         /// <summary>The control words (AVBD_BP_*), for kernels that read the pair counts on the GPU.</summary>
         internal GraphicsBuffer Control => control;
@@ -209,6 +218,7 @@ namespace McKrill.Avbd
                 shader.SetBuffer(kernel, GridCursorId, gridCursor);
                 shader.SetBuffer(kernel, GridSortedId, gridSorted);
                 shader.SetBuffer(kernel, GridBlocksId, gridBlocks);
+                shader.SetBuffer(kernel, BodySphereId, bodySphere);
                 shader.SetBuffer(kernel, BodyCellId, bodyCell);
                 shader.SetBuffer(kernel, LargeListId, largeList);
                 shader.SetBuffer(kernel, PairsId, pairs);
@@ -311,6 +321,7 @@ namespace McKrill.Avbd
             Release(ref gridCursor);
             Release(ref gridSorted);
             Release(ref gridBlocks);
+            Release(ref bodySphere);
             Release(ref bodyCell);
             Release(ref largeList);
             Release(ref pairs);

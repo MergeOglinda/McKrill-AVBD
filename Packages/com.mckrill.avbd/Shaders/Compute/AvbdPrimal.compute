@@ -16,7 +16,7 @@
 
 // Compiled in when the solver fuses the dual update of the joints into the sweeps (AvbdSolver.FuseDualUpdate): the dual update of a joint after sweep k
 // then runs at the start of sweep k + 1, in the thread of the first body of the joint that is solved in that sweep, which writes the joint and marks it
-// with the id of the sweep (reserved.w), and the other body finds the mark and only stamps. The first body is the one with the lower color, and when it
+// with the id of the sweep (c0Ang.w), and the other body finds the mark and only stamps. The first body is the one with the lower color, and when it
 // runs, neither body of the joint has moved in sweep k + 1, so the joint sees the poses of the end of sweep k, as it does in the separate dual dispatch.
 // A dispatch (_DualSweep) of 0 does no dual update: the first sweep of a step, and the sweeps a test dispatches alone. The Dual kernel runs once after
 // the last sweep (AvbdDual.compute), for the sweep that has no sweep after it, and clears the marks.
@@ -35,11 +35,10 @@
 RWStructuredBuffer<BodyStateRecord>    _BodyState;
 RWStructuredBuffer<BodyPoseRecord>     _BodyPose;       // the current pose of every body, 32 B per body: what the neighbors of a joint or spring are read from
 StructuredBuffer<BodyInertialRecord>   _BodyInertial;
-StructuredBuffer<BodyMassRecord>       _BodyMass;
-StructuredBuffer<BodyMetaRecord>       _BodyMeta;
-StructuredBuffer<BodyRangeRecord>      _BodyRange;
+StructuredBuffer<BodySolveRecord>      _BodySolve;      // moments and mass, flags and list range of every body in one 32 B record (built once per step, see AvbdPredict.compute)
 #if defined(AVBD_FUSED_DUAL)
 RWStructuredBuffer<ConstraintRecord>   _Constraints;    // joints and springs (written by the dual update of the first body of a joint in a sweep)
+StructuredBuffer<FractureRecord>       _Fracture;       // fracture thresholds, four joints per record (read by the dual update, for a joint with a FRACTURABLE flag)
 #if defined(AVBD_PLASTIC_JOINTS)
 RWStructuredBuffer<PlasticRecord>      _Plastic;        // rest rotation of the joints with the PLASTIC flag, by ident.w
 #endif
@@ -75,7 +74,7 @@ struct PrimalSystem
 
 // Pose of body slot `id`. The body being solved is passed in, the others are read from the compact pose array (a joint or spring needs nothing else of
 // the neighbor, and 32 B records put twice as many bodies in a cache line as the 64 B state records). A manifold also needs the start-of-step pose
-// of both bodies, which only the state record has, so it reads the state record (LoadPoseFromState) and one line serves both.
+// of both bodies, which only the state record has, so StampManifold reads the state record of both bodies once, and one line serves both.
 // A body A of AVBD_INVALID is the world: origin and identity rotation.
 void LoadPose(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos, out float4 rot)
 {
@@ -97,27 +96,6 @@ void LoadPose(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos
     }
 }
 
-// The same from the state record, for the manifolds.
-void LoadPoseFromState(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos, out float4 rot)
-{
-    if (id == self)
-    {
-        pos = selfPos;
-        rot = selfRot;
-    }
-    else if (id == AVBD_INVALID)
-    {
-        pos = float3(0.0, 0.0, 0.0);
-        rot = float4(0.0, 0.0, 0.0, 1.0);
-    }
-    else
-    {
-        BodyStateRecord s = _BodyState[id];
-        pos = s.position.xyz;
-        rot = s.rotation;
-    }
-}
-
 // `entry` is the index of the record in _Constraints. With AVBD_FUSED_DUAL the joint is first brought up to date, if this body is the first to see it in the sweep.
 void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
 {
@@ -132,15 +110,41 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
 
     float4 rest = float4(0.0, 0.0, 0.0, 1.0); // rest rotation of the angular row: loaded below, or returned by the dual update that has just made it
     bool haveRest = false;
+
+    // The plastic data this stamp needs is requested here, right after the poses and before anything uses them: a use of a pose waits for it, and a read
+    // issued after that use would be one more round trip to memory. The dual update needs the limits and the rest rotation of the plastic record, the
+    // stamp alone only the rest rotation of a joint with an angular row.
+#if defined(AVBD_FUSED_DUAL)
+    bool dualNow = _DualSweep != 0u && !(flags & AVBD_CONSTRAINT_FLAG_BROKEN) && asuint(c.c0Ang.w) != _DualSweep;
+    JointPlasticRead plasticRead;
+    plasticRead.limits = float4(0.0, 0.0, 0.0, 0.0);
+    plasticRead.rest = rest;
+    float2 fracture = float2(0.0, 0.0);
+    if (dualNow)
+    {
+        plasticRead = AvbdJointPlasticRead(c, flags);
+        fracture = AvbdJointFractureRead(entry, flags);
+    }
+#endif
+#if defined(AVBD_PLASTIC_JOINTS)
+    float4 restLoaded = rest;
+    bool needRest = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) && dot(AvbdPenaltyAng(c), AvbdPenaltyAng(c)) > 0.0;
+#if defined(AVBD_FUSED_DUAL)
+    needRest = needRest && !dualNow;
+#endif
+    if (needRest)
+        restLoaded = _Plastic[c.ident.w].rest;
+#endif
+
 #if defined(AVBD_FUSED_DUAL)
     // The dual update of the sweep before, with the poses read above: neither body of the joint has moved in this sweep (see the keyword above). A joint
     // that is broken has none. The record is stored with the mark in the word that no other stage uses; the stamp below reads the updated joint.
-    if (_DualSweep != 0u && !(flags & AVBD_CONSTRAINT_FLAG_BROKEN) && asuint(c.reserved.w) != _DualSweep)
+    if (dualNow)
     {
-        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, rest);
-        AvbdJointDualStore(entry, c, result, rest);
-        c.reserved.w = asfloat(_DualSweep);
-        _Constraints[entry].reserved.w = c.reserved.w;
+        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, plasticRead, fracture, rest);
+        AvbdJointDualStore(entry, c, result, rest); // may store c0Ang (a yield in the angle), whose w is the old mark: the mark is set after it
+        c.c0Ang.w = asfloat(_DualSweep);
+        _Constraints[entry].c0Ang.w = c.c0Ang.w;
         flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
         haveRest = true;
     }
@@ -155,8 +159,8 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
     float3 anchorA = hasA ? rWorldA + posA : rA; // world joint: rA is the fixed world point
     float3 anchorB = rWorldB + posB;
 
-    float3 penaltyLin = c.penaltyLin.xyz;
-    float3 penaltyAng = c.penaltyAng.xyz;
+    float3 penaltyLin = AvbdPenaltyLin(c);
+    float3 penaltyAng = AvbdPenaltyAng(c);
 
     // The Jacobians of the joint are written out, not multiplied: the linear one is sgn * I and the angular one is a skew matrix (S = skew(s), with
     // s = -rWorldA for body A and rWorldB for body B, sgn = +1 for A and -1 for B), and the penalty matrices are diagonal. That makes
@@ -174,7 +178,7 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
         if (flags & AVBD_CONSTRAINT_FLAG_HARD_LIN)
             C -= c.c0Lin.xyz * alpha;
 
-        float3 F = penaltyLin * C + c.lambdaLin.xyz;
+        float3 F = penaltyLin * C + AvbdLambdaLin(c);
 
         float3 sv = isA ? -rWorldA : rWorldB;
         float3 sq = sv * sv;
@@ -208,7 +212,7 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
     {
 #if defined(AVBD_PLASTIC_JOINTS)
         if (!haveRest && (flags & AVBD_CONSTRAINT_FLAG_PLASTIC))
-            rest = _Plastic[c.ident.w].rest;
+            rest = restLoaded;
 #endif
         float3 C = AvbdJointAngularError(rotA, rotB, rest) * torqueArm; // rotA is the identity for a world joint
 
@@ -216,7 +220,7 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
         if (flags & AVBD_CONSTRAINT_FLAG_HARD_ANG)
             C -= c.c0Ang.xyz * alpha;
 
-        float3 F = penaltyAng * C + c.lambdaAng.xyz;
+        float3 F = penaltyAng * C + AvbdLambdaAng(c);
 
         // J_ang = sgn * torqueArm * I
         sys.lhsAng += AvbdDiagonal(penaltyAng * (torqueArm * torqueArm));
@@ -279,13 +283,24 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
 
     bool isA = pair.ident.x == slot;
 
-    float3 posA, posB;
-    float4 rotA, rotB;
-    LoadPoseFromState(pair.ident.x, slot, selfPos, selfRot, posA, rotA);
-    LoadPoseFromState(pair.ident.y, slot, selfPos, selfRot, posB, rotB);
-
+    // The state record of each body is read once: the pose and the start-of-step pose come from the same line. The body being solved has its own
+    // pose in registers, which is what the record holds as well (the sweep writes it back at the end), so that one is not taken from the record.
     BodyStateRecord stateA = _BodyState[pair.ident.x];
     BodyStateRecord stateB = _BodyState[pair.ident.y];
+    float3 posA = stateA.position.xyz;
+    float4 rotA = stateA.rotation;
+    float3 posB = stateB.position.xyz;
+    float4 rotB = stateB.rotation;
+    if (pair.ident.x == slot)
+    {
+        posA = selfPos;
+        rotA = selfRot;
+    }
+    if (pair.ident.y == slot)
+    {
+        posB = selfPos;
+        rotB = selfRot;
+    }
     float3 dqALin = posA - stateA.startPosition.xyz;
     float3 dqBLin = posB - stateB.startPosition.xyz;
     float3 dqAAng = AvbdQuatDifference(rotA, stateA.startRotation);
@@ -472,7 +487,7 @@ bool SolveLdlt6(uint body)
 
 // Entries of the body's list that a lane reads before it stamps any of them: the entries and the joint or spring records of the whole batch are requested
 // together, so their latencies overlap instead of following one another (list entry, then record, then the neighbor's pose, per stamp). Each record in
-// flight is 160 B of registers: 1 gives the plain one-at-a-time loop, and a larger batch buys more loads in flight with more registers.
+// flight is 128 B of registers: 1 gives the plain one-at-a-time loop, and a larger batch buys more loads in flight with more registers.
 #define AVBD_PRIMAL_BATCH 1u
 
 // AVBD_PRIMAL_LANES threads solve one body. Lane l stamps the entries l, l + AVBD_PRIMAL_LANES, ... of the body's list into its own partial system;
@@ -502,11 +517,13 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
         slot = _ColorBodies[_ColorWork[AVBD_COLOR_STARTS_OFFSET + _Color] + index];
 
         // Everything the body needs is requested at once, before any of it is tested: the reads depend on the slot only, so they are in flight together
-        // instead of one after the other (flags, then mass, then pose, then the range of the list). A body that is skipped below has wasted a few reads.
-        uint bodyFlags = _BodyMeta[slot].ident.x;
-        momentMass = _BodyMass[slot].momentMass;
-        BodyStateRecord state = _BodyState[slot];
-        range = _BodyRange[slot].range.xy;
+        // instead of one after the other (solve header, then pose). A body that is skipped below has wasted a few reads. The header (flags, mass, range of
+        // the list) is one 32 B sector; the three arrays it mirrors were three.
+        BodySolveRecord solve = _BodySolve[slot];
+        uint bodyFlags = solve.info.x;
+        momentMass = solve.momentMass;
+        BodyPoseRecord ownPose = _BodyPose[slot];
+        range = solve.info.yz;
         if (lane == 0u)
             inertial = _BodyInertial[slot];
 
@@ -518,8 +535,8 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
             mass = momentMass.w;
             active = mass > 0.0;
         }
-        position = state.position.xyz;
-        rotation = state.rotation;
+        position = ownPose.position.xyz;
+        rotation = ownPose.rotation;
     }
 
     PrimalSystem sys;

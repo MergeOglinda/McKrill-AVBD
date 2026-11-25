@@ -26,7 +26,8 @@ struct BodyStateRecord
 };
 
 // 32 B, hot. A copy of the current pose (position and rotation) of BodyStateRecord, for the readers that only need that half of it: the primal and dual
-// stages read the pose of the neighbors of a joint or spring, and a 32 B record puts twice as many bodies in a cache line as the 64 B state record. Every
+// stages read the pose of the neighbors of a joint or spring (and the primal sweep that of the body it solves), the broadphase, Predict, the ray cast and the
+// group kernels read the pose of a body, and a 32 B record puts twice as many bodies in a cache line as the 64 B state record. Every
 // kernel that writes BodyStateRecord.position or .rotation writes this record too (stage E, Predict, the group mover and the primal sweep); nothing
 // else writes it, so the two never differ. Free slots hold the same values as the state record.
 struct BodyPoseRecord
@@ -62,17 +63,28 @@ struct BodyShapeRecord
     float4 sizeFriction;
 };
 
-// 32 B, cold.
+// 32 B, cold. The flags word and the graph color are not in this record: they are the arrays _BodyFlags (flags | kind << 24, see the AVBD_BODY_FLAG_*
+// bits above) and _BodyColor (the graph color, AVBD_INVALID for a body that is not solved), one uint per body, because the hot kernels ask every body
+// whether it is live and solved, and the coloring reads the color of random neighbors: 4 B in a sector of their own and not in a 32 B record.
+// Declare them as StructuredBuffer<uint> (RWStructuredBuffer<uint> where the kernel writes them). ident.x and state.x of this record are always 0.
 struct BodyMetaRecord
 {
-    uint4 ident; // x = flags | kind << 24, y = group mask, z = appearance id, w unused
-    uint4 state; // x = graph color, y = sleep counter, zw unused
+    uint4 ident; // x = unused (the flags word is _BodyFlags), y = group mask, z = appearance id, w unused
+    uint4 state; // x = unused (the graph color is _BodyColor), y = sleep counter, zw unused
 };
 
 // 16 B, hot. Range in the constraint list.
 struct BodyRangeRecord
 {
     uint4 range; // x = offset, y = count, z = contact entries (the first z of the count, written by stage G), w unused
+};
+
+// 32 B, hot. The primal sweep's view of a body, derived once per step (AvbdSolver.DispatchSolveHeader, after ConstraintInit) from _BodyFlags, _BodyMass and
+// _BodyRange, so that the sweep reads one sector per body for what it used to read from three arrays (and three sectors). Never written by anything else.
+struct BodySolveRecord
+{
+    float4 momentMass; // xyz = principal moments of inertia, w = mass (as in BodyMassRecord)
+    uint4 info;        // x = flags word (as in _BodyFlags), y = offset and z = count of the body's entries in the constraint list (as in BodyRangeRecord), w unused
 };
 
 // Flags word of a free slot of the given kind.

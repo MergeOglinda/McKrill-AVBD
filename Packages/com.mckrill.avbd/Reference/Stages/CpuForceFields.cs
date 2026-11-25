@@ -25,7 +25,7 @@ namespace McKrill.Avbd.Reference
             var sums = new int[fields.Length * 4];
             for (int slot = 0; slot < count; slot++)
             {
-                if ((bodies.Meta[slot].ident.x & ((uint)BodyFlags.Free | (uint)BodyFlags.Kinematic)) != 0u)
+                if ((bodies.Flags[slot] & ((uint)BodyFlags.Free | (uint)BodyFlags.Kinematic)) != 0u)
                     continue;
                 if (!(bodies.Mass[slot].momentMass.w > 0f))
                     continue;

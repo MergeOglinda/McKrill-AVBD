@@ -92,23 +92,138 @@ namespace McKrill.Avbd
         public static ConstraintKind KindOf(uint packed) => (ConstraintKind)(packed >> KindShift);
     }
 
-    /// <summary>Strides of the constraint arrays in bytes. Tests assert that the record struct has exactly this size.</summary>
+    /// <summary>Strides of the constraint arrays in bytes. Tests assert that the record structs have exactly these sizes.</summary>
     internal static class ConstraintRecordStrides
     {
-        /// <summary>Ten 16 B words: a multiple of 32 B, because the primal and dual stages gather constraints by id (rule P3).</summary>
-        public const int Constraint = 160;
+        /// <summary>
+        /// The joint or spring record on the GPU, <see cref="GpuConstraintRecord"/>: eight 16 B words with no padding. A multiple of 32 B, because the primal
+        /// and dual stages gather constraints by id (rule P3), and 128 B is four whole sectors and one cache line, which is what the primal sweep reads of every joint twice
+        /// per iteration.
+        /// </summary>
+        public const int Constraint = 128;
+
+        /// <summary>The CPU form of a record, <see cref="ConstraintRecord"/> (ten 16 B words): what the oracles compute with. Packed into <see cref="Constraint"/> bytes for the GPU.</summary>
+        public const int Logical = 160;
+
+        /// <summary>The fracture thresholds of four joints, <see cref="FractureRecord"/>.</summary>
+        public const int Fracture = 32;
     }
 
     /// <summary>
-    /// One joint or spring. Every stage that touches a constraint (V and D, and later the per-step warm start) reads nearly all of
-    /// it, so there is no hot/cold split (rule P5). The unused words of a spring are zero; a separate smaller spring
-    /// record is a possible later optimization. Field-by-field mirror of ConstraintRecord in AvbdConstraintRecords.hlsl.
-    ///
-    /// A contact uses the same record: ident = (body A, body B, flags | kind, feature key), anchorA = (rA, friction),
-    /// anchorB = (rB, unused), c0Lin = (C0 in the contact basis, unused), c0Ang = (contact normal pointing from B to A, unused),
-    /// penaltyLin = per-row penalty (normal, tangent 1, tangent 2), lambdaLin = per-row multiplier. The tangents are derived from the normal.
-    /// The remaining words are zero.
+    /// A joint or spring as the GPU stores it. Field-by-field mirror of ConstraintRecord in AvbdConstraintRecords.hlsl; <see cref="ConstraintRecordCodec"/> converts
+    /// from and to the CPU form <see cref="ConstraintRecord"/>. The three state words hold the penalties and multipliers (12 floats) with no padding between them.
     /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GpuConstraintRecord
+    {
+        /// <summary>As <see cref="ConstraintRecord.ident"/>.</summary>
+        public uint4 ident;
+
+        /// <summary>As <see cref="ConstraintRecord.anchorA"/>.</summary>
+        public float4 anchorA;
+
+        /// <summary>As <see cref="ConstraintRecord.anchorB"/>.</summary>
+        public float4 anchorB;
+
+        /// <summary>As <see cref="ConstraintRecord.c0Lin"/>.</summary>
+        public float4 c0Lin;
+
+        /// <summary>xyz = angular constraint value at the start of the step. w = the mark of the fused dual update: the id of a sweep as the bits of a float, 0 for none (the CPU form keeps it in reserved.w).</summary>
+        public float4 c0Ang;
+
+        /// <summary>penaltyLin.xyz, penaltyAng.x.</summary>
+        public float4 state0;
+
+        /// <summary>penaltyAng.yz, lambdaLin.xy.</summary>
+        public float4 state1;
+
+        /// <summary>lambdaLin.z, lambdaAng.xyz.</summary>
+        public float4 state2;
+    }
+
+    /// <summary>
+    /// The fracture thresholds of four joints, in an array of its own that only the dual update reads, and only for a joint with a fracture flag: joint j is
+    /// lane j &amp; 3 of record j &gt;&gt; 2. <c>a</c> holds the joints 0 and 1 of the record as (linear, angular, linear, angular), <c>b</c> the joints 2 and 3.
+    /// Written once, at creation. Mirror of FractureRecord in AvbdConstraintRecords.hlsl.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct FractureRecord
+    {
+        public float4 a;
+        public float4 b;
+    }
+
+    /// <summary>Converts a constraint record between the CPU form (<see cref="ConstraintRecord"/>) and the GPU form (<see cref="GpuConstraintRecord"/> and the <see cref="FractureRecord"/> of its joint).</summary>
+    internal static class ConstraintRecordCodec
+    {
+        /// <summary>Records of the fracture array that hold <paramref name="records"/> joints.</summary>
+        public static int FractureRecordCount(int records) => (records + 3) / 4;
+
+        /// <summary>The GPU form of a record. The fracture thresholds (c0Ang.w and reserved.x of the CPU form) are not in it: see <see cref="SetFracture"/>.</summary>
+        public static GpuConstraintRecord Pack(in ConstraintRecord r)
+        {
+            return new GpuConstraintRecord
+            {
+                ident = r.ident,
+                anchorA = r.anchorA,
+                anchorB = r.anchorB,
+                c0Lin = r.c0Lin,
+                c0Ang = new float4(r.c0Ang.x, r.c0Ang.y, r.c0Ang.z, r.reserved.w),
+                state0 = new float4(r.penaltyLin.x, r.penaltyLin.y, r.penaltyLin.z, r.penaltyAng.x),
+                state1 = new float4(r.penaltyAng.y, r.penaltyAng.z, r.lambdaLin.x, r.lambdaLin.y),
+                state2 = new float4(r.lambdaLin.z, r.lambdaAng.x, r.lambdaAng.y, r.lambdaAng.z),
+            };
+        }
+
+        /// <summary>The CPU form of a GPU record, with the fracture thresholds of its joint (<see cref="GetFracture"/>). The unused words are zero.</summary>
+        public static ConstraintRecord Unpack(in GpuConstraintRecord g, float fractureLinear, float fractureAngular)
+        {
+            return new ConstraintRecord
+            {
+                ident = g.ident,
+                anchorA = g.anchorA,
+                anchorB = g.anchorB,
+                c0Lin = g.c0Lin,
+                c0Ang = new float4(g.c0Ang.x, g.c0Ang.y, g.c0Ang.z, fractureAngular),
+                penaltyLin = new float4(g.state0.x, g.state0.y, g.state0.z, 0f),
+                penaltyAng = new float4(g.state0.w, g.state1.x, g.state1.y, 0f),
+                lambdaLin = new float4(g.state1.z, g.state1.w, g.state2.x, 0f),
+                lambdaAng = new float4(g.state2.y, g.state2.z, g.state2.w, 0f),
+                reserved = new float4(fractureLinear, 0f, 0f, g.c0Ang.w),
+            };
+        }
+
+        /// <summary>Stores the thresholds of joint <paramref name="index"/>.</summary>
+        public static void SetFracture(FractureRecord[] records, int index, float linear, float angular)
+        {
+            ref FractureRecord r = ref records[index >> 2];
+            float4 pair = (index & 2) == 0 ? r.a : r.b;
+            if ((index & 1) == 0)
+            {
+                pair.x = linear;
+                pair.y = angular;
+            }
+            else
+            {
+                pair.z = linear;
+                pair.w = angular;
+            }
+            if ((index & 2) == 0)
+                r.a = pair;
+            else
+                r.b = pair;
+        }
+
+        /// <summary>The thresholds of joint <paramref name="index"/>.</summary>
+        public static void GetFracture(FractureRecord[] records, int index, out float linear, out float angular)
+        {
+            FractureRecord r = records[index >> 2];
+            float4 pair = (index & 2) == 0 ? r.a : r.b;
+            linear = (index & 1) == 0 ? pair.x : pair.z;
+            angular = (index & 1) == 0 ? pair.y : pair.w;
+        }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     internal struct ConstraintRecord
     {
@@ -127,7 +242,7 @@ namespace McKrill.Avbd
         /// <summary>xyz = linear constraint value at the start of the step (C0). w = torque arm (joint).</summary>
         public float4 c0Lin;
 
-        /// <summary>xyz = angular constraint value at the start of the step. w = fracture threshold (joint).</summary>
+        /// <summary>xyz = angular constraint value at the start of the step. w = angular fracture threshold (joint): in the <see cref="FractureRecord"/> on the GPU.</summary>
         public float4 c0Ang;
 
         /// <summary>Per-axis penalty of the linear rows. w unused.</summary>
@@ -142,7 +257,7 @@ namespace McKrill.Avbd
         /// <summary>Multiplier of the angular rows. w unused.</summary>
         public float4 lambdaAng;
 
-        /// <summary>x = linear fracture threshold of a joint (norm of the linear multiplier; read only with <see cref="ConstraintFlags.FracturableLinear"/>), else zero. yzw reserved, zero. Pads the record to 160 B.</summary>
+        /// <summary>x = linear fracture threshold of a joint (norm of the linear multiplier; read only with <see cref="ConstraintFlags.FracturableLinear"/>), else zero: in the <see cref="FractureRecord"/> on the GPU. yz zero. w = the mark of the fused dual update (GPU only; 0 on the CPU): in c0Ang.w on the GPU.</summary>
         public float4 reserved;
     }
 }

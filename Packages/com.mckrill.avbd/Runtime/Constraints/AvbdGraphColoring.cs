@@ -21,7 +21,7 @@ namespace McKrill.Avbd
 
     /// <summary>
     /// Stage C: colors the graph of solved bodies on the GPU (<c>AvbdColoring.compute</c>) and buckets the bodies by color.
-    /// Reads the per-body constraint lists (stage G), writes the graph color into Meta.state.x and fills the color buckets.
+    /// Reads the per-body constraint lists (stage G), writes the graph color into the body color array (<see cref="AvbdBodyBuffers.Color"/>) and fills the color buckets.
     ///
     /// The host runs the rounds and reads back one small thing: after every batch of rounds whether bodies are still waiting. The same
     /// words hold the number of colors, which is how many times the primal sweep is dispatched. How big each of those dispatches is
@@ -109,7 +109,8 @@ namespace McKrill.Avbd
             public int cap;
         }
 
-        static readonly int BodyMetaId = Shader.PropertyToID("_BodyMeta");
+        static readonly int BodyColorId = Shader.PropertyToID("_BodyColor");
+        static readonly int BodyFlagsId = Shader.PropertyToID("_BodyFlags");
         static readonly int BodyMassId = Shader.PropertyToID("_BodyMass");
         static readonly int BodyRangeId = Shader.PropertyToID("_BodyRange");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
@@ -445,7 +446,8 @@ namespace McKrill.Avbd
 
         void Bind(int kernel, AvbdBodyBuffers bodies, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other, GraphicsBuffer colorBodies)
         {
-            shader.SetBuffer(kernel, BodyMetaId, bodies.Meta);
+            shader.SetBuffer(kernel, BodyColorId, bodies.Color);
+            shader.SetBuffer(kernel, BodyFlagsId, bodies.Flags);
             shader.SetBuffer(kernel, BodyMassId, bodies.Mass);
             shader.SetBuffer(kernel, BodyRangeId, bodies.Range);
             shader.SetBuffer(kernel, RecordsId, records);

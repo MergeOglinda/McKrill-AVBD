@@ -31,7 +31,7 @@ namespace McKrill.Avbd.Tests
             {
                 Assert.IsTrue(arrays.IsFree(slot));
                 Assert.AreEqual(AvbdConst.Invalid, arrays.Meta[slot].ident.z, "appearance id of a free slot");
-                Assert.AreEqual(AvbdConst.Invalid, arrays.Meta[slot].state.x, "graph color of a free slot");
+                Assert.AreEqual(AvbdConst.Invalid, arrays.Color[slot], "graph color of a free slot");
                 Assert.AreEqual(0f, arrays.Mass[slot].momentMass.w);
                 Assert.IsTrue(Same(new float4(0f, 0f, 0f, 1f), arrays.State[slot].rotation));
                 Assert.IsTrue(Same(new float4(0f, 0f, 0f, 1f), arrays.Inertial[slot].rotation));
@@ -63,7 +63,7 @@ namespace McKrill.Avbd.Tests
             Assert.IsTrue(Same(new float4(1f, 2f, 3f, 0.5f), arrays.Shape[s].sizeFriction));
             Assert.AreEqual(3u, arrays.Meta[s].ident.y);
             Assert.AreEqual(7u, arrays.Meta[s].ident.z);
-            Assert.AreEqual(AvbdConst.Invalid, arrays.Meta[s].state.x, "a new body has no color");
+            Assert.AreEqual(AvbdConst.Invalid, arrays.Color[s], "a new body has no color");
             Assert.AreEqual(0u, arrays.Meta[s].state.y, "sleep counter starts at zero");
             Assert.AreEqual(0u, arrays.Range[s].range.y, "no constraints yet");
         }
@@ -99,9 +99,9 @@ namespace McKrill.Avbd.Tests
             Assert.IsTrue(arrays.IsFree(s));
             Assert.AreEqual(0f, arrays.Mass[s].momentMass.w, "a free slot must never look dynamic");
             Assert.AreEqual(AvbdConst.Invalid, arrays.Meta[s].ident.z);
-            Assert.AreEqual(AvbdConst.Invalid, arrays.Meta[s].state.x);
-            Assert.AreEqual(0u, arrays.Meta[s].ident.x & (uint)BodyFlags.Kinematic, "remove clears the other flags");
-            Assert.AreEqual(ShapeKind.Box, BodyFlagLayout.KindOf(arrays.Meta[s].ident.x));
+            Assert.AreEqual(AvbdConst.Invalid, arrays.Color[s]);
+            Assert.AreEqual(0u, arrays.Flags[s] & (uint)BodyFlags.Kinematic, "remove clears the other flags");
+            Assert.AreEqual(ShapeKind.Box, BodyFlagLayout.KindOf(arrays.Flags[s]));
         }
 
         // ---- set --------------------------------------------------------------------------------------
@@ -172,7 +172,7 @@ namespace McKrill.Avbd.Tests
 
             queue.SetKinematic(h, true);
             Run(arrays, queue);
-            uint on = arrays.Meta[h.Slot].ident.x;
+            uint on = arrays.Flags[h.Slot];
             Assert.AreNotEqual(0u, on & (uint)BodyFlags.Kinematic);
             Assert.AreEqual(0u, on & (uint)BodyFlags.Free);
             Assert.AreEqual(0x11u, arrays.Meta[h.Slot].ident.y);
@@ -180,7 +180,7 @@ namespace McKrill.Avbd.Tests
 
             queue.SetKinematic(h, false);
             Run(arrays, queue);
-            Assert.AreEqual(0u, arrays.Meta[h.Slot].ident.x & (uint)BodyFlags.Kinematic);
+            Assert.AreEqual(0u, arrays.Flags[h.Slot] & (uint)BodyFlags.Kinematic);
         }
 
         [Test]
@@ -190,7 +190,7 @@ namespace McKrill.Avbd.Tests
             var queue = new BodyEditQueue(Capacity);
             BodyHandle h = queue.Spawn(BodyDescriptor.Box(new float3(1f), 1f, float3.zero));
             Run(arrays, queue);
-            uint flagsBefore = arrays.Meta[h.Slot].ident.x;
+            uint flagsBefore = arrays.Flags[h.Slot];
 
             queue.SetGroupMask(h, 0x77u);
             queue.SetAppearanceId(h, 12u);
@@ -198,7 +198,7 @@ namespace McKrill.Avbd.Tests
 
             Assert.AreEqual(0x77u, arrays.Meta[h.Slot].ident.y);
             Assert.AreEqual(12u, arrays.Meta[h.Slot].ident.z);
-            Assert.AreEqual(flagsBefore, arrays.Meta[h.Slot].ident.x);
+            Assert.AreEqual(flagsBefore, arrays.Flags[h.Slot]);
         }
 
         [Test]
