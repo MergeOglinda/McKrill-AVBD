@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Runs the performance tests of two git refs several times each, alternating between them, and compares the results.
+    Runs the performance tests of two git refs several times each, alternating between them, and compares the results. With -TargetCommit it does so for
+    every commit from the baseline to the target, one candidate after the other.
 
 .DESCRIPTION
     For each ref the script keeps a git worktree (a separate Unity project folder with its own Library) under -WorkRoot, so both sides are built from
@@ -21,7 +22,16 @@
     Git ref of the baseline, for example origin/main. A branch name without a remote means the local branch, which can be older than the remote one.
 
 .PARAMETER Candidate
-    Git ref of the candidate, for example origin/primal-lds-accumulate.
+    Git ref of the candidate, for example origin/primal-lds-accumulate. Not used with -TargetCommit.
+
+.PARAMETER TargetCommit
+    Git ref of the last commit of a range. The baseline stays the same and the candidate becomes, one after the other, every commit after the baseline up to
+    and including the target, oldest first (the commits of "git rev-list --reverse --topo-order <baseline>..<target>", so the commits of a merged branch are
+    in it too). With the commits 1111111 (oldest), 2222222, 3333333, 4444444 and 5555555 (newest), "-Baseline 2222222 -TargetCommit 5555555" does the same
+    as three invocations with "-Baseline 2222222 -Candidate X" for X = 3333333, 4444444 and 5555555: each candidate gets its own -Runs runs, and the baseline
+    is run again next to each of them (so a drift of the machine between candidates does not move the comparisons), with its own warm-up if -Warmup is
+    given. The baseline must be an ancestor of the target. A candidate that does not build or run is reported and the range goes on with the next commit.
+    The results of the candidates are in the folders <OutRoot>\<timestamp>\NN-<commit>\, each laid out as below, and range.json lists them.
 
 .PARAMETER Runs
     Result files per side (default 8). Each is a run of the whole suite, which is what multi_compare_perf.py expects.
@@ -50,7 +60,7 @@
     A Unity process that runs longer is killed and its run counts as failed (default 240).
 
 .PARAMETER Warmup
-    Adds one run of the suite per side before the measured runs, whose results are discarded.
+    Adds one run of the suite per side before the measured runs, whose results are discarded (before every candidate with -TargetCommit).
 
 .PARAMETER NoFetch
     Do not run "git fetch" first.
@@ -62,13 +72,17 @@
     .\Tools\PerfCompare\run_perf_ab.ps1 -Baseline origin/main -Candidate origin/primal-lds-accumulate
 
 .EXAMPLE
+    .\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -TargetCommit 5555555 -Runs 4
+
+.EXAMPLE
     .\Tools\PerfCompare\run_perf_ab.ps1 -Baseline origin/gpu-trace-dual-primal -Candidate origin/primal-lds-accumulate -Runs 4 -Warmup `
         -TestFilter "Scenario5_BrickRing110k"
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Single')]
 param(
     [Parameter(Mandatory = $true)][string]$Baseline,
-    [Parameter(Mandatory = $true)][string]$Candidate,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Single')][string]$Candidate,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Range')][string]$TargetCommit,
     [int]$Runs = 8,
     [string]$RepoPath,
     [string]$WorkRoot,
@@ -211,6 +225,104 @@ function Invoke-Suite($side, [string]$label, [string]$resultPath) {
 }
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------
+# One comparison: the baseline against one candidate
+# ---------------------------------------------------------------------------------------------------------------------------------------------
+
+# Checks both refs out in their worktrees, imports them, runs the suite -Runs times per side (alternating) and compares. Everything goes to $outDir.
+# Problems (a run without a result, a failed test) are added to $failures, which Invoke-Suite also adds to. $rangeInfo is $null for a single comparison.
+function Invoke-Comparison([string]$baselineRef, [string]$candidateRef, [string]$outDir, $failures, $rangeInfo) {
+    $sides = @()
+    foreach ($entry in @(@('baseline', $baselineRef), @('candidate', $candidateRef))) {
+        $name = $entry[0]
+        $ref = $entry[1]
+        $sha = Resolve-Commit $ref
+        $subject = (Invoke-Git $RepoPath @('log', '-1', '--format=%h %s', $sha) | Select-Object -First 1).Trim()
+        $path = Join-Path $WorkRoot $name
+        Write-Step ('{0}: {1} = {2}' -f $name, $ref, $subject)
+        Initialize-Worktree $path $sha
+
+        $dir = Join-Path $outDir $name
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $sides += [pscustomobject]@{
+            Name    = $name
+            Ref     = $ref
+            Sha     = $sha
+            Subject = $subject
+            Path    = $path
+            Dir     = $dir
+            Version = (Get-UnityVersion $path)
+            Unity   = $null
+        }
+    }
+
+    if (-not $UnityPath -and $sides[0].Version -ne $sides[1].Version) {
+        throw ('The refs use different Unity versions ({0} and {1}); the comparison would include the editor. Pass -UnityPath to use one editor for both.' -f
+            $sides[0].Version, $sides[1].Version)
+    }
+    foreach ($side in $sides) { $side.Unity = Get-UnityExe $side.Path }
+
+    foreach ($side in $sides) { Import-Project $side }
+
+    # What was run, for the record next to the results.
+    $gpus = @()
+    try { $gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) } catch { }
+    [ordered]@{
+        started      = (Get-Date).ToString('o')
+        machine      = $env:COMPUTERNAME
+        gpus         = $gpus
+        unity        = $sides[0].Unity
+        runs         = $Runs
+        warmup       = [bool]$Warmup
+        testCategory = $TestCategory
+        testFilter   = $TestFilter
+        range        = $rangeInfo
+        baseline     = @{ ref = $baselineRef; commit = $sides[0].Sha; subject = $sides[0].Subject }
+        candidate    = @{ ref = $candidateRef; commit = $sides[1].Sha; subject = $sides[1].Subject }
+    } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'meta.json') -Encoding UTF8
+
+    $baselineSide = $sides[0]
+    $candidateSide = $sides[1]
+
+    if ($Warmup) {
+        $warmDir = Join-Path $outDir 'warmup'
+        New-Item -ItemType Directory -Force -Path $warmDir | Out-Null
+        foreach ($side in @($baselineSide, $candidateSide)) {
+            Invoke-Suite $side 'warm-up' (Join-Path $warmDir ('{0}.xml' -f $side.Name)) | Out-Null
+        }
+        # A warm-up that failed says nothing about the measured runs, and its result is not compared.
+        $failures.Clear()
+    }
+
+    for ($run = 1; $run -le $Runs; $run++) {
+        # Alternate who goes first: A B, B A, A B, ...
+        if ($run % 2 -eq 1) { $order = @($baselineSide, $candidateSide) } else { $order = @($candidateSide, $baselineSide) }
+        foreach ($side in $order) {
+            $label = 'run {0}/{1}' -f $run, $Runs
+            Invoke-Suite $side $label (Join-Path $side.Dir ('run{0:D2}.xml' -f $run)) | Out-Null
+        }
+    }
+
+    $compareScript = Join-Path $PSScriptRoot 'multi_compare_perf.py'
+    $csv = Join-Path $outDir 'comparison.csv'
+    $compareArgs = @($compareScript, (Join-Path $outDir 'baseline'), (Join-Path $outDir 'candidate'),
+        '-o', $csv, '--threshold', $Threshold.ToString([Globalization.CultureInfo]::InvariantCulture))
+
+    Write-Host ''
+    if (Get-Command $Python -ErrorAction SilentlyContinue) {
+        Write-Step 'Comparing (median over the runs of each side)'
+        & $Python @compareArgs | Out-Host
+        if ($LASTEXITCODE -ne 0) { Write-Warning ('multi_compare_perf.py failed (exit code {0}).' -f $LASTEXITCODE) }
+    }
+    else {
+        $quoted = ($compareArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
+        Write-Warning ("'{0}' was not found. Compare later with:`n  {0} {1}" -f $Python, $quoted)
+    }
+
+    Write-Host ''
+    Write-Step ('Results: {0}' -f $outDir)
+}
+
+# ---------------------------------------------------------------------------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -226,107 +338,79 @@ $OutRoot = [IO.Path]::GetFullPath($OutRoot)
 $outDir = Join-Path $OutRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
 $failures = New-Object 'System.Collections.Generic.List[string]'
 
+# Fetched once, before the refs are resolved (also for a range: the commits of the range are resolved now and do not change while it runs).
 if (-not $NoFetch) {
     Write-Step 'git fetch'
     Invoke-Git $RepoPath @('fetch', '--all', '--prune') | Out-Null
 }
 
-$sides = @()
-foreach ($entry in @(@('baseline', $Baseline), @('candidate', $Candidate))) {
-    $name = $entry[0]
-    $ref = $entry[1]
-    $sha = Resolve-Commit $ref
-    $subject = (Invoke-Git $RepoPath @('log', '-1', '--format=%h %s', $sha) | Select-Object -First 1).Trim()
-    $path = Join-Path $WorkRoot $name
-    Write-Step ('{0}: {1} = {2}' -f $name, $ref, $subject)
-    Initialize-Worktree $path $sha
-
-    $dir = Join-Path $outDir $name
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    $sides += [pscustomobject]@{
-        Name    = $name
-        Ref     = $ref
-        Sha     = $sha
-        Subject = $subject
-        Path    = $path
-        Dir     = $dir
-        Version = (Get-UnityVersion $path)
-        Unity   = $null
-    }
-}
-
-if (-not $UnityPath -and $sides[0].Version -ne $sides[1].Version) {
-    throw ('The refs use different Unity versions ({0} and {1}); the comparison would include the editor. Pass -UnityPath to use one editor for both.' -f
-        $sides[0].Version, $sides[1].Version)
-}
-foreach ($side in $sides) { $side.Unity = Get-UnityExe $side.Path }
-
-foreach ($side in $sides) { Import-Project $side }
-
-# What was run, for the record next to the results.
-$gpus = @()
-try { $gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) } catch { }
-[ordered]@{
-    started      = (Get-Date).ToString('o')
-    machine      = $env:COMPUTERNAME
-    gpus         = $gpus
-    unity        = $sides[0].Unity
-    runs         = $Runs
-    warmup       = [bool]$Warmup
-    testCategory = $TestCategory
-    testFilter   = $TestFilter
-    baseline     = @{ ref = $Baseline; commit = $sides[0].Sha; subject = $sides[0].Subject }
-    candidate    = @{ ref = $Candidate; commit = $sides[1].Sha; subject = $sides[1].Subject }
-} | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'meta.json') -Encoding UTF8
-
 # ---------------------------------------------------------------------------------------------------------------------------------------------
-# Runs
+# Run
 # ---------------------------------------------------------------------------------------------------------------------------------------------
 
-$baselineSide = $sides[0]
-$candidateSide = $sides[1]
-
-if ($Warmup) {
-    $warmDir = Join-Path $outDir 'warmup'
-    New-Item -ItemType Directory -Force -Path $warmDir | Out-Null
-    foreach ($side in @($baselineSide, $candidateSide)) {
-        Invoke-Suite $side 'warm-up' (Join-Path $warmDir ('{0}.xml' -f $side.Name)) | Out-Null
-    }
-    # A warm-up that failed says nothing about the measured runs, and its result is not compared.
-    $failures.Clear()
-}
-
-for ($run = 1; $run -le $Runs; $run++) {
-    # Alternate who goes first: A B, B A, A B, ...
-    if ($run % 2 -eq 1) { $order = @($baselineSide, $candidateSide) } else { $order = @($candidateSide, $baselineSide) }
-    foreach ($side in $order) {
-        $label = 'run {0}/{1}' -f $run, $Runs
-        Invoke-Suite $side $label (Join-Path $side.Dir ('run{0:D2}.xml' -f $run)) | Out-Null
-    }
-}
-
-# ---------------------------------------------------------------------------------------------------------------------------------------------
-# Compare
-# ---------------------------------------------------------------------------------------------------------------------------------------------
-
-$compareScript = Join-Path $PSScriptRoot 'multi_compare_perf.py'
-$csv = Join-Path $outDir 'comparison.csv'
-$compareArgs = @($compareScript, (Join-Path $outDir 'baseline'), (Join-Path $outDir 'candidate'),
-    '-o', $csv, '--threshold', $Threshold.ToString([Globalization.CultureInfo]::InvariantCulture))
-
-Write-Host ''
-if (Get-Command $Python -ErrorAction SilentlyContinue) {
-    Write-Step 'Comparing (median over the runs of each side)'
-    & $Python @compareArgs
-    if ($LASTEXITCODE -ne 0) { Write-Warning ('multi_compare_perf.py failed (exit code {0}).' -f $LASTEXITCODE) }
+if ($PSCmdlet.ParameterSetName -ne 'Range') {
+    Invoke-Comparison $Baseline $Candidate $outDir $failures $null
 }
 else {
-    $quoted = ($compareArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
-    Write-Warning ("'{0}' was not found. Compare later with:`n  {0} {1}" -f $Python, $quoted)
+    # The candidates: every commit after the baseline up to the target, oldest first.
+    $baselineSha = Resolve-Commit $Baseline
+    $targetSha = Resolve-Commit $TargetCommit
+    & git -C $RepoPath merge-base --is-ancestor $baselineSha $targetSha
+    if ($LASTEXITCODE -gt 1) { throw ('git merge-base failed for {0} and {1}' -f $Baseline, $TargetCommit) }
+    if ($LASTEXITCODE -ne 0) {
+        throw ("The baseline {0} is not an ancestor of the target {1}, so there is no range of commits between them." -f $Baseline, $TargetCommit)
+    }
+    $range = @(Invoke-Git $RepoPath @('rev-list', '--reverse', '--topo-order', ('{0}..{1}' -f $baselineSha, $targetSha)) |
+        ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($range.Count -eq 0) { throw ("There is no commit between the baseline {0} and the target {1}: they are the same commit." -f $Baseline, $TargetCommit) }
+
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    $entries = @()
+    for ($i = 0; $i -lt $range.Count; $i++) {
+        $sha = $range[$i]
+        $subject = (Invoke-Git $RepoPath @('log', '-1', '--format=%h %s', $sha) | Select-Object -First 1).Trim()
+        $entries += [pscustomobject]@{
+            index   = $i + 1
+            commit  = $sha
+            subject = $subject
+            folder  = ('{0:D2}-{1}' -f ($i + 1), $sha.Substring(0, 9))
+            status  = 'pending'
+        }
+    }
+    [ordered]@{
+        baseline = $baselineSha
+        target   = $targetSha
+        commits  = $entries
+    } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'range.json') -Encoding UTF8
+
+    Write-Step ('{0} candidate commit(s) between {1} (not included) and {2} (included):' -f $entries.Count, $baselineSha.Substring(0, 9), $targetSha.Substring(0, 9))
+    $entries | ForEach-Object { Write-Host ('  {0,2}. {1}' -f $_.index, $_.subject) }
+
+    foreach ($entry in $entries) {
+        Write-Host ''
+        Write-Step ('=== candidate {0}/{1}: {2}' -f $entry.index, $entries.Count, $entry.subject)
+        $candidateFailures = New-Object 'System.Collections.Generic.List[string]'
+        try {
+            $info = [ordered]@{ index = $entry.index; count = $entries.Count; baselineCommit = $baselineSha; targetCommit = $targetSha }
+            Invoke-Comparison $baselineSha $entry.commit (Join-Path $outDir $entry.folder) $candidateFailures $info
+        }
+        catch {
+            # A commit in the middle of a range may not build; the next one can.
+            $candidateFailures.Add(('stopped: {0}' -f $_.Exception.Message))
+            Write-Warning ('Candidate {0} stopped: {1}' -f $entry.subject, $_.Exception.Message)
+        }
+        $entry.status = if ($candidateFailures.Count -eq 0) { 'ok' } else { 'problems' }
+        foreach ($problem in $candidateFailures) { $failures.Add(('{0}: {1}' -f $entry.subject, $problem)) }
+        # Kept up to date, so that a range that is stopped halfway still says how far it got.
+        [ordered]@{ baseline = $baselineSha; target = $targetSha; commits = $entries } |
+            ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'range.json') -Encoding UTF8
+    }
+
+    Write-Host ''
+    Write-Step ('Range finished. One folder per candidate in {0}:' -f $outDir)
+    $entries | ForEach-Object { Write-Host ('  {0,2}. {1,-8} {2}  ({3})' -f $_.index, $_.status, $_.subject, $_.folder) }
 }
 
-Write-Host ''
-Write-Step ('Results: {0}' -f $outDir)
 if ($failures.Count -gt 0) {
     Write-Warning ('{0} problem(s):' -f $failures.Count)
     $failures | ForEach-Object { Write-Warning ('  ' + $_) }

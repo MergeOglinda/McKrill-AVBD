@@ -49,3 +49,22 @@ Windows PowerShell 5.1 or PowerShell 7, with git, Python 3 and the Unity editor 
 4. runs `multi_compare_perf.py` on the two result folders.
 
 The output goes to `<OutRoot>\<timestamp>\`: `baseline\runNN.xml` and `.log`, `candidate\...`, `meta.json` (refs, commits, GPU, editor) and `comparison.csv`. A run without a result file, a result with a failed test or with another number of test cases than `-ExpectedTests` (default 5) is listed at the end and makes the exit code 1. The tests need a GPU: the script never passes `-nographics`, and the machine should be idle while it runs. Use `origin/<branch>` to take the remote state of a branch (the script fetches first unless `-NoFetch`); a plain name is the local branch.
+
+### A range of commits: `-TargetCommit`
+
+```
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -TargetCommit 5555555 [-Runs 8] [-Warmup]
+```
+
+Instead of `-Candidate`, `-TargetCommit` takes the last commit of a range. The baseline stays the same and the candidate becomes every commit after the baseline up to and including the target, oldest first. With the commits `1111111` (oldest), `2222222`, `3333333`, `4444444` and `5555555` (newest), the call above does the same as these three invocations:
+
+```
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -Candidate 3333333
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -Candidate 4444444
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -Candidate 5555555
+```
+
+- The commits are those of `git rev-list --reverse --topo-order <baseline>..<target>`, so when the range holds a merge, the commits of the merged branch are in it too. The baseline must be an ancestor of the target. The script fetches once, resolves the range, lists it, and then goes through it.
+- Each candidate gets its own `-Runs` runs (and its own `-Warmup`), and the baseline is run again next to each one, so that a drift of the machine between candidates does not move a comparison. The cost is `-Runs` times two suite runs per commit.
+- Each candidate's results are in `<OutRoot>\<timestamp>\NN-<commit>\`, laid out as for a single comparison (`baseline`, `candidate`, `meta.json`, `comparison.csv`). `range.json` in `<timestamp>` lists the commits with the status of each (`pending`, `ok`, `problems`) and is updated after every candidate.
+- A commit in the middle of a range may not build. That candidate is reported (and makes the exit code 1) and the range goes on with the next commit.
