@@ -124,6 +124,15 @@ namespace McKrill.Avbd
 
         public bool IsAlive(BodyHandle handle) => queue.IsAlive(handle);
 
+        /// <summary>Number of bodies removed so far; see <see cref="TryGetHandleSince"/>.</summary>
+        internal uint RemovalSerial => queue.FreeSerial;
+
+        /// <summary>
+        /// The handle of the live body in a slot, unless the slot was freed after <paramref name="since"/> (a <see cref="RemovalSerial"/> from the time the
+        /// slot number was computed): a result that names a slot is about the body that was in it then, which is gone if the slot was freed since.
+        /// </summary>
+        internal bool TryGetHandleSince(int slot, uint since, out BodyHandle handle) => queue.TryGetHandleSince(slot, since, out handle);
+
         /// <summary>
         /// Moves the slots that were spawned or removed since the last call into <paramref name="into"/> (which is not cleared first) and
         /// forgets them. The narrow phase uses it to drop the contact history of a recycled slot.

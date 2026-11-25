@@ -20,6 +20,7 @@ namespace McKrill.Avbd
         AvbdBroadphase broadphase;
         readonly int predictKernel;
         readonly int predictExplosionsKernel;
+        readonly int resolveExplosionsKernel;
         readonly int predictForcesKernel;
         readonly int predictForcesExplosionsKernel;
         readonly int forceFieldClearKernel;
@@ -71,6 +72,7 @@ namespace McKrill.Avbd
         // Explosions queued for the next step, and the buffer they are uploaded to (made at the first explosion).
         readonly ExplosionRecord[] pendingExplosions = new ExplosionRecord[MaxExplosionsPerStep];
         int pendingExplosionCount;
+        int pendingAnchoredCount; // of those, the ones whose center is relative to a body
         uint explosionSeed;
         GraphicsBuffer explosionBuffer;
 
@@ -104,6 +106,7 @@ namespace McKrill.Avbd
 
             predictKernel = shaders.Predict.FindKernel("Predict");
             predictExplosionsKernel = shaders.Predict.FindKernel("PredictExplosions");
+            resolveExplosionsKernel = shaders.Predict.FindKernel("ResolveExplosions");
             predictForcesKernel = shaders.Predict.FindKernel("PredictForces");
             predictForcesExplosionsKernel = shaders.Predict.FindKernel("PredictForcesExplosions");
             forceFieldClearKernel = shaders.Predict.FindKernel("ForceFieldClear");
@@ -225,6 +228,39 @@ namespace McKrill.Avbd
         }
 
         /// <summary>
+        /// As <see cref="Explode(float3, float, float)"/>, with the center given relative to a body: <paramref name="localCenter"/> is in the frame of
+        /// <paramref name="body"/> (origin at its center of mass, along its axes). At the start of the step that applies it, the GPU turns it into the world
+        /// position of that point of the body from the pose the last step left, so an explosion that was asked for a few frames ago (a ray cast answers late)
+        /// goes off where that point of the body is now, not where it was. A body that was removed before the step applies it gives no explosion.
+        /// </summary>
+        /// <param name="body">The body the center is relative to.</param>
+        /// <param name="localCenter">The center in the frame of the body, in meters.</param>
+        /// <returns>False if the body is not alive, or if <see cref="MaxExplosionsPerStep"/> explosions are already queued for the next step; the explosion is dropped.</returns>
+        /// <exception cref="System.ArgumentException">A value is not finite, or the radius is not above zero.</exception>
+        public bool Explode(BodyHandle body, float3 localCenter, float radius, float impulse)
+        {
+            if (!math.all(math.isfinite(localCenter)) || !float.IsFinite(radius) || !float.IsFinite(impulse))
+                throw new System.ArgumentException("An explosion needs finite values.");
+            if (!(radius > 0f))
+                throw new System.ArgumentException("The radius of an explosion must be above zero.", nameof(radius));
+            if (!bodies.IsAlive(body))
+                return false;
+            if (pendingExplosionCount >= MaxExplosionsPerStep)
+                return false;
+
+            pendingExplosions[pendingExplosionCount++] = new ExplosionRecord
+            {
+                centerRadius = new float4(float3.zero, radius), // the center is resolved on the GPU
+                impulse = impulse,
+                seed = explosionSeed++,
+                anchorSlot = (uint)body.Slot + 1u,
+                anchorLocal = new float4(localCenter, 0f),
+            };
+            pendingAnchoredCount++;
+            return true;
+        }
+
+        /// <summary>
         /// Adds a force that acts on a group of bodies in every <see cref="Step"/> from now on, until it is removed: stage P adds its acceleration to the
         /// inertial target (the same place as gravity), so contacts and joints resist it like gravity. The group is the bodies whose group mask has a bit
         /// in common with the mask of the field; the label is the group mask that every body already has, so no per-body data is added. A body in
@@ -339,6 +375,7 @@ namespace McKrill.Avbd
             explosionBuffer?.Release();
             explosionBuffer = null;
             pendingExplosionCount = 0;
+            pendingAnchoredCount = 0;
             forceFieldBuffer?.Release();
             forceFieldBuffer = null;
             forceFieldAccumBuffer?.Release();
@@ -399,9 +436,17 @@ namespace McKrill.Avbd
                 if (explosionBuffer == null)
                     explosionBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, MaxExplosionsPerStep, Unity.Collections.LowLevel.Unsafe.UnsafeUtility.SizeOf<ExplosionRecord>());
                 explosionBuffer.SetData(pendingExplosions, 0, 0, pendingExplosionCount);
-                shader.SetBuffer(kernel, ExplosionsId, explosionBuffer);
                 shader.SetInt(ExplosionCountId, pendingExplosionCount);
+                if (pendingAnchoredCount > 0)
+                {
+                    // Centers relative to a body become world positions first, from the poses before this predict moves anything.
+                    shader.SetBuffer(resolveExplosionsKernel, ExplosionsId, explosionBuffer);
+                    bodies.BindTo(shader, resolveExplosionsKernel);
+                    shader.Dispatch(resolveExplosionsKernel, 1, 1, 1);
+                }
+                shader.SetBuffer(kernel, ExplosionsId, explosionBuffer);
                 pendingExplosionCount = 0;
+                pendingAnchoredCount = 0;
             }
 
             bodies.BindTo(shader, kernel);

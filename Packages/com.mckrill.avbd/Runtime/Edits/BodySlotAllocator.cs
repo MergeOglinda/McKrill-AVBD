@@ -9,16 +9,19 @@ namespace McKrill.Avbd
     internal sealed class BodySlotAllocator
     {
         readonly uint[] generations;
+        readonly uint[] freedAt;
         readonly bool[] alive;
         readonly int[] freeSlots;
         int freeCount;
         int nextFresh;
         int aliveCount;
+        uint freeSerial;
 
         public BodySlotAllocator(int capacity)
         {
             BodyBufferCapacity.Validate(capacity);
             generations = new uint[capacity];
+            freedAt = new uint[capacity];
             alive = new bool[capacity];
             freeSlots = new int[capacity];
         }
@@ -57,7 +60,8 @@ namespace McKrill.Avbd
 
             int slot = handle.Slot;
             alive[slot] = false;
-            unchecked { generations[slot]++; }
+            unchecked { generations[slot]++; freeSerial++; }
+            freedAt[slot] = freeSerial;
             freeSlots[freeCount++] = slot;
             aliveCount--;
             return true;
@@ -69,6 +73,23 @@ namespace McKrill.Avbd
                 return false;
             int slot = handle.Slot;
             return slot < generations.Length && alive[slot] && generations[slot] == handle.Generation;
+        }
+
+        /// <summary>Number of frees so far. A free gets the next number, so "was this slot freed after I looked?" is a comparison with the number from then.</summary>
+        public uint FreeSerial => freeSerial;
+
+        /// <summary>
+        /// The handle of the body in a slot, if it is alive and was not freed after the <paramref name="since"/> (a <see cref="FreeSerial"/> taken earlier).
+        /// For an answer that names a slot and was computed when the serial was <paramref name="since"/> (a GPU ray cast): the body it meant is the one that
+        /// held the slot then, so a slot freed since, and maybe given to another body, has no answer. Wraps after 2^32 frees, which the callers cannot tell apart from none.
+        /// </summary>
+        public bool TryGetHandleSince(int slot, uint since, out BodyHandle handle)
+        {
+            handle = default;
+            if ((uint)slot >= (uint)generations.Length || !alive[slot] || freedAt[slot] > since)
+                return false;
+            handle = new BodyHandle(slot, generations[slot]);
+            return true;
         }
 
         public bool IsSlotAlive(int slot) => (uint)slot < (uint)generations.Length && alive[slot];
