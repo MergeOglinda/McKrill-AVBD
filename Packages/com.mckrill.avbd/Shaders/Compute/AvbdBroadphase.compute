@@ -26,7 +26,9 @@
 //
 // The grid is a counting sort, like three-avbd's: BpCount counts the bodies of every (hashed) cell, a scan turns the counts into the start of
 // every cell's range, BpScatter writes the bodies into a list ordered by cell, and the cell of every body is stored beside it (_BodyCell) so
-// that a probe can drop a hash collision without reading the body. A cell is the cell of the body's position at its level; the level is part
+// that a probe can drop a hash collision without reading the body. The bounding sphere (position and radius, 16 B) is stored beside it too
+// (_BodySphere), so the sphere test of every candidate reads one record and not the state and the shape of the body; the box tests that follow
+// are only reached when the spheres overlap. A cell is the cell of the body's position at its level; the level is part
 // of the hash.
 //   dynamic-dynamic pairs   a solved body looks at the 27 cells around its own at its own level. Two bodies of one level are found by the
 //                           one with the higher slot, which is body A. A fine body also looks at the 27 coarse cells around its position:
@@ -46,7 +48,7 @@
 //   BpClearGrid      zeroes the cell counts and the fill cursors
 //   BpHistogram      histograms of the radii of the live bodies and of the solved ones
 //   BpClassify       one thread: from the histograms, which bodies are large, whether there are two levels, and the cell sizes
-//   BpCount          the cell, level and flags of every body (_BodyCell); counts the bodies of every cell; puts the large bodies in the list
+//   BpCount          the cell, level and flags of every body (_BodyCell) and its bounding sphere (_BodySphere); counts the bodies of every cell; puts the large bodies in the list
 //   BpScanBlock      scan of the counts, 1: every group scans AVBD_BP_SCAN_GROUP cells inside; writes the sum of the block
 //   BpScanTop        scan, 2: one group scans the block sums, and writes the total behind the last cell
 //   BpScanApply      scan, 3: adds the offset of the block
@@ -85,6 +87,7 @@ RWStructuredBuffer<uint>            _GridStart;   // per hashed cell (table size
 RWStructuredBuffer<uint>            _GridCursor;  // per hashed cell: bodies written into the range so far
 RWStructuredBuffer<uint>            _GridSorted;  // the bodies of the grid, ordered by cell
 RWStructuredBuffer<uint>            _GridBlocks;  // sums of the scan blocks
+RWStructuredBuffer<float4>          _BodySphere;  // per body of the grid or the large list: xyz = position, w = radius of the bounding sphere (16 B; written by BpCount, read by the pair kernels)
 RWStructuredBuffer<uint4>           _BodyCell;    // per body: xyz = cell coordinates (int bits), w = AVBD_BP_*_FLAG bits (and AVBD_INVALID if the body is in neither the grid nor the list)
 RWStructuredBuffer<uint>            _LargeList;   // the large bodies
 RWStructuredBuffer<PairRecord>      _Pairs;       // bin 0 (dynamic-dynamic) at [0, _DynamicPairCapacity), then bin 1 (dynamic-static)
@@ -396,6 +399,9 @@ void BpCount(uint3 id : SV_DispatchThreadID)
     if (!IsFinite3(position) || !isfinite(radius))
         return; // a body at a non-finite position makes no pairs
 
+    // The sphere the pair tests read for every candidate: one 16 B record instead of the position (state record) and the size (shape record).
+    _BodySphere[slot] = float4(position, radius);
+
     BpGrid grid = LoadGrid();
     uint flags = kind == CLASS_STATIC ? AVBD_BP_STATIC_FLAG : 0u;
     uint bin = RadiusBin(radius);
@@ -501,8 +507,9 @@ BpProbe MakeProbe(uint slot, bool solved)
     BpProbe probe;
     probe.slot = slot;
     probe.solved = solved;
-    probe.position = _BodyState[slot].position.xyz;
-    probe.radius = Radius(slot);
+    float4 sphere = _BodySphere[slot];
+    probe.position = sphere.xyz;
+    probe.radius = sphere.w;
     probe.box = MakeBpBox(slot); // once per body, not once per candidate
     return probe;
 }
@@ -515,7 +522,8 @@ void TestPair(BpProbe probe, uint other)
     if (!probe.solved && otherStatic)
         return; // two static bodies make no pair
 
-    if (SpheresOverlap(probe.position, probe.radius, _BodyState[other].position.xyz, Radius(other)))
+    float4 otherSphere = _BodySphere[other];
+    if (SpheresOverlap(probe.position, probe.radius, otherSphere.xyz, otherSphere.w))
     {
         if (!BoxesSeparated(probe.box, MakeBpBox(other)))
         {

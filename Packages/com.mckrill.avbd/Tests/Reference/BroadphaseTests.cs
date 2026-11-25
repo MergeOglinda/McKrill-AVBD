@@ -532,6 +532,39 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void Gpu_StoresTheBoundingSphereOfEveryLiveBody()
+        {
+            RequireCompute();
+            var solver = new ReferenceSolver();
+            DenseRandom(solver, 77, 100);
+            SceneArrays scene = ConstraintTestScenes.FromReference(solver, Capacity);
+
+            using (var buffers = new AvbdBodyBuffers(Capacity))
+            using (var constraints = new AvbdConstraintBuffers(buffers, 128))
+            using (var broadphase = new AvbdBroadphase(RequireShader(), Capacity, BigBin, BigBin))
+            {
+                Fill(buffers, constraints, scene);
+                Assert.AreEqual(AvbdBroadphase.SphereStride, broadphase.Spheres.stride);
+                Assert.AreEqual(Capacity, broadphase.Spheres.count);
+
+                broadphase.Run(buffers, constraints);
+                var spheres = new float4[Capacity];
+                broadphase.Spheres.GetData(spheres);
+                CpuBodyArrays bodies = ReadBodies(buffers);
+
+                for (int s = 0; s < scene.bodyCount; s++)
+                {
+                    Assert.IsFalse(bodies.IsFree(s), "slot " + s);
+                    float3 position = bodies.State[s].position.xyz;
+                    Assert.AreEqual(position.x, spheres[s].x, "x of slot " + s);
+                    Assert.AreEqual(position.y, spheres[s].y, "y of slot " + s);
+                    Assert.AreEqual(position.z, spheres[s].z, "z of slot " + s);
+                    Assert.AreEqual(CpuBroadphase.Radius(bodies, s), spheres[s].w, "radius of slot " + s);
+                }
+            }
+        }
+
+        [Test]
         public void Gpu_HandlesNoBodiesAndNoSolvedBodies()
         {
             RequireCompute();

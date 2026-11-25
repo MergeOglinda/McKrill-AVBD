@@ -509,13 +509,15 @@ Control words (`_BpControl`, `AVBD_BP_CONTROL_WORDS` = 1296): 0 upper bound of t
 
 `_BodyCell` (`uint4`) per body: xyz = the cell coordinates of the body on its level (int bits), w = flags: `AVBD_BP_COARSE_FLAG` (1) the body is in the coarse level, `AVBD_BP_LARGE_FLAG` (2) it is in the large list, `AVBD_BP_STATIC_FLAG` (0x80000000) it is not solved; `AVBD_INVALID` when the body is in neither (free, non-finite).
 
+`_BodySphere` (`float4`, 16 B) per body: xyz = position, w = the radius of the bounding sphere (`|size| / 2`). `BpCount` writes it for every live body with a finite position and radius (the bodies of the grid and of the large list; the entries of other slots are not read). The pair kernels read it where they only need the sphere: the probe loads its own once, and `TestPair` loads the other body's, so the sphere test of every candidate is one 16 B read where it was a state record (the position is in the first sector of a 64 B record) plus a shape record (size and friction) and a square root. A body is read in full (`MakeBpBox`: pose and size) only when the spheres overlap. The buffer is owned by `AvbdBroadphase` (`bodyCapacity` entries, 16 B each), not by `AvbdBodyBuffers`: nothing else reads it.
+
 | Kernel | What |
 | --- | --- |
 | `BpReset` | Zeroes the control words |
 | `BpClearGrid` | Zeroes the grid starts and cursors |
 | `BpHistogram` | Counts the radii of live bodies and of solved bodies into the two histograms |
 | `BpClassify` | One thread: median, cut, small bin, fine bin, levels, cell sizes, large count; appends no pairs |
-| `BpCount` | Cell and level of every grid body (stored in `_BodyCell`), atomic count per table index; puts large bodies into the large list |
+| `BpCount` | Cell and level of every grid body (stored in `_BodyCell`), its bounding sphere (stored in `_BodySphere`), atomic count per table index; puts large bodies into the large list |
 | `BpScanBlock`, `BpScanTop`, `BpScanApply` | Exclusive prefix sum of the counts |
 | `BpScatter` | Writes each grid body into its cell's range |
 | `BpPairs` | The probe of every solved body (27 cells on its level and above) and the large list; appends to bin 0 and bin 1 |
