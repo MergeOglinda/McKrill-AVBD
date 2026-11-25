@@ -8,7 +8,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
 
-StructuredBuffer<BodyStateRecord>   _BodyState;
+StructuredBuffer<BodyPoseRecord>    _BodyPose;
 StructuredBuffer<BodyShapeRecord>   _BodyShape;
 StructuredBuffer<uint>             _BodyFlags;
 RWStructuredBuffer<BodyMetaRecord>  _BodyMeta;   // the group mask (ident.y)
@@ -30,7 +30,7 @@ void Label(uint3 id : SV_DispatchThreadID)
         return;
 
     // The point in the box's frame, where the box is axis-aligned and centered at the origin: the distance to it is the length of what sticks out.
-    BodyStateRecord s = _BodyState[slot];
+    BodyPoseRecord s = _BodyPose[slot];
     float3 local = AvbdQuatRotate(AvbdQuatConjugate(s.rotation), _LabelCenter.xyz - s.position.xyz);
     float3 outside = max(abs(local) - _BodyShape[slot].sizeFriction.xyz * 0.5, 0.0);
     if (dot(outside, outside) > _LabelCenter.w * _LabelCenter.w)

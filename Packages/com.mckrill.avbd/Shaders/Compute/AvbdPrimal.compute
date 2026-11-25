@@ -522,7 +522,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
         // instead of one after the other (flags, then mass, then pose, then the range of the list). A body that is skipped below has wasted a few reads.
         uint bodyFlags = _BodyFlags[slot];
         momentMass = _BodyMass[slot].momentMass;
-        BodyStateRecord state = _BodyState[slot];
+        BodyPoseRecord ownPose = _BodyPose[slot];
         range = _BodyRange[slot].range.xy;
         if (lane == 0u)
             inertial = _BodyInertial[slot];
@@ -535,8 +535,8 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
             mass = momentMass.w;
             active = mass > 0.0;
         }
-        position = state.position.xyz;
-        rotation = state.rotation;
+        position = ownPose.position.xyz;
+        rotation = ownPose.rotation;
     }
 
     PrimalSystem sys;

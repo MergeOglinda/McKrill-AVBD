@@ -26,7 +26,8 @@ struct BodyStateRecord
 };
 
 // 32 B, hot. A copy of the current pose (position and rotation) of BodyStateRecord, for the readers that only need that half of it: the primal and dual
-// stages read the pose of the neighbors of a joint or spring, and a 32 B record puts twice as many bodies in a cache line as the 64 B state record. Every
+// stages read the pose of the neighbors of a joint or spring (and the primal sweep that of the body it solves), the broadphase, Predict, the ray cast and the
+// group kernels read the pose of a body, and a 32 B record puts twice as many bodies in a cache line as the 64 B state record. Every
 // kernel that writes BodyStateRecord.position or .rotation writes this record too (stage E, Predict, the group mover and the primal sweep); nothing
 // else writes it, so the two never differ. Free slots hold the same values as the state record.
 struct BodyPoseRecord

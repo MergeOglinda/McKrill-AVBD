@@ -223,7 +223,11 @@ void PredictSlot(uint slot)
     float dt = AVBD_DT;
     float3 gravity = AVBD_GRAVITY;
 
-    BodyStateRecord s = _BodyState[slot];
+    // Only the current pose is read, from the 32 B pose record; the whole state record is written below (the start-of-step pose is this pose).
+    BodyPoseRecord current = _BodyPose[slot];
+    BodyStateRecord s = (BodyStateRecord)0;
+    s.position = current.position;
+    s.rotation = current.rotation;
     BodyMotionRecord v = _BodyMotion[slot];
     float3 position = s.position.xyz;
 #ifdef AVBD_EXPLOSIONS
@@ -321,7 +325,7 @@ void ForceFieldAccumulate(uint3 id : SV_DispatchThreadID)
         return;
 
     uint groupMask = _BodyMeta[slot].ident.y;
-    float3 position = _BodyState[slot].position.xyz;
+    float3 position = _BodyPose[slot].position.xyz;
     for (uint i = 0u; i < _ForceFieldCount; i++)
     {
         ForceFieldRecord f = _ForceFields[i];

@@ -106,7 +106,7 @@ void HoldCapture(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    _HoldOffsets[slot] = HoldMember(slot) ? float4(_BodyState[slot].position.xyz - _HoldPoint.xyz, 1.0) : float4(0.0, 0.0, 0.0, 0.0);
+    _HoldOffsets[slot] = HoldMember(slot) ? float4(_BodyPose[slot].position.xyz - _HoldPoint.xyz, 1.0) : float4(0.0, 0.0, 0.0, 0.0);
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]

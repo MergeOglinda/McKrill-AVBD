@@ -8,7 +8,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
 
-StructuredBuffer<BodyStateRecord> _BodyState;
+StructuredBuffer<BodyPoseRecord>  _BodyPose;
 StructuredBuffer<BodyShapeRecord> _BodyShape;
 StructuredBuffer<uint>             _BodyFlags;
 
@@ -37,7 +37,7 @@ void Cast(uint3 id : SV_DispatchThreadID)
         return;
 
     // The ray in the box's frame, where the box is axis-aligned and centered at the origin: the slab method.
-    BodyStateRecord s = _BodyState[slot];
+    BodyPoseRecord s = _BodyPose[slot];
     float4 inverse = AvbdQuatConjugate(s.rotation);
     float3 o = AvbdQuatRotate(inverse, _RayOrigin.xyz - s.position.xyz);
     float3 d = AvbdQuatRotate(inverse, _RayDirection.xyz);

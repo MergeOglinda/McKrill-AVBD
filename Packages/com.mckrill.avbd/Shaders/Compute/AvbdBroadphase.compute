@@ -74,7 +74,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBroadphaseParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdQuaternion.hlsl"
 
-StructuredBuffer<BodyStateRecord>   _BodyState;
+StructuredBuffer<BodyPoseRecord>    _BodyPose;    // position and rotation, 32 B per body (the broadphase never needs the start-of-step pose)
 StructuredBuffer<BodyMassRecord>    _BodyMass;
 StructuredBuffer<BodyShapeRecord>   _BodyShape;
 StructuredBuffer<uint>               _BodyFlags;
@@ -210,13 +210,13 @@ struct BpBox
 
 BpBox MakeBpBox(uint slot)
 {
-    BodyStateRecord state = _BodyState[slot];
+    BodyPoseRecord pose = _BodyPose[slot];
     BpBox box;
-    box.center = state.position.xyz;
+    box.center = pose.position.xyz;
     box.halfSize = _BodyShape[slot].sizeFriction.xyz * 0.5;
-    box.axis0 = AvbdQuatRotate(state.rotation, float3(1.0, 0.0, 0.0));
-    box.axis1 = AvbdQuatRotate(state.rotation, float3(0.0, 1.0, 0.0));
-    box.axis2 = AvbdQuatRotate(state.rotation, float3(0.0, 0.0, 1.0));
+    box.axis0 = AvbdQuatRotate(pose.rotation, float3(1.0, 0.0, 0.0));
+    box.axis1 = AvbdQuatRotate(pose.rotation, float3(0.0, 1.0, 0.0));
+    box.axis2 = AvbdQuatRotate(pose.rotation, float3(0.0, 0.0, 1.0));
     box.aabb = abs(box.axis0) * box.halfSize.x + abs(box.axis1) * box.halfSize.y + abs(box.axis2) * box.halfSize.z;
     return box;
 }
@@ -394,7 +394,7 @@ void BpCount(uint3 id : SV_DispatchThreadID)
     if (kind == CLASS_FREE)
         return;
 
-    float3 position = _BodyState[slot].position.xyz;
+    float3 position = _BodyPose[slot].position.xyz;
     float radius = Radius(slot);
     if (!IsFinite3(position) || !isfinite(radius))
         return; // a body at a non-finite position makes no pairs
