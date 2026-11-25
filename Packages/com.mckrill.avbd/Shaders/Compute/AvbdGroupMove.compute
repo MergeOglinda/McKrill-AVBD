@@ -23,9 +23,11 @@
 #define AVBD_MOVE_ANGULAR_VELOCITY 4u
 
 RWStructuredBuffer<BodyStateRecord>  _BodyState;
+RWStructuredBuffer<BodyPoseRecord>   _BodyPose; // a copy of the pose in _BodyState (see BodyPoseRecord)
 RWStructuredBuffer<BodyMotionRecord> _BodyMotion;
 StructuredBuffer<BodyMassRecord>     _BodyMass;
-StructuredBuffer<BodyMetaRecord>     _BodyMeta;
+StructuredBuffer<uint>                _BodyFlags;
+StructuredBuffer<BodyMetaRecord>     _BodyMeta;       // the group mask (ident.y)
 
 float4 _MoveTranslation; // xyz: added to the position (with AVBD_MOVE_POSITION)
 float4 _MoveLinear;      // xyz: the new linear velocity (with AVBD_MOVE_LINEAR_VELOCITY)
@@ -38,6 +40,15 @@ float4 _HoldPoint;                       // xyz: the held point (HoldCapture: wh
 uint _Base;
 uint _Count; // slots to process: [0, _Count)
 
+// The compact copy of the pose of a slot (see BodyPoseRecord): every write of the pose in _BodyState is followed by this.
+void WritePose(uint slot, BodyStateRecord s)
+{
+    BodyPoseRecord pose;
+    pose.position = s.position;
+    pose.rotation = s.rotation;
+    _BodyPose[slot] = pose;
+}
+
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void Move(uint3 id : SV_DispatchThreadID)
 {
@@ -45,10 +56,9 @@ void Move(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    BodyMetaRecord meta = _BodyMeta[slot];
-    if (meta.ident.x & AVBD_BODY_FLAG_FREE)
+    if (_BodyFlags[slot] & AVBD_BODY_FLAG_FREE)
         return;
-    if ((meta.ident.y & _MoveControl.x) == 0u)
+    if ((_BodyMeta[slot].ident.y & _MoveControl.x) == 0u)
         return;
     if (!(_BodyMass[slot].momentMass.w > 0.0))
         return;
@@ -61,6 +71,7 @@ void Move(uint3 id : SV_DispatchThreadID)
         s.startPosition = s.position;
         s.startRotation = s.rotation;
         _BodyState[slot] = s;
+        WritePose(slot, s);
     }
 
     if (fields & (AVBD_MOVE_LINEAR_VELOCITY | AVBD_MOVE_ANGULAR_VELOCITY))
@@ -80,10 +91,9 @@ void Move(uint3 id : SV_DispatchThreadID)
 // The bodies a hold acts on: the ones Move would move.
 bool HoldMember(uint slot)
 {
-    BodyMetaRecord meta = _BodyMeta[slot];
-    if (meta.ident.x & AVBD_BODY_FLAG_FREE)
+    if (_BodyFlags[slot] & AVBD_BODY_FLAG_FREE)
         return false;
-    if ((meta.ident.y & _MoveControl.x) == 0u)
+    if ((_BodyMeta[slot].ident.y & _MoveControl.x) == 0u)
         return false;
     return _BodyMass[slot].momentMass.w > 0.0;
 }
@@ -96,7 +106,7 @@ void HoldCapture(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    _HoldOffsets[slot] = HoldMember(slot) ? float4(_BodyState[slot].position.xyz - _HoldPoint.xyz, 1.0) : float4(0.0, 0.0, 0.0, 0.0);
+    _HoldOffsets[slot] = HoldMember(slot) ? float4(_BodyPose[slot].position.xyz - _HoldPoint.xyz, 1.0) : float4(0.0, 0.0, 0.0, 0.0);
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
@@ -117,6 +127,7 @@ void HoldApply(uint3 id : SV_DispatchThreadID)
     s.startPosition = s.position;
     s.startRotation = s.rotation;
     _BodyState[slot] = s;
+    WritePose(slot, s);
 
     BodyMotionRecord v = _BodyMotion[slot];
     v.linearVel.xyz = _MoveLinear.xyz;

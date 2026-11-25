@@ -7,6 +7,7 @@
 //   PredictForces            adds the acceleration of the force fields (AvbdSolver.AddForceField) to the inertial target.
 //   PredictForcesExplosions  both: the explosions first, and the force fields see the velocity they left.
 //   ForceFieldClear, ForceFieldAccumulate   before a predict with spring fields: the centroid of the group of each spring (see AvbdForceFields.hlsl).
+//   BuildSolveHeader         once per step, after the constraint init: the 32 B record per body that the primal sweep reads (BodySolveRecord).
 // The code and the buffers of the explosions and of the force fields only exist in the kernels that use them, so a step without either runs exactly
 // the code it ran before them.
 
@@ -16,15 +17,20 @@
 #pragma kernel PredictForcesExplosions AVBD_FORCES AVBD_EXPLOSIONS
 #pragma kernel ForceFieldClear AVBD_FORCES
 #pragma kernel ForceFieldAccumulate AVBD_FORCES
+#pragma kernel BuildSolveHeader
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdSolverParams.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdMath.hlsl"
 
 RWStructuredBuffer<BodyStateRecord>    _BodyState;
+RWStructuredBuffer<BodyPoseRecord>     _BodyPose;      // a copy of the pose in _BodyState (see BodyPoseRecord)
 RWStructuredBuffer<BodyInertialRecord> _BodyInertial;
 StructuredBuffer<BodyMassRecord>       _BodyMass;
-StructuredBuffer<BodyMetaRecord>       _BodyMeta;
+StructuredBuffer<uint>                 _BodyFlags;
+StructuredBuffer<BodyRangeRecord>      _BodyRange;
+RWStructuredBuffer<BodySolveRecord>    _BodySolve;      // written by BuildSolveHeader only
+StructuredBuffer<BodyMetaRecord>       _BodyMeta;       // the group mask (ident.y), for the force fields
 
 #ifdef AVBD_EXPLOSIONS
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdExplosions.hlsl"
@@ -211,7 +217,7 @@ void PredictSlot(uint slot)
         return;
 
     // Free slots, kinematic bodies and static bodies (mass 0) are not predicted and keep their pose.
-    uint flags = _BodyMeta[slot].ident.x;
+    uint flags = _BodyFlags[slot];
     if (flags & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
         return;
     float mass = _BodyMass[slot].momentMass.w;
@@ -221,7 +227,11 @@ void PredictSlot(uint slot)
     float dt = AVBD_DT;
     float3 gravity = AVBD_GRAVITY;
 
-    BodyStateRecord s = _BodyState[slot];
+    // Only the current pose is read, from the 32 B pose record; the whole state record is written below (the start-of-step pose is this pose).
+    BodyPoseRecord current = _BodyPose[slot];
+    BodyStateRecord s = (BodyStateRecord)0;
+    s.position = current.position;
+    s.rotation = current.rotation;
     BodyMotionRecord v = _BodyMotion[slot];
     float3 position = s.position.xyz;
 #ifdef AVBD_EXPLOSIONS
@@ -261,6 +271,10 @@ void PredictSlot(uint slot)
     s.position = float4(position + linearVel * dt + gravity * (accelWeight * dt * dt), 0.0);
     s.rotation = predictedRot;
     _BodyState[slot] = s;
+    BodyPoseRecord pose;
+    pose.position = s.position;
+    pose.rotation = s.rotation;
+    _BodyPose[slot] = pose;
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
@@ -309,13 +323,13 @@ void ForceFieldAccumulate(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
+    if (_BodyFlags[slot] & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
         return;
     if (!(_BodyMass[slot].momentMass.w > 0.0))
         return;
 
     uint groupMask = _BodyMeta[slot].ident.y;
-    float3 position = _BodyState[slot].position.xyz;
+    float3 position = _BodyPose[slot].position.xyz;
     for (uint i = 0u; i < _ForceFieldCount; i++)
     {
         ForceFieldRecord f = _ForceFields[i];
@@ -330,3 +344,20 @@ void ForceFieldAccumulate(uint3 id : SV_DispatchThreadID)
     }
 }
 #endif
+
+// Once per step, after the edits, the lists and the colors: gathers what the primal sweep reads of a body (moments and mass, flags, range in the
+// constraint list) into one 32 B record, so that every sweep reads one sector per body and not three. Every slot below _Count, free ones too, so that
+// the record of a recycled slot is never stale.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void BuildSolveHeader(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+
+    BodySolveRecord r;
+    r.momentMass = _BodyMass[slot].momentMass;
+    uint2 range = _BodyRange[slot].range.xy;
+    r.info = uint4(_BodyFlags[slot], range.x, range.y, 0u);
+    _BodySolve[slot] = r;
+}

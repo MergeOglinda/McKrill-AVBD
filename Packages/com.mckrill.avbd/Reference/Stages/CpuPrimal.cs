@@ -28,7 +28,7 @@ namespace McKrill.Avbd.Reference
         public static bool SolveBody(CpuBodyArrays bodies, ConstraintRecord[] constraints, ConstraintTopology topology, int slot, in AvbdSolverSettings settings,
             PlasticRecord[] plastic = null)
         {
-            uint flagsWord = bodies.Meta[slot].ident.x;
+            uint flagsWord = bodies.Flags[slot];
             if ((flagsWord & ((uint)BodyFlags.Free | (uint)BodyFlags.Kinematic)) != 0u)
                 return true;
             float4 momentMass = bodies.Mass[slot].momentMass;

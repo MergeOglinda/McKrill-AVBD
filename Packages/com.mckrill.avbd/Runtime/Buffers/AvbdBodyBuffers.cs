@@ -29,12 +29,16 @@ namespace McKrill.Avbd
         static readonly int CommandCountId = Shader.PropertyToID("_CommandCount");
         static readonly int CommandsId = Shader.PropertyToID("_Commands");
         static readonly int BodyStateId = Shader.PropertyToID("_BodyState");
+        static readonly int BodyPoseId = Shader.PropertyToID("_BodyPose");
         static readonly int BodyInertialId = Shader.PropertyToID("_BodyInertial");
         static readonly int BodyMassId = Shader.PropertyToID("_BodyMass");
         static readonly int BodyMotionId = Shader.PropertyToID("_BodyMotion");
         static readonly int BodyShapeId = Shader.PropertyToID("_BodyShape");
         static readonly int BodyMetaId = Shader.PropertyToID("_BodyMeta");
         static readonly int BodyRangeId = Shader.PropertyToID("_BodyRange");
+        static readonly int BodyFlagsId = Shader.PropertyToID("_BodyFlags");
+        static readonly int BodyColorId = Shader.PropertyToID("_BodyColor");
+        static readonly int BodySolveId = Shader.PropertyToID("_BodySolve");
 
         readonly BodyEditQueue queue;
         readonly ComputeShader shader;
@@ -45,12 +49,16 @@ namespace McKrill.Avbd
         readonly HashSet<int> structuralSlots = new HashSet<int>();
 
         GraphicsBuffer state;
+        GraphicsBuffer pose;
         GraphicsBuffer inertial;
         GraphicsBuffer mass;
         GraphicsBuffer motion;
         GraphicsBuffer shape;
         GraphicsBuffer meta;
         GraphicsBuffer range;
+        GraphicsBuffer flags;
+        GraphicsBuffer color;
+        GraphicsBuffer solve;
         GraphicsBuffer commands;
         bool disposed;
 
@@ -77,12 +85,16 @@ namespace McKrill.Avbd
             try
             {
                 state = Create(capacity, BodyRecordStrides.State);
+                pose = Create(capacity, BodyRecordStrides.Pose);
                 inertial = Create(capacity, BodyRecordStrides.Inertial);
                 mass = Create(capacity, BodyRecordStrides.Mass);
                 motion = Create(capacity, BodyRecordStrides.Motion);
                 shape = Create(capacity, BodyRecordStrides.Shape);
                 meta = Create(capacity, BodyRecordStrides.Meta);
                 range = Create(capacity, BodyRecordStrides.Range);
+                flags = Create(capacity, BodyRecordStrides.Flags);
+                color = Create(capacity, BodyRecordStrides.Color);
+                solve = Create(capacity, BodyRecordStrides.Solve);
                 commands = Create(commandBatchSize, EditCommandStride.Size);
             }
             catch
@@ -138,12 +150,25 @@ namespace McKrill.Avbd
         // Read-only by convention: only stage E writes the fields it owns (design doc, section 1).
 
         public GraphicsBuffer State => state;
+
+        /// <summary>The current pose of every body (position, rotation), 32 B per body: a copy of the pose in <see cref="State"/> that the kernels that write it keep in step.</summary>
+        public GraphicsBuffer Pose => pose;
+
         public GraphicsBuffer Inertial => inertial;
         public GraphicsBuffer Mass => mass;
         public GraphicsBuffer Motion => motion;
         public GraphicsBuffer Shape => shape;
         public GraphicsBuffer Meta => meta;
         public GraphicsBuffer Range => range;
+
+        /// <summary>The flags word of every body (<see cref="BodyFlagLayout"/>: flags in the low 24 bits, the shape kind in the high 8), one uint per body.</summary>
+        public GraphicsBuffer Flags => flags;
+
+        /// <summary>The graph color of every body, one uint per body: <see cref="AvbdConst.Invalid"/> for a body that is not solved.</summary>
+        public GraphicsBuffer Color => color;
+
+        /// <summary>The primal sweep's view of every body (<see cref="BodySolveRecord"/>), derived once per step by <see cref="AvbdSolver.DispatchSolveHeader"/>. Stale between edits and that dispatch.</summary>
+        public GraphicsBuffer Solve => solve;
 
         // ---- edits (recorded now, applied by ApplyEdits) ------------------------------------------------
 
@@ -296,18 +321,22 @@ namespace McKrill.Avbd
         void BindBodyBuffers(int kernel) => BindTo(shader, kernel);
 
         /// <summary>
-        /// Binds all seven body arrays to a kernel under the standard names (_BodyState, _BodyInertial, _BodyMass,
-        /// _BodyMotion, _BodyShape, _BodyMeta, _BodyRange). A kernel that does not declare one of them ignores it.
+        /// Binds all eleven body arrays to a kernel under the standard names (_BodyState, _BodyPose, _BodyInertial, _BodyMass,
+        /// _BodyMotion, _BodyShape, _BodyMeta, _BodyRange, _BodyFlags, _BodyColor, _BodySolve). A kernel that does not declare one of them ignores it.
         /// </summary>
         internal void BindTo(ComputeShader target, int kernel)
         {
             target.SetBuffer(kernel, BodyStateId, state);
+            target.SetBuffer(kernel, BodyPoseId, pose);
             target.SetBuffer(kernel, BodyInertialId, inertial);
             target.SetBuffer(kernel, BodyMassId, mass);
             target.SetBuffer(kernel, BodyMotionId, motion);
             target.SetBuffer(kernel, BodyShapeId, shape);
             target.SetBuffer(kernel, BodyMetaId, meta);
             target.SetBuffer(kernel, BodyRangeId, range);
+            target.SetBuffer(kernel, BodyFlagsId, flags);
+            target.SetBuffer(kernel, BodyColorId, color);
+            target.SetBuffer(kernel, BodySolveId, solve);
         }
 
         void ThrowIfDisposed()
@@ -323,12 +352,16 @@ namespace McKrill.Avbd
             disposed = true;
 
             Release(ref state);
+            Release(ref pose);
             Release(ref inertial);
             Release(ref mass);
             Release(ref motion);
             Release(ref shape);
             Release(ref meta);
             Release(ref range);
+            Release(ref flags);
+            Release(ref color);
+            Release(ref solve);
             Release(ref commands);
         }
 

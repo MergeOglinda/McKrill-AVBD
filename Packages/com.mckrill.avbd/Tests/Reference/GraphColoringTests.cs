@@ -143,10 +143,10 @@ namespace McKrill.Avbd.Tests
                 Assert.GreaterOrEqual(constraints.ColorCount, 2);
                 Assert.LessOrEqual(constraints.ColorCount, 3, "a chain needs 2 colors; first-fit never needs more than degree + 1 = 3");
 
-                var meta = new BodyMetaRecord[256];
-                buffers.Meta.GetData(meta);
+                var gpuColors = new uint[256];
+                buffers.Color.GetData(gpuColors);
                 for (int i = 1; i < links; i++)
-                    Assert.AreNotEqual(meta[handles[i - 1].Slot].state.x, meta[handles[i].Slot].state.x, "neighbors " + i + " share a color");
+                    Assert.AreNotEqual(gpuColors[handles[i - 1].Slot], gpuColors[handles[i].Slot], "neighbors " + i + " share a color");
             }
 
             Assert.GreaterOrEqual(slotRounds, links, "the slot order is a chain of dependencies");
@@ -169,11 +169,11 @@ namespace McKrill.Avbd.Tests
                 constraints.AddJoint(b, fixedBody, new float3(1f, 0f, 0f), new float3(-1f, 0f, 0f));
                 constraints.Rebuild();
 
-                var meta = new BodyMetaRecord[16];
-                buffers.Meta.GetData(meta);
+                var gpuColors = new uint[16];
+                buffers.Color.GetData(gpuColors);
                 Assert.AreEqual(2, constraints.ColorCount);
-                Assert.AreNotEqual(meta[a.Slot].state.x, meta[b.Slot].state.x);
-                Assert.AreEqual(NoColor, meta[fixedBody.Slot].state.x, "a fixed body has no color");
+                Assert.AreNotEqual(gpuColors[a.Slot], gpuColors[b.Slot]);
+                Assert.AreEqual(NoColor, gpuColors[fixedBody.Slot], "a fixed body has no color");
                 Assert.AreEqual(2, constraints.ColorSize(0) + constraints.ColorSize(1), "only the two solved bodies are bucketed");
                 Assert.IsFalse(constraints.NeedsRebuild);
 
@@ -184,10 +184,10 @@ namespace McKrill.Avbd.Tests
                 constraints.AddJoint(b, c, new float3(0f, 1f, 0f), new float3(1f, 0f, 0f));
                 constraints.Rebuild();
 
-                buffers.Meta.GetData(meta);
+                buffers.Color.GetData(gpuColors);
                 Assert.AreEqual(3, constraints.ColorCount);
-                Assert.AreNotEqual(meta[a.Slot].state.x, meta[c.Slot].state.x);
-                Assert.AreNotEqual(meta[b.Slot].state.x, meta[c.Slot].state.x);
+                Assert.AreNotEqual(gpuColors[a.Slot], gpuColors[c.Slot]);
+                Assert.AreNotEqual(gpuColors[b.Slot], gpuColors[c.Slot]);
 
                 // A body without constraints is solved too (it needs the inertia solve) and takes the first color.
                 BodyHandle loose = buffers.Spawn(BodyDescriptor.Box(new float3(1f), 1f, new float3(10f, 0f, 0f)));
@@ -195,8 +195,8 @@ namespace McKrill.Avbd.Tests
                 buffers.ApplyEdits();
                 Assert.IsTrue(constraints.NeedsRebuild, "a spawned body changes the set of solved bodies");
                 constraints.Rebuild();
-                buffers.Meta.GetData(meta);
-                Assert.AreEqual(0u, meta[loose.Slot].state.x);
+                buffers.Color.GetData(gpuColors);
+                Assert.AreEqual(0u, gpuColors[loose.Slot]);
                 Assert.AreEqual(3, constraints.ColorCount);
                 Assert.AreEqual(4, constraints.ColorSize(0) + constraints.ColorSize(1) + constraints.ColorSize(2));
 
@@ -204,8 +204,8 @@ namespace McKrill.Avbd.Tests
                 buffers.SetKinematic(c, true);
                 buffers.ApplyEdits();
                 constraints.Rebuild();
-                buffers.Meta.GetData(meta);
-                Assert.AreEqual(NoColor, meta[c.Slot].state.x);
+                buffers.Color.GetData(gpuColors);
+                Assert.AreEqual(NoColor, gpuColors[c.Slot]);
                 Assert.AreEqual(2, constraints.ColorCount, "a and b are alone again");
             }
         }
@@ -393,16 +393,16 @@ namespace McKrill.Avbd.Tests
                     constraints.ColorStepForTests(); // the step from scratch that follows a rebuild
 
                     // Give every solved body the color 0 or 1 (by slot): a great many clashes.
-                    var meta = new BodyMetaRecord[buffers.Capacity];
-                    buffers.Meta.GetData(meta);
+                    var gpuColors = new uint[buffers.Capacity];
+                    buffers.Color.GetData(gpuColors);
                     var previous = new int[scene.bodyCount];
                     for (int s = 0; s < scene.bodyCount; s++)
                     {
                         previous[s] = solved[s] ? s & 1 : -1;
                         if (solved[s])
-                            meta[s].state.x = (uint)previous[s];
+                            gpuColors[s] = (uint)previous[s];
                     }
-                    buffers.Meta.SetData(meta);
+                    buffers.Color.SetData(gpuColors);
 
                     int cap = constraints.ColorCount;
                     constraints.PinColoring(cap, rounds);
@@ -439,13 +439,13 @@ namespace McKrill.Avbd.Tests
                 constraints.PinColoring(3, 0);
                 constraints.ColorStepForTests();
                 Assert.AreEqual(3, constraints.ColorCount, "the cap");
-                var meta = new BodyMetaRecord[16];
-                buffers.Meta.GetData(meta);
+                var gpuColors = new uint[16];
+                buffers.Color.GetData(gpuColors);
                 int onLast = 0;
                 foreach (BodyHandle h in handles)
                 {
-                    Assert.Less(meta[h.Slot].state.x, 3u);
-                    if (meta[h.Slot].state.x == 2u)
+                    Assert.Less(gpuColors[h.Slot], 3u);
+                    if (gpuColors[h.Slot] == 2u)
                         onLast++;
                 }
                 Assert.AreEqual(3, onLast, "the third body takes color 2, and the other two have none free below the cap: forced onto it");
@@ -477,21 +477,21 @@ namespace McKrill.Avbd.Tests
                 constraints.Rebuild();
                 constraints.ColoringFreshInterval = 2;
 
-                var meta = new BodyMetaRecord[buffers.Capacity];
+                var gpuColors = new uint[buffers.Capacity];
                 for (int step = 0; step < 6; step++)
                 {
                     // Spoil the colors after every step: the steps that keep colors repair them, the ones from scratch forget them.
                     constraints.ColorStepForTests();
-                    buffers.Meta.GetData(meta);
+                    buffers.Color.GetData(gpuColors);
                     bool scratch = step % 3 == 0; // fresh at steps 0 and 3 (the interval is two persistent steps)
                     if (scratch)
                         AssertPersistent(buffers, constraints, scene, solved, expected, "step " + step);
                     else
-                        AssertProper(scene.constraints, scene.constraintCount, solved, ReadColors(meta, scene.bodyCount, solved), "step " + step);
+                        AssertProper(scene.constraints, scene.constraintCount, solved, ReadColors(gpuColors, scene.bodyCount, solved), "step " + step);
                     for (int s = 0; s < scene.bodyCount; s++)
                         if (solved[s])
-                            meta[s].state.x = 7u; // drifted
-                    buffers.Meta.SetData(meta);
+                            gpuColors[s] = 7u; // drifted
+                    buffers.Color.SetData(gpuColors);
                 }
             }
         }
@@ -518,18 +518,18 @@ namespace McKrill.Avbd.Tests
         // The bodies are in the color buckets of the colors they have, and the colors are those of the oracle.
         static void AssertPersistent(AvbdBodyBuffers buffers, AvbdConstraintBuffers constraints, SceneArrays scene, bool[] solved, int[] expected, string what)
         {
-            var meta = new BodyMetaRecord[buffers.Capacity];
-            buffers.Meta.GetData(meta);
+            var gpuColors = new uint[buffers.Capacity];
+            buffers.Color.GetData(gpuColors);
             int colors = 0;
             for (int s = 0; s < scene.bodyCount; s++)
             {
                 if (solved[s])
                 {
-                    Assert.AreEqual((uint)expected[s], meta[s].state.x, what + ": color of body " + s);
+                    Assert.AreEqual((uint)expected[s], gpuColors[s], what + ": color of body " + s);
                     colors = Math.Max(colors, expected[s] + 1);
                 }
                 else
-                    Assert.AreEqual(NoColor, meta[s].state.x, what + ": body " + s + " is not solved and has no color");
+                    Assert.AreEqual(NoColor, gpuColors[s], what + ": body " + s + " is not solved and has no color");
             }
             AssertProper(scene.constraints, scene.constraintCount, solved, expected, what + " (oracle)");
             Assert.GreaterOrEqual(constraints.ColorCount, colors, what + ": the sweep dispatches every color in use");
@@ -554,11 +554,11 @@ namespace McKrill.Avbd.Tests
             }
         }
 
-        static int[] ReadColors(BodyMetaRecord[] meta, int bodyCount, bool[] solved)
+        static int[] ReadColors(uint[] gpuColors, int bodyCount, bool[] solved)
         {
             var colors = new int[bodyCount];
             for (int s = 0; s < bodyCount; s++)
-                colors[s] = solved[s] ? (int)meta[s].state.x : -1;
+                colors[s] = solved[s] ? (int)gpuColors[s] : -1;
             return colors;
         }
 
@@ -585,11 +585,11 @@ namespace McKrill.Avbd.Tests
                 Assert.AreEqual(0u, constraints.LastColoringSample.forced);
 
                 // Every body takes color 0: every second neighbor pair clashes, so about half of the chain is released.
-                var meta = new BodyMetaRecord[256];
-                buffers.Meta.GetData(meta);
+                var gpuColors = new uint[256];
+                buffers.Color.GetData(gpuColors);
                 for (int i = 0; i < links; i++)
-                    meta[handles[i].Slot].state.x = 0u;
-                buffers.Meta.SetData(meta);
+                    gpuColors[handles[i].Slot] = 0u;
+                buffers.Color.SetData(gpuColors);
                 constraints.PinColoring(0, 1);
                 constraints.ColorStepForTests();
                 constraints.FlushColoringStatistics();
@@ -600,9 +600,9 @@ namespace McKrill.Avbd.Tests
                 Assert.AreEqual(1, sample.rounds);
                 Assert.Greater(sample.leftover, 0u, "one round cannot color a chain that was released (and the extra rounds did the rest)");
 
-                buffers.Meta.GetData(meta);
+                buffers.Color.GetData(gpuColors);
                 for (int i = 1; i < links; i++)
-                    Assert.AreNotEqual(meta[handles[i - 1].Slot].state.x, meta[handles[i].Slot].state.x, "neighbors " + i + " share a color");
+                    Assert.AreNotEqual(gpuColors[handles[i - 1].Slot], gpuColors[handles[i].Slot], "neighbors " + i + " share a color");
             }
         }
 
@@ -682,20 +682,20 @@ namespace McKrill.Avbd.Tests
         static void AssertColoring(AvbdBodyBuffers buffers, AvbdConstraintBuffers constraints, ConstraintRecord[] records, int recordCount,
             bool[] solved, int[] expected, int bodyCount, string what)
         {
-            var meta = new BodyMetaRecord[buffers.Capacity];
-            buffers.Meta.GetData(meta);
+            var gpuColors = new uint[buffers.Capacity];
+            buffers.Color.GetData(gpuColors);
 
             int colors = 0;
             for (int s = 0; s < bodyCount; s++)
             {
                 if (solved[s])
                 {
-                    Assert.AreEqual((uint)expected[s], meta[s].state.x, what + ": color of body " + s);
+                    Assert.AreEqual((uint)expected[s], gpuColors[s], what + ": color of body " + s);
                     colors = Math.Max(colors, expected[s] + 1);
                 }
                 else
                 {
-                    Assert.AreEqual(NoColor, meta[s].state.x, what + ": body " + s + " is not solved and has no color");
+                    Assert.AreEqual(NoColor, gpuColors[s], what + ": body " + s + " is not solved and has no color");
                 }
             }
             AssertProper(records, recordCount, solved, expected, what + " (oracle)");

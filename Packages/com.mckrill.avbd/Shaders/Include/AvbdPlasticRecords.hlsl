@@ -8,12 +8,14 @@
 // The kernels that read them are compiled with AVBD_PLASTIC_JOINTS defined (a second variant of Dual, ConstraintInit and Primal).
 
 // 64 B: the extra state of a joint with AVBD_CONSTRAINT_FLAG_PLASTIC or AVBD_CONSTRAINT_FLAG_PLASTIC_LIN, found at its ident.w.
+// The first 32 B (one sector) are what the primal and dual stages read of a plastic joint every iteration: rest and limits. The second 32 B (restStart,
+// reserved) are read only in the step in which a joint yields or breaks.
 struct PlasticRecord
 {
     float4 rest;      // rest rotation (unit quaternion): body B is at rest when its rotation is rotA * rest. Identity at creation. Owner: D
-    float4 restStart; // the rest rotation at creation: the origin of the bend
     float4 limits;    // x = angular yield threshold (norm of the angular multiplier, with PLASTIC), y = bend limit in radians (with BEND_BREAK),
                       // z = linear yield threshold (norm of the linear multiplier, with PLASTIC_LIN), w = stretch limit in meters (with STRETCH_BREAK)
+    float4 restStart; // the rest rotation at creation: the origin of the bend
     float4 reserved;  // xyz = the anchor on body A at creation: the origin the stretch is measured from (with PLASTIC_LIN)
 };
 

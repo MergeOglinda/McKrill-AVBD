@@ -176,6 +176,7 @@ namespace McKrill.Avbd.Tests
 
                 var solver = new AvbdSolver(buffers, settings, null, constraints);
                 solver.DispatchPredict();
+                solver.DispatchSolveHeader();
                 solver.DispatchPrimalSweep();
 
                 CpuPredict.Run(oracle, settings, scene.bodyCount);
@@ -185,6 +186,7 @@ namespace McKrill.Avbd.Tests
 
                 var state = new BodyStateRecord[Capacity];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after a primal sweep");
                 for (int s = 0; s < scene.bodyCount; s++)
                 {
                     string name = what + ", slot " + s;
@@ -218,7 +220,7 @@ namespace McKrill.Avbd.Tests
                 Assert.IsFalse(constraints.HasPendingChanges);
 
                 var records = new ConstraintRecord[8];
-                constraints.Records.GetData(records);
+                constraints.ReadRecords(records);
 
                 // Joint: torque arm is the squared length of the summed sizes: (1,2,3) + (1,1,1) = (2,3,4).
                 Assert.AreEqual(29f, records[0].c0Lin.w, 1e-5f);
@@ -272,8 +274,9 @@ namespace McKrill.Avbd.Tests
 
                 var state = new BodyStateRecord[16];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after a primal sweep");
                 var records = new ConstraintRecord[8];
-                constraints.Records.GetData(records);
+                constraints.ReadRecords(records);
 
                 // The warm start scales the penalty by gamma: K = 1e4 * 0.999 = 9990.
                 // Minimizing m/(2 dt^2) (y - yInertial)^2 + K/2 (y - 5)^2 with yInertial = 5 - g dt^2 gives
@@ -310,6 +313,7 @@ namespace McKrill.Avbd.Tests
 
                 var state = new BodyStateRecord[16];
                 buffers.State.GetData(state);
+                PoseMirror.Assert(buffers, "after a primal sweep");
                 Assert.AreEqual(10f, state[anchor.Slot].position.y);
                 Assert.Greater(state[block.Slot].position.y, 6f - 1e-6f, "the spring is stretched (rest 2, length 4) and pulls the block up");
             }

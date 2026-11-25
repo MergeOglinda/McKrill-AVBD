@@ -55,9 +55,13 @@ namespace McKrill.Avbd.Tests
 
                 var state = new BodyStateRecord[16];
                 var meta = new BodyMetaRecord[16];
+                var flags = new uint[16];
+                var colors = new uint[16];
                 var mass = new BodyMassRecord[16];
                 buffers.State.GetData(state);
                 buffers.Meta.GetData(meta);
+                buffers.Flags.GetData(flags);
+                buffers.Color.GetData(colors);
                 buffers.Mass.GetData(mass);
 
                 int s = h.Slot;
@@ -65,7 +69,8 @@ namespace McKrill.Avbd.Tests
                 Assert.AreEqual(5f, state[s].position.y);
                 Assert.AreEqual(6f, state[s].position.z);
                 Assert.AreEqual(1f, state[s].rotation.w);
-                Assert.AreEqual(0u, meta[s].ident.x & (uint)BodyFlags.Free, "the slot must be live");
+                Assert.AreEqual(0u, flags[s] & (uint)BodyFlags.Free, "the slot must be live");
+                Assert.AreEqual(AvbdConst.Invalid, colors[s], "a new body has no color");
                 Assert.AreEqual(11u, meta[s].ident.z);
                 Assert.AreEqual(12f, mass[s].momentMass.w, 1e-5f);
             }
@@ -82,11 +87,13 @@ namespace McKrill.Avbd.Tests
                 buffers.ApplyEdits();
 
                 var meta = new BodyMetaRecord[16];
+                var flags = new uint[16];
                 var mass = new BodyMassRecord[16];
                 buffers.Meta.GetData(meta);
+                buffers.Flags.GetData(flags);
                 buffers.Mass.GetData(mass);
 
-                Assert.AreNotEqual(0u, meta[h.Slot].ident.x & (uint)BodyFlags.Free);
+                Assert.AreNotEqual(0u, flags[h.Slot] & (uint)BodyFlags.Free);
                 Assert.AreEqual(AvbdConst.Invalid, meta[h.Slot].ident.z);
                 Assert.AreEqual(0f, mass[h.Slot].momentMass.w);
             }
@@ -253,7 +260,10 @@ namespace McKrill.Avbd.Tests
             AssertBuffer(buffers.Motion, oracle.Motion, "Motion", when);
             AssertBuffer(buffers.Shape, oracle.Shape, "Shape", when);
             AssertBuffer(buffers.Meta, oracle.Meta, "Meta", when);
+            AssertBuffer(buffers.Flags, oracle.Flags, "Flags", when);
+            AssertBuffer(buffers.Color, oracle.Color, "Color", when);
             AssertBuffer(buffers.Range, oracle.Range, "Range", when);
+            PoseMirror.Assert(buffers, when);
         }
 
         // Synchronous readback is fine in a test. The simulation never reads back.

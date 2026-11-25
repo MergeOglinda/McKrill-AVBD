@@ -61,6 +61,7 @@ namespace McKrill.Avbd
     internal static class BodyRecordStrides
     {
         public const int State = 64;
+        public const int Pose = 32;
         public const int Inertial = 32;
         public const int Mass = 16;
         public const int Motion = 48;
@@ -68,7 +69,16 @@ namespace McKrill.Avbd
         public const int Meta = 32;
         public const int Range = 16;
 
-        public const int Total = State + Inertial + Mass + Motion + Shape + Meta + Range;
+        /// <summary>The flags word of a body (<see cref="BodyFlagLayout"/>), one uint per body: an array of its own, so that a kernel that only asks whether a body is live and solved reads 4 B and not a 32 B meta record.</summary>
+        public const int Flags = 4;
+
+        /// <summary>The graph color of a body, one uint per body, for the same reason. Written by stage C (and cleared by stage E).</summary>
+        public const int Color = 4;
+
+        /// <summary>The primal sweep's view of a body (<see cref="BodySolveRecord"/>): moments and mass, flags, and the range in the constraint list in one 32 B sector. Derived once per step.</summary>
+        public const int Solve = 32;
+
+        public const int Total = State + Pose + Inertial + Mass + Motion + Shape + Meta + Range + Flags + Color + Solve;
         public const int Largest = 64;
     }
 
@@ -89,6 +99,21 @@ namespace McKrill.Avbd
         public float4 startPosition;
 
         public float4 startRotation;
+    }
+
+    /// <summary>
+    /// Hot. A copy of the current pose of <see cref="BodyStateRecord"/> (position and rotation) for the readers that need nothing else of a body: the primal
+    /// and dual stages read the pose of the neighbors of a joint or spring, and 32 B records put twice as many bodies in a cache line as the 64 B state
+    /// records. Every kernel that writes the pose of the state record writes this too, so the two never differ.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BodyPoseRecord
+    {
+        /// <summary>xyz = position of the center of mass, w unused.</summary>
+        public float4 position;
+
+        /// <summary>Unit quaternion (x, y, z, w).</summary>
+        public float4 rotation;
     }
 
     /// <summary>Hot. Inertial target of the step. Written by stage P only; stage E never touches it.</summary>
@@ -122,15 +147,34 @@ namespace McKrill.Avbd
         public float4 sizeFriction;
     }
 
-    /// <summary>Cold. Identity and state words.</summary>
+    /// <summary>
+    /// Cold. Identity and state words. The flags word and the graph color are not here: they are the arrays <c>_BodyFlags</c> and <c>_BodyColor</c>
+    /// (<see cref="BodyRecordStrides.Flags"/>, <see cref="BodyRecordStrides.Color"/>), one uint per body, which the hot kernels read. The words
+    /// <c>ident.x</c> and <c>state.x</c> are kept so that the record keeps its size and the names of the others; they are always 0.
+    /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct BodyMetaRecord
     {
-        /// <summary>x = flags (low 24 bits) and shape kind (high 8 bits), y = group mask, z = appearance id, w unused.</summary>
+        /// <summary>x = unused (always 0: the flags word is in <c>_BodyFlags</c>), y = group mask, z = appearance id, w unused.</summary>
         public uint4 ident;
 
-        /// <summary>x = graph color, y = sleep counter, zw unused. Written by stages C and Z.</summary>
+        /// <summary>x = unused (always 0: the graph color is in <c>_BodyColor</c>), y = sleep counter, zw unused. Written by stage Z.</summary>
         public uint4 state;
+    }
+
+    /// <summary>
+    /// Hot. What the primal sweep needs of a body besides its pose and inertial target, in one sector: a copy of <see cref="BodyMassRecord"/>, the flags
+    /// word and the offset and count of <see cref="BodyRangeRecord"/>. Derived once per step, after stage D's init and so after the edits, the lists and the
+    /// colors of that step; nothing writes it between the sweeps. A mirror, like <see cref="BodyPoseRecord"/>: the three arrays stay the source.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BodySolveRecord
+    {
+        /// <summary>xyz = principal moments of inertia, w = mass.</summary>
+        public float4 momentMass;
+
+        /// <summary>x = flags word, y = list offset, z = list count, w unused.</summary>
+        public uint4 info;
     }
 
     /// <summary>Hot. Range of this body's entries in the constraint list. Written by stage G.</summary>

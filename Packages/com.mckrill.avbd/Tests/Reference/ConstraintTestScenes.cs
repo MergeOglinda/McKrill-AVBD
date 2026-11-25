@@ -21,7 +21,7 @@ namespace McKrill.Avbd.Tests
             var solved = new bool[bodyCount];
             for (int s = 0; s < bodyCount; s++)
             {
-                uint flags = bodies.Meta[s].ident.x;
+                uint flags = bodies.Flags[s];
                 solved[s] = (flags & ((uint)BodyFlags.Free | (uint)BodyFlags.Kinematic)) == 0u && bodies.Mass[s].momentMass.w > 0f;
             }
             return solved;

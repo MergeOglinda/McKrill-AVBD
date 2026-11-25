@@ -34,3 +34,37 @@ The same comparison, but each side is a **folder** with the result files (`*.xml
 - It imports `compare_perf.py` from the same folder, so keep the two together.
 
 Tests of both: `python3 -I Tools/PerfCompare/test_multi_compare_perf.py` (synthetic result files).
+
+## Automated A/B runs: `run_perf_ab.ps1`
+
+```
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline origin/main -Candidate origin/my-branch [-Runs 8] [-Warmup] [-TestFilter "Scenario5_BrickRing110k"]
+```
+
+Windows PowerShell 5.1 or PowerShell 7, with git, Python 3 and the Unity editor version of the project installed (Unity Hub folder, or `-UnityPath`). The script:
+
+1. resolves both refs and checks each out in its own git worktree under `-WorkRoot` (default: `mckrill-avbd-perf` next to the repository), so each side is a separate Unity project with its own `Library`; keep the folder, because the second invocation then skips the long first import. The worktrees are scratch folders: local changes in them are discarded;
+2. imports each project once in batch mode (no tests), which stops the script early when a side does not compile;
+3. runs the suite `-Runs` times per side (default 8), one Unity process per run, alternating who goes first (A B, B A, ...). `-Warmup` adds a discarded run per side first;
+4. runs `multi_compare_perf.py` on the two result folders.
+
+The output goes to `<OutRoot>\<timestamp>\`: `baseline\runNN.xml` and `.log`, `candidate\...`, `meta.json` (refs, commits, GPU, editor) and `comparison.csv`. A run without a result file, a result with a failed test or with another number of test cases than `-ExpectedTests` (default 5) is listed at the end and makes the exit code 1. The tests need a GPU: the script never passes `-nographics`, and the machine should be idle while it runs. Use `origin/<branch>` to take the remote state of a branch (the script fetches first unless `-NoFetch`); a plain name is the local branch.
+
+### A range of commits: `-TargetCommit`
+
+```
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -TargetCommit 5555555 [-Runs 8] [-Warmup]
+```
+
+Instead of `-Candidate`, `-TargetCommit` takes the last commit of a range. The baseline stays the same and the candidate becomes every commit after the baseline up to and including the target, oldest first. With the commits `1111111` (oldest), `2222222`, `3333333`, `4444444` and `5555555` (newest), the call above does the same as these three invocations:
+
+```
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -Candidate 3333333
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -Candidate 4444444
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -Candidate 5555555
+```
+
+- The commits are those of `git rev-list --reverse --topo-order <baseline>..<target>`, so when the range holds a merge, the commits of the merged branch are in it too. The baseline must be an ancestor of the target. The script fetches once, resolves the range, lists it, and then goes through it.
+- Each candidate gets its own `-Runs` runs (and its own `-Warmup`), and the baseline is run again next to each one, so that a drift of the machine between candidates does not move a comparison. The cost is `-Runs` times two suite runs per commit.
+- Each candidate's results are in `<OutRoot>\<timestamp>\NN-<commit>\`, laid out as for a single comparison (`baseline`, `candidate`, `meta.json`, `comparison.csv`). `range.json` in `<timestamp>` lists the commits with the status of each (`pending`, `ok`, `problems`) and is updated after every candidate.
+- A commit in the middle of a range may not build. That candidate is reported (and makes the exit code 1) and the range goes on with the next commit.

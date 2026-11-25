@@ -18,6 +18,12 @@ namespace McKrill.Avbd.Reference
         public readonly BodyMetaRecord[] Meta;
         public readonly BodyRangeRecord[] Range;
 
+        /// <summary>The flags word of every body (_BodyFlags): flags in the low 24 bits, the shape kind in the high 8.</summary>
+        public readonly uint[] Flags;
+
+        /// <summary>The graph color of every body (_BodyColor).</summary>
+        public readonly uint[] Color;
+
         public CpuBodyArrays(int capacity)
         {
             State = new BodyStateRecord[capacity];
@@ -27,6 +33,8 @@ namespace McKrill.Avbd.Reference
             Shape = new BodyShapeRecord[capacity];
             Meta = new BodyMetaRecord[capacity];
             Range = new BodyRangeRecord[capacity];
+            Flags = new uint[capacity];
+            Color = new uint[capacity];
 
             for (int slot = 0; slot < capacity; slot++)
                 WriteFreeSlot(slot);
@@ -34,7 +42,7 @@ namespace McKrill.Avbd.Reference
 
         public int Capacity => State.Length;
 
-        public bool IsFree(int slot) => (Meta[slot].ident.x & (uint)BodyFlags.Free) != 0u;
+        public bool IsFree(int slot) => (Flags[slot] & (uint)BodyFlags.Free) != 0u;
 
         /// <summary>The ClearBodies kernel for one slot.</summary>
         public void WriteFreeSlot(int slot)
@@ -46,11 +54,9 @@ namespace McKrill.Avbd.Reference
             Mass[slot] = new BodyMassRecord { momentMass = float4.zero };
             Motion[slot] = new BodyMotionRecord { linearVel = float4.zero, angularVel = float4.zero, prevLinearVel = float4.zero };
             Shape[slot] = new BodyShapeRecord { sizeFriction = float4.zero };
-            Meta[slot] = new BodyMetaRecord
-            {
-                ident = new uint4(FreeFlagsWord((uint)ShapeKind.Box << BodyFlagLayout.KindShift), 0u, AvbdConst.Invalid, 0u),
-                state = new uint4(AvbdConst.Invalid, 0u, 0u, 0u),
-            };
+            Flags[slot] = FreeFlagsWord((uint)ShapeKind.Box << BodyFlagLayout.KindShift);
+            Color[slot] = AvbdConst.Invalid;
+            Meta[slot] = new BodyMetaRecord { ident = new uint4(0u, 0u, AvbdConst.Invalid, 0u), state = uint4.zero };
             Range[slot] = new BodyRangeRecord { range = uint4.zero };
         }
 
@@ -81,22 +87,18 @@ namespace McKrill.Avbd.Reference
             Mass[slot] = new BodyMassRecord { momentMass = c.momentMass };
             Motion[slot] = new BodyMotionRecord { linearVel = c.linearVel, angularVel = c.angularVel, prevLinearVel = c.linearVel };
             Shape[slot] = new BodyShapeRecord { sizeFriction = c.sizeFriction };
-            Meta[slot] = new BodyMetaRecord
-            {
-                ident = new uint4(c.meta.x & ~(uint)BodyFlags.Free, c.meta.y, c.meta.z, 0u),
-                state = new uint4(AvbdConst.Invalid, 0u, 0u, 0u),
-            };
+            Flags[slot] = c.meta.x & ~(uint)BodyFlags.Free;
+            Color[slot] = AvbdConst.Invalid;
+            Meta[slot] = new BodyMetaRecord { ident = new uint4(0u, c.meta.y, c.meta.z, 0u), state = uint4.zero };
             Range[slot] = new BodyRangeRecord { range = uint4.zero };
         }
 
         void ApplyRemove(int slot)
         {
             Mass[slot] = new BodyMassRecord { momentMass = float4.zero };
-            Meta[slot] = new BodyMetaRecord
-            {
-                ident = new uint4(FreeFlagsWord(Meta[slot].ident.x), 0u, AvbdConst.Invalid, 0u),
-                state = new uint4(AvbdConst.Invalid, 0u, 0u, 0u),
-            };
+            Flags[slot] = FreeFlagsWord(Flags[slot]);
+            Color[slot] = AvbdConst.Invalid;
+            Meta[slot] = new BodyMetaRecord { ident = new uint4(0u, 0u, AvbdConst.Invalid, 0u), state = uint4.zero };
             Range[slot] = new BodyRangeRecord { range = uint4.zero };
         }
 
@@ -130,19 +132,20 @@ namespace McKrill.Avbd.Reference
             if ((fields & EditFields.Shape) != 0)
                 Mass[slot] = new BodyMassRecord { momentMass = c.momentMass };
 
-            if ((fields & (EditFields.GroupMask | EditFields.Appearance | EditFields.Kinematic)) != 0)
+            if ((fields & (EditFields.GroupMask | EditFields.Appearance)) != 0)
             {
                 BodyMetaRecord meta = Meta[slot];
                 if ((fields & EditFields.GroupMask) != 0)
                     meta.ident.y = c.meta.y;
                 if ((fields & EditFields.Appearance) != 0)
                     meta.ident.z = c.meta.z;
-                if ((fields & EditFields.Kinematic) != 0)
-                {
-                    uint bit = (uint)BodyFlags.Kinematic;
-                    meta.ident.x = (meta.ident.x & ~bit) | (c.meta.x & bit);
-                }
                 Meta[slot] = meta;
+            }
+
+            if ((fields & EditFields.Kinematic) != 0)
+            {
+                uint bit = (uint)BodyFlags.Kinematic;
+                Flags[slot] = (Flags[slot] & ~bit) | (c.meta.x & bit);
             }
         }
 

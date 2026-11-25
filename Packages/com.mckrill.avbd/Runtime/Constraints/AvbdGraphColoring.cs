@@ -21,7 +21,7 @@ namespace McKrill.Avbd
 
     /// <summary>
     /// Stage C: colors the graph of solved bodies on the GPU (<c>AvbdColoring.compute</c>) and buckets the bodies by color.
-    /// Reads the per-body constraint lists (stage G), writes the graph color into Meta.state.x and fills the color buckets.
+    /// Reads the per-body constraint lists (stage G), writes the graph color into the body color array (<see cref="AvbdBodyBuffers.Color"/>) and fills the color buckets.
     ///
     /// The host runs the rounds and reads back one small thing: after every batch of rounds whether bodies are still waiting. The same
     /// words hold the number of colors, which is how many times the primal sweep is dispatched. How big each of those dispatches is
@@ -73,6 +73,9 @@ namespace McKrill.Avbd
         /// <summary>Mirrors AVBD_COLOR_LANES: threads that look at the neighbors of one body in a coloring round.</summary>
         public const int RoundLanes = 8;
 
+        /// <summary>Mirrors AVBD_BUCKET_SPAN: the slots each thread of ColorBucket handles (a thread group handles GroupSize * BucketSpan of them).</summary>
+        public const int BucketSpan = 4;
+
         // Rounds dispatched before the first readback, and between the later ones. A round after the coloring is done finds every body colored
         // and ends at once, so a long first batch costs little and, for the usual graph (a few rounds with the hashed order), saves the second
         // wait for the GPU.
@@ -106,7 +109,8 @@ namespace McKrill.Avbd
             public int cap;
         }
 
-        static readonly int BodyMetaId = Shader.PropertyToID("_BodyMeta");
+        static readonly int BodyColorId = Shader.PropertyToID("_BodyColor");
+        static readonly int BodyFlagsId = Shader.PropertyToID("_BodyFlags");
         static readonly int BodyMassId = Shader.PropertyToID("_BodyMass");
         static readonly int BodyRangeId = Shader.PropertyToID("_BodyRange");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
@@ -122,6 +126,7 @@ namespace McKrill.Avbd
         static readonly int FinishArgsId = Shader.PropertyToID("_ColorFinishArgs");
         static readonly int BaseId = Shader.PropertyToID("_Base");
         static readonly int CountId = Shader.PropertyToID("_Count");
+        static readonly int BucketEndId = Shader.PropertyToID("_BucketEnd");
 
         /// <summary>Rounds the last <see cref="Run"/> or <see cref="RunPersistent"/> dispatched (from scratch: the first batch, then a multiple of the batch size).</summary>
         public int LastRounds { get; private set; }
@@ -192,7 +197,7 @@ namespace McKrill.Avbd
 
         /// <summary>
         /// Colors the solved bodies among slots [0, bodyCount) and fills <paramref name="colorBodies"/> with the slots grouped by color
-        /// (order inside a color is unspecified; it does not change the result of a sweep). Returns the number of colors. The start and
+        /// (slot order inside each chunk of GroupSize * BucketSpan slots, chunks in timing order: it does not change the result of a sweep, but a sweep reads memory more coherently). Returns the number of colors. The start and
         /// the size of every color are on the GPU (<see cref="Work"/>, <see cref="Args"/>); <see cref="ReadSchedule"/> reads them back for tests.
         /// </summary>
         /// <param name="records">Constraint records, read through the lists.</param>
@@ -332,7 +337,8 @@ namespace McKrill.Avbd
         {
             AvbdDispatch.Linear(shader, countKernel, bodyCount);
             shader.Dispatch(planKernel, 1, 1, 1);
-            AvbdDispatch.Linear(shader, bucketKernel, bodyCount);
+            shader.SetInt(BucketEndId, bodyCount);
+            AvbdDispatch.Linear(shader, bucketKernel, (bodyCount + BucketSpan - 1) / BucketSpan);
         }
 
         void EnsureScratch(int capacity)
@@ -440,7 +446,8 @@ namespace McKrill.Avbd
 
         void Bind(int kernel, AvbdBodyBuffers bodies, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other, GraphicsBuffer colorBodies)
         {
-            shader.SetBuffer(kernel, BodyMetaId, bodies.Meta);
+            shader.SetBuffer(kernel, BodyColorId, bodies.Color);
+            shader.SetBuffer(kernel, BodyFlagsId, bodies.Flags);
             shader.SetBuffer(kernel, BodyMassId, bodies.Mass);
             shader.SetBuffer(kernel, BodyRangeId, bodies.Range);
             shader.SetBuffer(kernel, RecordsId, records);

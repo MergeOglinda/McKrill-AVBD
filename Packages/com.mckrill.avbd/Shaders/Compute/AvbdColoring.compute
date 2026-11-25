@@ -9,7 +9,7 @@
 // its higher-priority neighbors, and its lower-priority neighbors cannot have a color before it has one. With the slot order as the
 // priority this is exactly the sequential greedy first-fit coloring of the reference solver.
 //
-// The color is stored in Meta.state.x. A solved body without a color holds AVBD_COLOR_PENDING, a body that is not solved holds
+// The color is stored in the array _BodyColor (one uint per body). A solved body without a color holds AVBD_COLOR_PENDING, a body that is not solved holds
 // AVBD_INVALID.
 //
 // Two ways to run it. Both end in the same kernels (ColorCount, ColorPlan, ColorBucket) and give a proper coloring.
@@ -38,7 +38,7 @@
 //   ColorForce       persistent: colors the bodies that are still without a color after all rounds, without waiting
 //   ColorCount       counts the bodies of each color
 //   ColorPlan        one thread; the start of each color (also the bucket cursors), the number of colors and the indirect dispatch arguments
-//   ColorBucket      writes the body slots into the color buckets, at the cursors ColorPlan set
+//   ColorBucket      writes the body slots into the color buckets, at the cursors ColorPlan set; slot order inside a chunk of AVBD_BUCKET_CHUNK slots
 // The cap (_ColorCap) is the number of colors the host will dispatch; a body that would need a color at or above it takes the last color below
 // it instead, and is counted in control word 1 (the host raises the cap; until then that body is solved with the bodies of that color, in
 // parallel, which is less accurate but not wrong in the sense of a crash). From scratch the cap is AVBD_COLOR_MAX.
@@ -61,7 +61,8 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdColoringParams.hlsl"
 
-RWStructuredBuffer<BodyMetaRecord>  _BodyMeta;
+RWStructuredBuffer<uint>             _BodyColor;  // the graph color of every body, one uint per body (not in the meta record)
+StructuredBuffer<uint>               _BodyFlags;  // flags | kind << 24 of every body
 StructuredBuffer<BodyMassRecord>    _BodyMass;
 StructuredBuffer<BodyRangeRecord>   _BodyRange;
 StructuredBuffer<ConstraintRecord>  _Constraints;
@@ -78,6 +79,7 @@ uint _Count; // end of the range: items [_Base, _Count)
 uint _Order; // AVBD_COLOR_ORDER_*
 uint _ColorCap; // colors the host dispatches, at most AVBD_COLOR_MAX
 uint _Round;    // the round being dispatched, counted from 0 (statistics only)
+uint _BucketEnd; // ColorBucket: end of the slot range (its threads handle AVBD_BUCKET_SPAN slots each, so _Count is not the slot count there)
 
 uint HashSlot(uint x)
 {
@@ -129,8 +131,8 @@ void ColorInit(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    bool solved = !(_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) && _BodyMass[slot].momentMass.w > 0.0;
-    _BodyMeta[slot].state.x = solved ? AVBD_COLOR_PENDING : AVBD_INVALID;
+    bool solved = !(_BodyFlags[slot] & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) && _BodyMass[slot].momentMass.w > 0.0;
+    _BodyColor[slot] = solved ? AVBD_COLOR_PENDING : AVBD_INVALID;
 }
 
 // Persistent coloring: a solved body keeps its color if it is below the cap, and otherwise waits for one.
@@ -141,9 +143,9 @@ void ColorKeep(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    bool solved = !(_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) && _BodyMass[slot].momentMass.w > 0.0;
-    uint color = _BodyMeta[slot].state.x;
-    _BodyMeta[slot].state.x = !solved ? AVBD_INVALID : (color < _ColorCap ? color : AVBD_COLOR_PENDING);
+    bool solved = !(_BodyFlags[slot] & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) && _BodyMass[slot].momentMass.w > 0.0;
+    uint color = _BodyColor[slot];
+    _BodyColor[slot] = !solved ? AVBD_INVALID : (color < _ColorCap ? color : AVBD_COLOR_PENDING);
 }
 
 // Persistent coloring: flags a colored body that has the color of a neighbor that colors before it. Only reads the colors, so the flags do not
@@ -156,7 +158,7 @@ void ColorMark(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    uint color = _BodyMeta[slot].state.x;
+    uint color = _BodyColor[slot];
     uint flag = 0u;
     if (color < AVBD_COLOR_MAX)
     {
@@ -171,7 +173,7 @@ void ColorMark(uint3 id : SV_DispatchThreadID)
             previous = other;
             if (other == AVBD_INVALID)
                 continue;
-            if (_BodyMeta[other].state.x == color && ColorsBefore(other, slot))
+            if (_BodyColor[other] == color && ColorsBefore(other, slot))
                 flag = 1u;
         }
     }
@@ -187,7 +189,7 @@ void ColorRelease(uint3 id : SV_DispatchThreadID)
 
     if (_ColorScratch[slot] != 0u)
     {
-        _BodyMeta[slot].state.x = AVBD_COLOR_PENDING;
+        _BodyColor[slot] = AVBD_COLOR_PENDING;
         uint previous;
         InterlockedAdd(_ColorWork[AVBD_COLOR_STAT_RELEASED], 1u, previous);
     }
@@ -212,7 +214,7 @@ void ColorRound(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
     bool pending = false;
     if (item < _Count)
-        pending = _BodyMeta[slot].state.x == AVBD_COLOR_PENDING;
+        pending = _BodyColor[slot] == AVBD_COLOR_PENDING;
     uint2 range = uint2(0u, 0u);
     uint waiting = 0u;
     uint used = 0u;
@@ -235,7 +237,7 @@ void ColorRound(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
             if (other == AVBD_INVALID)
                 continue;
 
-            uint c = _BodyMeta[other].state.x;
+            uint c = _BodyColor[other];
             if (c == AVBD_COLOR_PENDING)
             {
                 if (ColorsBefore(other, slot))
@@ -287,7 +289,7 @@ void ColorRound(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
             last = other;
             if (other == AVBD_INVALID)
                 continue;
-            uint c = _BodyMeta[other].state.x;
+            uint c = _BodyColor[other];
             if (c >= low && c < low + 32u)
                 usedWindow |= 1u << (c - low);
         }
@@ -305,7 +307,7 @@ void ColorRound(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
     InterlockedMax(_ColorWork[AVBD_COLOR_COUNT_WORD], color + 1u);
     InterlockedMax(_ColorWork[AVBD_COLOR_STAT_LAST_ROUND], _Round + 1u);
-    _BodyMeta[slot].state.x = color;
+    _BodyColor[slot] = color;
 }
 
 // One thread, between the rounds of the persistent coloring: the next round gets its groups if bodies are still waiting (control word 0, which the round
@@ -336,7 +338,7 @@ uint FirstFreeColor(uint2 range)
         previous = other;
         if (other == AVBD_INVALID)
             continue;
-        uint c = _BodyMeta[other].state.x;
+        uint c = _BodyColor[other];
         if (c < 32u)
             low |= 1u << c;
         else if (c < 64u)
@@ -359,7 +361,7 @@ void ColorForce(uint3 id : SV_DispatchThreadID)
     uint slot = _Base + id.x;
     if (slot >= _Count)
         return;
-    if (_BodyMeta[slot].state.x != AVBD_COLOR_PENDING)
+    if (_BodyColor[slot] != AVBD_COLOR_PENDING)
         return;
 
     uint color = FirstFreeColor(_BodyRange[slot].range.xy);
@@ -370,7 +372,7 @@ void ColorForce(uint3 id : SV_DispatchThreadID)
         color = _ColorCap - 1u;
     }
     InterlockedMax(_ColorWork[AVBD_COLOR_COUNT_WORD], color + 1u);
-    _BodyMeta[slot].state.x = color;
+    _BodyColor[slot] = color;
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
@@ -380,7 +382,7 @@ void ColorCount(uint3 id : SV_DispatchThreadID)
     if (slot >= _Count)
         return;
 
-    uint color = _BodyMeta[slot].state.x;
+    uint color = _BodyColor[slot];
     if (color < AVBD_COLOR_MAX)
     {
         uint previous;
@@ -411,18 +413,49 @@ void ColorPlan(uint3 id : SV_DispatchThreadID)
     _ColorWork[AVBD_COLOR_COUNT_WORD] = colors;
 }
 
-[numthreads(AVBD_GROUP_SIZE, 1, 1)]
-void ColorBucket(uint3 id : SV_DispatchThreadID)
-{
-    uint slot = _Base + id.x;
-    if (slot >= _Count)
-        return;
+// The bodies of a color are written in slot order inside a chunk of AVBD_BUCKET_CHUNK consecutive slots, and a chunk reserves its entries of a
+// color with one atomic add (the cursor), so the order of the chunks inside a color is the only thing that depends on timing. The sweep reads the
+// body state, the neighbor poses and the constraint lists of the bodies of a color; with slots that follow a spatial order (the demos spawn them
+// along a Z-curve) the lanes of a warp then touch memory that is close together instead of scattered over the whole object.
+// A thread group owns one chunk: AVBD_BUCKET_SPAN slots per thread, loaded as AVBD_BUCKET_SPAN coalesced rows. Then thread c (and c + group size,
+// ...) owns the colors c: it counts its color in the chunk, reserves that many entries and writes the slots in order. The colors are read from
+// shared memory (one broadcast read per thread and slot).
+// The host dispatches ceil(solved range / AVBD_BUCKET_SPAN) threads and sets _BucketEnd to the end of the slot range.
+groupshared uint gsBucketColor[AVBD_BUCKET_CHUNK];
 
-    uint color = _BodyMeta[slot].state.x;
-    if (color < AVBD_COLOR_MAX)
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorBucket(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
+{
+    uint chunkStart = (_Base + id.x - tid) * AVBD_BUCKET_SPAN;
+
+    [unroll]
+    for (uint k = 0u; k < AVBD_BUCKET_SPAN; k++)
     {
+        uint slot = chunkStart + k * AVBD_GROUP_SIZE + tid;
+        // A slot past the range, a body that is not solved (AVBD_INVALID) and one that is still waiting (AVBD_COLOR_PENDING) have no bucket.
+        gsBucketColor[k * AVBD_GROUP_SIZE + tid] = slot < _BucketEnd ? _BodyColor[slot] : AVBD_COLOR_PENDING;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint color = tid; color < AVBD_COLOR_MAX; color += AVBD_GROUP_SIZE)
+    {
+        uint count = 0u;
+        [loop]
+        for (uint i = 0u; i < AVBD_BUCKET_CHUNK; i++)
+            count += gsBucketColor[i] == color ? 1u : 0u;
+        if (count == 0u)
+            continue;
+
         uint entry;
-        InterlockedAdd(_ColorWork[AVBD_COLOR_CURSORS_OFFSET + color], 1u, entry);
-        _ColorBodies[entry] = slot;
+        InterlockedAdd(_ColorWork[AVBD_COLOR_CURSORS_OFFSET + color], count, entry);
+        [loop]
+        for (uint j = 0u; j < AVBD_BUCKET_CHUNK; j++)
+        {
+            if (gsBucketColor[j] == color)
+            {
+                _ColorBodies[entry] = chunkStart + j;
+                entry++;
+            }
+        }
     }
 }

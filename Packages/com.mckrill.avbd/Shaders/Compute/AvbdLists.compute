@@ -51,7 +51,7 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContacts.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdIndirect.hlsl"
 
-StructuredBuffer<BodyMetaRecord>    _BodyMeta;
+StructuredBuffer<uint>               _BodyFlags;
 StructuredBuffer<BodyMassRecord>    _BodyMass;
 RWStructuredBuffer<BodyRangeRecord> _BodyRange;
 StructuredBuffer<ConstraintRecord>  _Constraints;
@@ -72,7 +72,7 @@ uint _SlotCapacity; // manifold slots
 
 bool IsSolved(uint slot)
 {
-    return (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) == 0u && _BodyMass[slot].momentMass.w > 0.0;
+    return (_BodyFlags[slot] & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC)) == 0u && _BodyMass[slot].momentMass.w > 0.0;
 }
 
 bool IsBroken(ConstraintRecord r)

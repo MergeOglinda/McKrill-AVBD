@@ -14,6 +14,14 @@
 // body B at the joint's rest rotation relative to body A. See AvbdDual.compute.
 #pragma multi_compile_local _ AVBD_PLASTIC_JOINTS
 
+// Compiled in when the solver fuses the dual update of the joints into the sweeps (AvbdSolver.FuseDualUpdate): the dual update of a joint after sweep k
+// then runs at the start of sweep k + 1, in the thread of the first body of the joint that is solved in that sweep, which writes the joint and marks it
+// with the id of the sweep (c0Ang.w), and the other body finds the mark and only stamps. The first body is the one with the lower color, and when it
+// runs, neither body of the joint has moved in sweep k + 1, so the joint sees the poses of the end of sweep k, as it does in the separate dual dispatch.
+// A dispatch (_DualSweep) of 0 does no dual update: the first sweep of a step, and the sweeps a test dispatches alone. The Dual kernel runs once after
+// the last sweep (AvbdDual.compute), for the sweep that has no sweep after it, and clears the marks.
+#pragma multi_compile_local _ AVBD_FUSED_DUAL
+
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdPlasticRecords.hlsl"
@@ -25,13 +33,20 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdContactSolve.hlsl"
 
 RWStructuredBuffer<BodyStateRecord>    _BodyState;
+RWStructuredBuffer<BodyPoseRecord>     _BodyPose;       // the current pose of every body, 32 B per body: what the neighbors of a joint or spring are read from
 StructuredBuffer<BodyInertialRecord>   _BodyInertial;
-StructuredBuffer<BodyMassRecord>       _BodyMass;
-StructuredBuffer<BodyMetaRecord>       _BodyMeta;
-StructuredBuffer<BodyRangeRecord>      _BodyRange;
+StructuredBuffer<BodySolveRecord>      _BodySolve;      // moments and mass, flags and list range of every body in one 32 B record (built once per step, see AvbdPredict.compute)
+#if defined(AVBD_FUSED_DUAL)
+RWStructuredBuffer<ConstraintRecord>   _Constraints;    // joints and springs (written by the dual update of the first body of a joint in a sweep)
+StructuredBuffer<FractureRecord>       _Fracture;       // fracture thresholds, four joints per record (read by the dual update, for a joint with a FRACTURABLE flag)
+#if defined(AVBD_PLASTIC_JOINTS)
+RWStructuredBuffer<PlasticRecord>      _Plastic;        // rest rotation of the joints with the PLASTIC flag, by ident.w
+#endif
+#else
 StructuredBuffer<ConstraintRecord>     _Constraints;    // joints and springs
 #if defined(AVBD_PLASTIC_JOINTS)
 StructuredBuffer<PlasticRecord>        _Plastic;        // rest rotation of the joints with the PLASTIC flag, by ident.w
+#endif
 #endif
 StructuredBuffer<ContactPairRecord>    _ContactPairs;   // manifolds of the pool (a list entry with AVBD_LIST_CONTACT_FLAG names one)
 StructuredBuffer<ContactPointRecord>   _ContactPoints;
@@ -41,6 +56,11 @@ StructuredBuffer<uint>                 _ColorWork;      // stage C's work buffer
 RWStructuredBuffer<uint>               _Status;         // x = number of failed solves
 
 uint _Color; // the graph color this dispatch solves. The dispatch is indirect: its size comes from the arguments ColorPlan wrote
+uint _DualSweep; // AVBD_FUSED_DUAL: the id of this sweep (above 0) if it runs the dual update of the sweep before, 0 if it does not
+
+#if defined(AVBD_FUSED_DUAL)
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdJointDual.hlsl"
+#endif
 
 // The 6x6 system of one body, as the blocks the reference uses (all 3x3 blocks are mathematical matrices).
 struct PrimalSystem
@@ -52,7 +72,9 @@ struct PrimalSystem
     float3 rhsAng;
 };
 
-// Pose of body slot `id`. The body being solved is passed in, the others are read from the state array.
+// Pose of body slot `id`. The body being solved is passed in, the others are read from the compact pose array (a joint or spring needs nothing else of
+// the neighbor, and 32 B records put twice as many bodies in a cache line as the 64 B state records). A manifold also needs the start-of-step pose
+// of both bodies, which only the state record has, so StampManifold reads the state record of both bodies once, and one line serves both.
 // A body A of AVBD_INVALID is the world: origin and identity rotation.
 void LoadPose(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos, out float4 rot)
 {
@@ -68,13 +90,14 @@ void LoadPose(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos
     }
     else
     {
-        BodyStateRecord s = _BodyState[id];
-        pos = s.position.xyz;
-        rot = s.rotation;
+        BodyPoseRecord p = _BodyPose[id];
+        pos = p.position.xyz;
+        rot = p.rotation;
     }
 }
 
-void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+// `entry` is the index of the record in _Constraints. With AVBD_FUSED_DUAL the joint is first brought up to date, if this body is the first to see it in the sweep.
+void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
 {
     float alpha = AVBD_ALPHA;
     bool hasA = c.ident.x != AVBD_INVALID;
@@ -85,6 +108,48 @@ void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float
     LoadPose(c.ident.x, slot, selfPos, selfRot, posA, rotA);
     LoadPose(c.ident.y, slot, selfPos, selfRot, posB, rotB);
 
+    float4 rest = float4(0.0, 0.0, 0.0, 1.0); // rest rotation of the angular row: loaded below, or returned by the dual update that has just made it
+    bool haveRest = false;
+
+    // The plastic data this stamp needs is requested here, right after the poses and before anything uses them: a use of a pose waits for it, and a read
+    // issued after that use would be one more round trip to memory. The dual update needs the limits and the rest rotation of the plastic record, the
+    // stamp alone only the rest rotation of a joint with an angular row.
+#if defined(AVBD_FUSED_DUAL)
+    bool dualNow = _DualSweep != 0u && !(flags & AVBD_CONSTRAINT_FLAG_BROKEN) && asuint(c.c0Ang.w) != _DualSweep;
+    JointPlasticRead plasticRead;
+    plasticRead.limits = float4(0.0, 0.0, 0.0, 0.0);
+    plasticRead.rest = rest;
+    float2 fracture = float2(0.0, 0.0);
+    if (dualNow)
+    {
+        plasticRead = AvbdJointPlasticRead(c, flags);
+        fracture = AvbdJointFractureRead(entry, flags);
+    }
+#endif
+#if defined(AVBD_PLASTIC_JOINTS)
+    float4 restLoaded = rest;
+    bool needRest = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) && dot(AvbdPenaltyAng(c), AvbdPenaltyAng(c)) > 0.0;
+#if defined(AVBD_FUSED_DUAL)
+    needRest = needRest && !dualNow;
+#endif
+    if (needRest)
+        restLoaded = _Plastic[c.ident.w].rest;
+#endif
+
+#if defined(AVBD_FUSED_DUAL)
+    // The dual update of the sweep before, with the poses read above: neither body of the joint has moved in this sweep (see the keyword above). A joint
+    // that is broken has none. The record is stored with the mark in the word that no other stage uses; the stamp below reads the updated joint.
+    if (dualNow)
+    {
+        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, plasticRead, fracture, rest);
+        AvbdJointDualStore(entry, c, result, rest); // may store c0Ang (a yield in the angle), whose w is the old mark: the mark is set after it
+        c.c0Ang.w = asfloat(_DualSweep);
+        _Constraints[entry].c0Ang.w = c.c0Ang.w;
+        flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+        haveRest = true;
+    }
+#endif
+
     float3 rA = c.anchorA.xyz;
     float3 rB = c.anchorB.xyz;
     float torqueArm = c.c0Lin.w;
@@ -94,56 +159,60 @@ void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float
     float3 anchorA = hasA ? rWorldA + posA : rA; // world joint: rA is the fixed world point
     float3 anchorB = rWorldB + posB;
 
-    float3 penaltyLin = c.penaltyLin.xyz;
-    float3 penaltyAng = c.penaltyAng.xyz;
+    float3 penaltyLin = AvbdPenaltyLin(c);
+    float3 penaltyAng = AvbdPenaltyAng(c);
+
+    // The Jacobians of the joint are written out, not multiplied: the linear one is sgn * I and the angular one is a skew matrix (S = skew(s), with
+    // s = -rWorldA for body A and rWorldB for body B, sgn = +1 for A and -1 for B), and the penalty matrices are diagonal. That makes
+    //   J_lin^T K J_lin = K,   J_ang^T K J_ang = S^T K S (symmetric),   J_ang^T K J_lin = sgn * S^T K,   J_lin^T F = sgn * F,   J_ang^T F = F x s,
+    // and no 3x3 product, transpose or temporary matrix is built. The entries are the ones the generic matrix products give (checked against them on the CPU).
+    float sgn = isA ? 1.0 : -1.0;
 
     // Linear constraint
     if (dot(penaltyLin, penaltyLin) > 0.0)
     {
-        float3x3 K = AvbdDiagonal(penaltyLin);
+        float3 k = penaltyLin;
         float3 C = anchorA - anchorB;
 
         // Stabilization
         if (flags & AVBD_CONSTRAINT_FLAG_HARD_LIN)
             C -= c.c0Lin.xyz * alpha;
 
-        float3 F = penaltyLin * C + c.lambdaLin.xyz;
+        float3 F = penaltyLin * C + AvbdLambdaLin(c);
 
-        // Jacobians for the body being solved.
-        float sgn = isA ? 1.0 : -1.0;
-        float3x3 jLin = sgn * AvbdIdentity3();
-        float3x3 jAng;
-        if (isA)
-            jAng = AvbdSkew(-rWorldA);
-        else
-            jAng = AvbdSkew(rWorldB);
+        float3 sv = isA ? -rWorldA : rWorldB;
+        float3 sq = sv * sv;
+        float xy = -sv.x * sv.y;
+        float xz = -sv.x * sv.z;
+        float yz = -sv.y * sv.z;
 
-        float3x3 jLinT = transpose(jLin);
-        float3x3 jAngT = transpose(jAng);
-        float3x3 jAngTk = mul(jAngT, K);
-
-        sys.lhsLin += mul(mul(jLinT, K), jLin);
-        sys.lhsAng += mul(jAngTk, jAng);
-        sys.lhsCross += mul(jAngTk, jLin);
+        sys.lhsLin += AvbdDiagonal(k);
+        sys.lhsAng += float3x3(k.y * sq.z + k.z * sq.y, k.z * xy, k.y * xz,
+                               k.z * xy, k.x * sq.z + k.z * sq.x, k.x * yz,
+                               k.y * xz, k.x * yz, k.x * sq.y + k.y * sq.x);
+        sys.lhsCross += float3x3(0.0, sgn * sv.z * k.y, -sgn * sv.y * k.z,
+                                 -sgn * sv.z * k.x, 0.0, sgn * sv.x * k.z,
+                                 sgn * sv.y * k.x, -sgn * sv.x * k.y, 0.0);
 
         // Diagonal approximation for higher-order terms: the sum over k of F[k] * G(k, r), with G the geometric stiffness of a
-        // ball-socket joint (diag(-r[k]) plus r added to column k), which is -dot(F, r) I + r F^T.
-        float3 r = isA ? rWorldA : -rWorldB;
-        float3x3 H = -dot(F, r) * AvbdIdentity3() + AvbdOuter(r, F);
-        sys.lhsAng += AvbdDiagonalize(H);
+        // ball-socket joint (diag(-r[k]) plus r added to column k), which is -dot(F, r) I + r F^T. Only the lengths of its columns are used.
+        float3 r = -sv;
+        float d = dot(F, r);
+        float3 col0 = float3(r.x * F.x - d, r.y * F.x, r.z * F.x);
+        float3 col1 = float3(r.x * F.y, r.y * F.y - d, r.z * F.y);
+        float3 col2 = float3(r.x * F.z, r.y * F.z, r.z * F.z - d);
+        sys.lhsAng += AvbdDiagonal(float3(length(col0), length(col1), length(col2)));
 
-        sys.rhsLin += mul(jLinT, F);
-        sys.rhsAng += mul(jAngT, F);
+        sys.rhsLin += sgn * F;
+        sys.rhsAng += cross(F, sv);
     }
 
     // Angular constraint
     if (dot(penaltyAng, penaltyAng) > 0.0)
     {
-        float3x3 K = AvbdDiagonal(penaltyAng);
-        float4 rest = float4(0.0, 0.0, 0.0, 1.0);
 #if defined(AVBD_PLASTIC_JOINTS)
-        if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC)
-            rest = _Plastic[c.ident.w].rest;
+        if (!haveRest && (flags & AVBD_CONSTRAINT_FLAG_PLASTIC))
+            rest = restLoaded;
 #endif
         float3 C = AvbdJointAngularError(rotA, rotB, rest) * torqueArm; // rotA is the identity for a world joint
 
@@ -151,14 +220,11 @@ void StampJoint(ConstraintRecord c, uint flags, uint slot, float3 selfPos, float
         if (flags & AVBD_CONSTRAINT_FLAG_HARD_ANG)
             C -= c.c0Ang.xyz * alpha;
 
-        float3 F = penaltyAng * C + c.lambdaAng.xyz;
+        float3 F = penaltyAng * C + AvbdLambdaAng(c);
 
-        float sgn = isA ? 1.0 : -1.0;
-        float3x3 jAng = (sgn * torqueArm) * AvbdIdentity3();
-        float3x3 jAngT = transpose(jAng);
-
-        sys.lhsAng += mul(mul(jAngT, K), jAng);
-        sys.rhsAng += mul(jAngT, F);
+        // J_ang = sgn * torqueArm * I
+        sys.lhsAng += AvbdDiagonal(penaltyAng * (torqueArm * torqueArm));
+        sys.rhsAng += (sgn * torqueArm) * F;
     }
 }
 
@@ -217,13 +283,24 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
 
     bool isA = pair.ident.x == slot;
 
-    float3 posA, posB;
-    float4 rotA, rotB;
-    LoadPose(pair.ident.x, slot, selfPos, selfRot, posA, rotA);
-    LoadPose(pair.ident.y, slot, selfPos, selfRot, posB, rotB);
-
+    // The state record of each body is read once: the pose and the start-of-step pose come from the same line. The body being solved has its own
+    // pose in registers, which is what the record holds as well (the sweep writes it back at the end), so that one is not taken from the record.
     BodyStateRecord stateA = _BodyState[pair.ident.x];
     BodyStateRecord stateB = _BodyState[pair.ident.y];
+    float3 posA = stateA.position.xyz;
+    float4 rotA = stateA.rotation;
+    float3 posB = stateB.position.xyz;
+    float4 rotB = stateB.rotation;
+    if (pair.ident.x == slot)
+    {
+        posA = selfPos;
+        rotA = selfRot;
+    }
+    if (pair.ident.y == slot)
+    {
+        posB = selfPos;
+        rotB = selfRot;
+    }
     float3 dqALin = posA - stateA.startPosition.xyz;
     float3 dqBLin = posB - stateB.startPosition.xyz;
     float3 dqAAng = AvbdQuatDifference(rotA, stateA.startRotation);
@@ -250,33 +327,168 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
     }
 }
 
-// The terms of a body's system that the lanes add up: the 3x3 blocks lhsLin, lhsAng and lhsCross (9 each, row-major), then rhsLin and
-// rhsAng (3 each).
-#define AVBD_PRIMAL_TERMS 33
+// The terms of a body's system that the lanes add up. The solver reads only the lower triangle of the 6x6 matrix, and the linear and the angular block are
+// symmetric, so of those only their lower triangles are kept: lhsLin (6), lhsAng (6), the full cross block (9, rows 3 to 5, columns 0 to 2), then rhsLin and
+// rhsAng (3 each). That is 27 terms, not 33, and the result is the same bit for bit (the upper triangles were never read).
+#define AVBD_PRIMAL_TERMS 27
+#define AVBD_TERM_LIN   0u
+#define AVBD_TERM_ANG   6u
+#define AVBD_TERM_CROSS 12u
+#define AVBD_TERM_RHS   21u
 
-// Partial sums of the lanes, term-major: term t of thread i is at t * AVBD_GROUP_SIZE + i, so the lanes of a body read consecutive words.
-groupshared float gsTerms[AVBD_PRIMAL_TERMS * AVBD_GROUP_SIZE];
+#if AVBD_PRIMAL_LANES < 2
+#error The partial systems are added up in two halves: AVBD_PRIMAL_LANES must be at least 2.
+#endif
 
-void StorePartial(uint tid, PrimalSystem sys)
+// The lanes of a body add their partial systems in two steps, so shared memory only has to hold half of them: the upper half of the lanes (lane >= H, with
+// H = AVBD_PRIMAL_LANES / 2) writes its terms, the lower half adds them to its own, and then the lower half writes the result and every sum over its H lanes is
+// formed by one thread. A slot holds the terms of one lane of the lower half: slot b * H + l is lane l of body b of the group, and the terms of a slot are
+// term-major, term t of slot s at t * AVBD_PRIMAL_SLOTS + s, so the neighboring threads of a warp write neighboring words.
+#define AVBD_PRIMAL_HALF_LANES (AVBD_PRIMAL_LANES / 2u)
+#define AVBD_PRIMAL_SLOTS (AVBD_GROUP_SIZE / 2u)
+groupshared float gsTerms[AVBD_PRIMAL_TERMS * AVBD_PRIMAL_SLOTS];
+
+// Index of the element (r, c), c <= r, in a packed lower triangle.
+uint TriIndex(uint r, uint c)
+{
+    return r * (r + 1u) / 2u + c;
+}
+
+void PackSystem(PrimalSystem sys, out float p[AVBD_PRIMAL_TERMS])
 {
     [unroll]
     for (uint r = 0; r < 3; r++)
     {
         [unroll]
-        for (uint col = 0; col < 3; col++)
+        for (uint c = 0; c <= r; c++)
         {
-            gsTerms[(r * 3 + col) * AVBD_GROUP_SIZE + tid] = sys.lhsLin[r][col];
-            gsTerms[(9 + r * 3 + col) * AVBD_GROUP_SIZE + tid] = sys.lhsAng[r][col];
-            gsTerms[(18 + r * 3 + col) * AVBD_GROUP_SIZE + tid] = sys.lhsCross[r][col];
+            p[AVBD_TERM_LIN + TriIndex(r, c)] = sys.lhsLin[r][c];
+            p[AVBD_TERM_ANG + TriIndex(r, c)] = sys.lhsAng[r][c];
         }
+        [unroll]
+        for (uint c2 = 0; c2 < 3; c2++)
+            p[AVBD_TERM_CROSS + r * 3 + c2] = sys.lhsCross[r][c2];
     }
     [unroll]
     for (uint k = 0; k < 3; k++)
     {
-        gsTerms[(27 + k) * AVBD_GROUP_SIZE + tid] = sys.rhsLin[k];
-        gsTerms[(30 + k) * AVBD_GROUP_SIZE + tid] = sys.rhsAng[k];
+        p[AVBD_TERM_RHS + k] = sys.rhsLin[k];
+        p[AVBD_TERM_RHS + 3 + k] = sys.rhsAng[k];
     }
 }
+
+void StoreTerms(uint slot, float p[AVBD_PRIMAL_TERMS])
+{
+    [unroll]
+    for (uint t = 0; t < AVBD_PRIMAL_TERMS; t++)
+        gsTerms[t * AVBD_PRIMAL_SLOTS + slot] = p[t];
+}
+
+void AddTerms(uint slot, inout float p[AVBD_PRIMAL_TERMS])
+{
+    [unroll]
+    for (uint t = 0; t < AVBD_PRIMAL_TERMS; t++)
+        p[t] += gsTerms[t * AVBD_PRIMAL_SLOTS + slot];
+}
+
+// The summed system of every body of the group, term-major like gsTerms, but with the body as the fast index: term t of body b is at t * AVBD_PRIMAL_BODIES + b.
+// The lanes write the sums here and lane 0 of each body factorizes it where it is. The LDL^T used to run on a local array of 36 + 6 floats, which stayed in
+// registers for the whole solve; here the lane 0 threads of the group (one per body, so adjacent bodies) touch consecutive words, which is free of bank conflicts.
+#define AVBD_PRIMAL_BODIES (AVBD_GROUP_SIZE / AVBD_PRIMAL_LANES)
+groupshared float gsSums[AVBD_PRIMAL_TERMS * AVBD_PRIMAL_BODIES];
+
+// The term of the lower-triangle element (i, j), i >= j, of the symmetric 6x6 matrix: the linear block (rows and columns 0 to 2), the cross block (rows 3 to 5,
+// columns 0 to 2) or the angular block (rows and columns 3 to 5), in the order PackSystem wrote them.
+uint SolveTerm(uint i, uint j)
+{
+    if (i < 3u)
+        return AVBD_TERM_LIN + TriIndex(i, j);
+    if (j < 3u)
+        return AVBD_TERM_CROSS + (i - 3u) * 3u + j;
+    return AVBD_TERM_ANG + TriIndex(i - 3u, j - 3u);
+}
+
+// Element (i, j) of the matrix of body `body` of the group and element i of its right-hand side.
+#define AVBD_SOLVE_A(i, j) gsSums[SolveTerm(i, j) * AVBD_PRIMAL_BODIES + body]
+#define AVBD_SOLVE_Y(i)    gsSums[(AVBD_TERM_RHS + (i)) * AVBD_PRIMAL_BODIES + body]
+
+// Solves A x = -rhs for the summed system of body `body` of the group with an LDL^T factorization, no pivoting, in groupshared memory: the lower triangle
+// of the matrix is overwritten by the factorization and the right-hand side by x (AVBD_SOLVE_Y). Mirrors Mat6.TrySolveLDLT in the reference. Returns false if
+// a pivot is not above 1e-20 or is NaN (x is then meaningless). Only lane 0 of a body runs it, so no barrier is needed.
+bool SolveLdlt6(uint body)
+{
+    float v[6];
+    bool ok = true; // no early return inside the unrolled loops: a failed pivot is replaced by 1 and reported at the end
+
+    [unroll]
+    for (uint n = 0; n < 6; n++)
+        AVBD_SOLVE_Y(n) = -AVBD_SOLVE_Y(n);
+
+    [unroll]
+    for (uint j = 0; j < 6; j++)
+    {
+        [unroll]
+        for (uint k = 0; k < j; k++)
+            v[k] = AVBD_SOLVE_A(j, k) * AVBD_SOLVE_A(k, k);
+
+        float dj = AVBD_SOLVE_A(j, j);
+        [unroll]
+        for (uint k2 = 0; k2 < j; k2++)
+            dj -= AVBD_SOLVE_A(j, k2) * v[k2];
+
+        if (!(dj > 1e-20))
+        {
+            ok = false;
+            dj = 1.0;
+        }
+        AVBD_SOLVE_A(j, j) = dj;
+
+        float inv = 1.0 / dj;
+        [unroll]
+        for (uint i = j + 1; i < 6; i++)
+        {
+            float s = AVBD_SOLVE_A(i, j);
+            [unroll]
+            for (uint k3 = 0; k3 < j; k3++)
+                s -= AVBD_SOLVE_A(i, k3) * v[k3];
+            AVBD_SOLVE_A(i, j) = s * inv;
+        }
+    }
+
+    // Forward substitution: L y = b
+    [unroll]
+    for (uint i1 = 0; i1 < 6; i1++)
+    {
+        float s = AVBD_SOLVE_Y(i1);
+        [unroll]
+        for (uint k4 = 0; k4 < i1; k4++)
+            s -= AVBD_SOLVE_A(i1, k4) * AVBD_SOLVE_Y(k4);
+        AVBD_SOLVE_Y(i1) = s;
+    }
+
+    // Diagonal: D z = y
+    [unroll]
+    for (uint i2 = 0; i2 < 6; i2++)
+        AVBD_SOLVE_Y(i2) /= AVBD_SOLVE_A(i2, i2);
+
+    // Backward substitution: L^T x = z
+    [unroll]
+    for (int i3 = 5; i3 >= 0; i3--)
+    {
+        float s = AVBD_SOLVE_Y(i3);
+        [unroll]
+        for (int k5 = i3 + 1; k5 < 6; k5++)
+            s -= AVBD_SOLVE_A(k5, i3) * AVBD_SOLVE_Y(k5);
+        AVBD_SOLVE_Y(i3) = s;
+    }
+
+    return ok;
+}
+
+// Entries of the body's list that a lane reads before it stamps any of them: the entries and the joint or spring records of the whole batch are requested
+// together, so their latencies overlap instead of following one another (list entry, then record, then the neighbor's pose, per stamp). Each record in
+// flight is 128 B of registers: 1 gives the plain one-at-a-time loop, and a larger batch buys more loads in flight with more registers.
+#define AVBD_PRIMAL_BATCH 1u
 
 // AVBD_PRIMAL_LANES threads solve one body. Lane l stamps the entries l, l + AVBD_PRIMAL_LANES, ... of the body's list into its own partial system;
 // the partial systems are added up in groupshared memory, and lane 0 solves the sum once and writes the pose. The lanes of a body are
@@ -290,28 +502,42 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
     uint index = item / AVBD_PRIMAL_LANES;
     uint lane = item % AVBD_PRIMAL_LANES;
     uint first = tid - lane; // the thread of lane 0 of this body
+    uint body = tid / AVBD_PRIMAL_LANES; // the body's number in the group
 
     bool active = index < _ColorWork[AVBD_COLOR_COUNTS_OFFSET + _Color];
     uint slot = 0u;
     float mass = 0.0;
     float4 momentMass = float4(0.0, 0.0, 0.0, 0.0);
+    float3 position = float3(0.0, 0.0, 0.0);
+    float4 rotation = float4(0.0, 0.0, 0.0, 1.0);
+    uint2 range = uint2(0u, 0u);
+    BodyInertialRecord inertial = (BodyInertialRecord)0;
     if (active)
     {
         slot = _ColorBodies[_ColorWork[AVBD_COLOR_STARTS_OFFSET + _Color] + index];
 
+        // Everything the body needs is requested at once, before any of it is tested: the reads depend on the slot only, so they are in flight together
+        // instead of one after the other (solve header, then pose). A body that is skipped below has wasted a few reads. The header (flags, mass, range of
+        // the list) is one 32 B sector; the three arrays it mirrors were three.
+        BodySolveRecord solve = _BodySolve[slot];
+        uint bodyFlags = solve.info.x;
+        momentMass = solve.momentMass;
+        BodyPoseRecord ownPose = _BodyPose[slot];
+        range = solve.info.yz;
+        if (lane == 0u)
+            inertial = _BodyInertial[slot];
+
         // The lists and the colors were built before the last edits; a body removed or changed since is skipped.
-        if (_BodyMeta[slot].ident.x & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
+        if (bodyFlags & (AVBD_BODY_FLAG_FREE | AVBD_BODY_FLAG_KINEMATIC))
             active = false;
         else
         {
-            momentMass = _BodyMass[slot].momentMass;
             mass = momentMass.w;
             active = mass > 0.0;
         }
+        position = ownPose.position.xyz;
+        rotation = ownPose.rotation;
     }
-
-    float3 position = float3(0.0, 0.0, 0.0);
-    float4 rotation = float4(0.0, 0.0, 0.0, 1.0);
 
     PrimalSystem sys;
     sys.lhsLin = float3x3(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -322,58 +548,95 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
     if (active)
     {
-        BodyStateRecord state = _BodyState[slot];
-        position = state.position.xyz;
-        rotation = state.rotation;
-
         // Inertia term: once, by lane 0.
         if (lane == 0u)
         {
             float dtSq = AVBD_DT * AVBD_DT;
-            BodyInertialRecord inertial = _BodyInertial[slot];
             sys.lhsLin = AvbdDiagonal(float3(mass / dtSq, mass / dtSq, mass / dtSq));
             sys.lhsAng = AvbdDiagonal(float3(momentMass.x / dtSq, momentMass.y / dtSq, momentMass.z / dtSq));
             sys.rhsLin = (mass / dtSq) * (position - inertial.position.xyz);
             sys.rhsAng = (momentMass.xyz / dtSq) * AvbdQuatDifference(rotation, inertial.rotation);
         }
 
-        // This lane's share of the constraints of the body.
-        uint2 range = _BodyRange[slot].range.xy;
-        for (uint e = lane; e < range.y; e += AVBD_PRIMAL_LANES)
+        // This lane's share of the constraints of the body, AVBD_PRIMAL_BATCH entries at a time: the entries, then the records of the joints and springs
+        // among them (both requested before any stamp starts), then the stamps.
+        for (uint e = lane; e < range.y; e += AVBD_PRIMAL_LANES * AVBD_PRIMAL_BATCH)
         {
-            uint entry = _ConstraintList[range.x + e];
-            if (entry & AVBD_LIST_CONTACT_FLAG)
+            uint entries[AVBD_PRIMAL_BATCH];
+            ConstraintRecord records[AVBD_PRIMAL_BATCH];
+
+            [unroll]
+            for (uint b0 = 0; b0 < AVBD_PRIMAL_BATCH; b0++)
             {
-                StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, position, rotation, sys);
+                entries[b0] = 0u;
+                if (e + b0 * AVBD_PRIMAL_LANES < range.y)
+                    entries[b0] = _ConstraintList[range.x + e + b0 * AVBD_PRIMAL_LANES];
             }
-            else
+
+            [unroll]
+            for (uint b1 = 0; b1 < AVBD_PRIMAL_BATCH; b1++)
             {
-                ConstraintRecord c = _Constraints[entry];
-                uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
-                uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
-                if (kind == AVBD_CONSTRAINT_KIND_JOINT)
-                    StampJoint(c, flags, slot, position, rotation, sys);
-                else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
-                    StampSpring(c, slot, position, rotation, sys);
+                records[b1] = (ConstraintRecord)0;
+                if (e + b1 * AVBD_PRIMAL_LANES < range.y && !(entries[b1] & AVBD_LIST_CONTACT_FLAG))
+                    records[b1] = _Constraints[entries[b1]];
+            }
+
+            [unroll]
+            for (uint b2 = 0; b2 < AVBD_PRIMAL_BATCH; b2++)
+            {
+                if (e + b2 * AVBD_PRIMAL_LANES < range.y)
+                {
+                    uint entry = entries[b2];
+                    if (entry & AVBD_LIST_CONTACT_FLAG)
+                    {
+                        StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, position, rotation, sys);
+                    }
+                    else
+                    {
+                        ConstraintRecord c = records[b2];
+                        uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+                        uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
+                        if (kind == AVBD_CONSTRAINT_KIND_JOINT)
+                            StampJoint(c, flags, entry, slot, position, rotation, sys);
+                        else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
+                            StampSpring(c, slot, position, rotation, sys);
+                    }
+                }
             }
         }
+    }
 
-        StorePartial(tid, sys);
+    // Add up the partial systems of the body's lanes in two steps (see AVBD_PRIMAL_HALF_LANES), then into the body's column of gsSums. The order of the
+    // additions is fixed, so the sum does not depend on timing: lane l of the lower half adds lane l + H to its own terms, and the sum is made in lane order.
+    uint slotOfLane = body * AVBD_PRIMAL_HALF_LANES + (lane % AVBD_PRIMAL_HALF_LANES);
+
+    float terms[AVBD_PRIMAL_TERMS];
+    PackSystem(sys, terms);
+    if (active && lane >= AVBD_PRIMAL_HALF_LANES)
+        StoreTerms(slotOfLane, terms);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // A lane of the lower half reads and then overwrites its own slot, and no other thread touches it between the two barriers: no barrier between them.
+    if (active && lane < AVBD_PRIMAL_HALF_LANES)
+    {
+        AddTerms(slotOfLane, terms);
+        StoreTerms(slotOfLane, terms);
     }
 
     GroupMemoryBarrierWithGroupSync();
 
-    // Add up the partial systems of the body's lanes into lane 0's words, in lane order (so the sum does not depend on timing). Lane l adds
-    // the terms l, l + AVBD_PRIMAL_LANES, ...; a term is read and written by one lane only, so this needs no second copy.
+    // Lane l adds the terms l, l + AVBD_PRIMAL_LANES, ... over the H slots of the body; a term is read and written by one lane only.
     if (active)
     {
+        uint firstSlot = body * AVBD_PRIMAL_HALF_LANES;
         for (uint t = lane; t < AVBD_PRIMAL_TERMS; t += AVBD_PRIMAL_LANES)
         {
             float sum = 0.0;
             [unroll]
-            for (uint l = 0; l < AVBD_PRIMAL_LANES; l++)
-                sum += gsTerms[t * AVBD_GROUP_SIZE + first + l];
-            gsTerms[t * AVBD_GROUP_SIZE + first] = sum;
+            for (uint l = 0; l < AVBD_PRIMAL_HALF_LANES; l++)
+                sum += gsTerms[t * AVBD_PRIMAL_SLOTS + firstSlot + l];
+            gsSums[t * AVBD_PRIMAL_BODIES + body] = sum;
         }
     }
 
@@ -382,38 +645,17 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
     if (!active || lane != 0u)
         return;
 
-    // Lower triangle of the symmetric 6x6 matrix, row-major, and the right-hand side -rhs.
-    float a[36];
-    [unroll]
-    for (uint i = 0; i < 36; i++)
-        a[i] = 0.0;
-
-    [unroll]
-    for (uint r = 0; r < 3; r++)
+    if (SolveLdlt6(body))
     {
-        [unroll]
-        for (uint col = 0; col < 3; col++)
-        {
-            a[r * 6 + col] = gsTerms[(r * 3 + col) * AVBD_GROUP_SIZE + tid];
-            a[(3 + r) * 6 + col] = gsTerms[(18 + r * 3 + col) * AVBD_GROUP_SIZE + tid];
-            a[(3 + r) * 6 + 3 + col] = gsTerms[(9 + r * 3 + col) * AVBD_GROUP_SIZE + tid];
-        }
-    }
-
-    float y[6];
-    [unroll]
-    for (uint k = 0; k < 3; k++)
-    {
-        y[k] = -gsTerms[(27 + k) * AVBD_GROUP_SIZE + tid];
-        y[3 + k] = -gsTerms[(30 + k) * AVBD_GROUP_SIZE + tid];
-    }
-
-    if (AvbdSolveLdlt6(a, y))
-    {
-        BodyStateRecord state = _BodyState[slot];
-        state.position = float4(position + float3(y[0], y[1], y[2]), 0.0);
-        state.rotation = AvbdIntegrateAngular(rotation, float3(y[3], y[4], y[5]));
-        _BodyState[slot] = state;
+        // Only the pose changes: write those two words, not the start-of-step pose that follows them in the 64 B record, and the compact copy of the pose.
+        float4 newPosition = float4(position + float3(AVBD_SOLVE_Y(0), AVBD_SOLVE_Y(1), AVBD_SOLVE_Y(2)), 0.0);
+        float4 newRotation = AvbdIntegrateAngular(rotation, float3(AVBD_SOLVE_Y(3), AVBD_SOLVE_Y(4), AVBD_SOLVE_Y(5)));
+        _BodyState[slot].position = newPosition;
+        _BodyState[slot].rotation = newRotation;
+        BodyPoseRecord pose;
+        pose.position = newPosition;
+        pose.rotation = newRotation;
+        _BodyPose[slot] = pose;
     }
     else
     {

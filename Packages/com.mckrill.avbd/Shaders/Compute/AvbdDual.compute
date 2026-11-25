@@ -2,7 +2,7 @@
 //
 // ConstraintInit  Once per step, after stage P. Evaluates each joint at the start-of-step pose (C0) and warm-starts the multipliers
 //                 and penalties (Eq. 19). The reference solver's Joint.Initialize.
-// Dual            After every primal sweep. Updates the multiplier of hard constraints, ramps the penalty (Eqs. 11 and 16) and breaks
+// Dual            After every primal sweep (with AVBD_FUSED_DUAL in the primal kernel: once, after the last one; the sweeps do the others). Updates the multiplier of hard constraints, ramps the penalty (Eqs. 11 and 16) and breaks
 //                 joints whose angular multiplier exceeds the fracture threshold. The reference solver's Joint.UpdateDual.
 //                 A joint with FRACTURABLE_LIN breaks in the same way when its linear multiplier exceeds the linear threshold (reserved.x of the record).
 //                 With AVBD_PLASTIC_JOINTS, a plastic joint (PLASTIC flag) whose angular multiplier exceeds its yield value yields instead: the
@@ -13,10 +13,11 @@
 //                 because only a hard row stores a multiplier.
 //
 // One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
-// ordering, coloring or atomics are needed. Springs have no state and are skipped.
+// ordering, coloring or atomics are needed. Springs have no state and are skipped. Dual stores only the words of the record that it changed.
 // DualContact is the dual update of the contacts, one thread per slot of the manifold pool that has ever been used (below the pool's high-water
 // mark; see ContactLayout), which updates the points of its pair: a free slot skips. It is dispatched indirectly with arguments the narrow phase
 // wrote, so the host never needs the number of manifolds. A contact's warm start is part of the narrow phase (AvbdNarrowphase.compute).
+// The update of one joint is in Include/AvbdJointDual.hlsl, which the primal kernel uses too.
 // Mirrored by Reference/Stages/CpuConstraintInit.cs and CpuDual.cs, which the tests compare against.
 
 #pragma kernel ConstraintInit
@@ -37,7 +38,9 @@
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdIndirect.hlsl"
 
 StructuredBuffer<BodyStateRecord>      _BodyState;
+StructuredBuffer<BodyPoseRecord>       _BodyPose;      // the current pose of every body, 32 B per body (a copy of the pose in _BodyState)
 RWStructuredBuffer<ConstraintRecord>   _Constraints;
+StructuredBuffer<FractureRecord>       _Fracture;      // fracture thresholds, four joints per record (read by the Dual kernel, only for a joint with a FRACTURABLE flag)
 #if defined(AVBD_PLASTIC_JOINTS)
 RWStructuredBuffer<PlasticRecord>      _Plastic;       // rest rotation and limits of the joints with the PLASTIC flag, by ident.w
 #endif
@@ -49,8 +52,15 @@ StructuredBuffer<uint>                 _NpControl;     // the manifold pool's co
 uint _Base;        // first constraint to process
 uint _Count;       // end of the range: constraints [_Base, _Count)
 uint _SlotCapacity; // DualContact: manifold slots
+uint _ClearMarks;  // Dual: nonzero after a step whose sweeps ran the dual update themselves (AVBD_FUSED_DUAL in AvbdPrimal.compute): the update also clears the marks they left
+uint _LastSweep;   // Dual, with _ClearMarks: the id of the last sweep that ran a dual update (0 if none did)
+uint _FinalUpdates; // Dual, with _ClearMarks: the number of iterations of the step: the updates that a joint no sweep touched has missed
 
-// Pose of body slot `id`: the start-of-step pose or the current pose. A body of AVBD_INVALID is the world.
+// The dual update of one joint, shared with the primal kernel. Needs _Constraints, _Fracture and _Plastic, declared above.
+#include "Packages/com.mckrill.avbd/Shaders/Include/AvbdJointDual.hlsl"
+
+// Pose of body slot `id`: the start-of-step pose or the current pose. A body of AVBD_INVALID is the world. The current pose comes from the compact pose array
+// (32 B per body, twice as many bodies per cache line as the 64 B state record); only the start-of-step pose needs the state record.
 void LoadPose(uint id, bool atStart, out float3 pos, out float4 rot)
 {
     if (id == AVBD_INVALID)
@@ -60,9 +70,18 @@ void LoadPose(uint id, bool atStart, out float3 pos, out float4 rot)
     }
     else
     {
-        BodyStateRecord s = _BodyState[id];
-        pos = atStart ? s.startPosition.xyz : s.position.xyz;
-        rot = atStart ? s.startRotation : s.rotation;
+        if (atStart)
+        {
+            BodyStateRecord s = _BodyState[id];
+            pos = s.startPosition.xyz;
+            rot = s.startRotation;
+        }
+        else
+        {
+            BodyPoseRecord p = _BodyPose[id];
+            pos = p.position.xyz;
+            rot = p.rotation;
+        }
     }
 }
 
@@ -89,7 +108,7 @@ void ConstraintInit(uint3 id : SV_DispatchThreadID)
     float3 anchorA = hasA ? AvbdQuatRotate(rotA, c.anchorA.xyz) + posA : c.anchorA.xyz; // world joint: a fixed world point
     float3 anchorB = AvbdQuatRotate(rotB, c.anchorB.xyz) + posB;
 
-    // Constraint function at the start of the step, C(x-). The w lanes (torque arm, fracture threshold) stay.
+    // Constraint function at the start of the step, C(x-). The w lanes (torque arm, mark of the fused dual update) stay.
     float4 rest = float4(0.0, 0.0, 0.0, 1.0);
 #if defined(AVBD_PLASTIC_JOINTS)
     if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC)
@@ -100,10 +119,10 @@ void ConstraintInit(uint3 id : SV_DispatchThreadID)
     c.c0Ang.xyz = AvbdJointAngularError(rotA, rotB, rest) * torqueArm;
 
     // Warm start the multipliers and penalties (Eq. 19); penalties are clamped to a safe range.
-    float3 lambdaLin = c.lambdaLin.xyz * AVBD_ALPHA * AVBD_GAMMA;
-    float3 lambdaAng = c.lambdaAng.xyz * AVBD_ALPHA * AVBD_GAMMA;
-    float3 penaltyLin = clamp(c.penaltyLin.xyz * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
-    float3 penaltyAng = clamp(c.penaltyAng.xyz * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+    float3 lambdaLin = AvbdLambdaLin(c) * AVBD_ALPHA * AVBD_GAMMA;
+    float3 lambdaAng = AvbdLambdaAng(c) * AVBD_ALPHA * AVBD_GAMMA;
+    float3 penaltyLin = clamp(AvbdPenaltyLin(c) * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
+    float3 penaltyAng = clamp(AvbdPenaltyAng(c) * AVBD_GAMMA, AVBD_PENALTY_MIN, AVBD_PENALTY_MAX);
 
     // Clamp to the material stiffness. A hard constraint has no cap here: its penalty is already limited by the maximum.
     if (!(flags & AVBD_CONSTRAINT_FLAG_HARD_LIN))
@@ -111,10 +130,7 @@ void ConstraintInit(uint3 id : SV_DispatchThreadID)
     if (!(flags & AVBD_CONSTRAINT_FLAG_HARD_ANG))
         penaltyAng = min(penaltyAng, c.anchorB.www);
 
-    c.lambdaLin.xyz = lambdaLin;
-    c.lambdaAng.xyz = lambdaAng;
-    c.penaltyLin.xyz = penaltyLin;
-    c.penaltyAng.xyz = penaltyAng;
+    AvbdSetConstraintState(c, penaltyLin, penaltyAng, lambdaLin, lambdaAng);
     _Constraints[index] = c;
 }
 
@@ -126,162 +142,51 @@ void Dual(uint3 id : SV_DispatchThreadID)
         return;
 
     ConstraintRecord c = _Constraints[index];
+
+    // The last update of a step whose sweeps ran the dual update themselves (AVBD_FUSED_DUAL in AvbdPrimal.compute). The sweeps marked every joint they
+    // updated with the id of the sweep in c0Ang.w, and the records leave the step without a mark: cleared before the test below, because a joint that
+    // broke is marked too. A joint that the last sweep did not mark was not touched by any sweep (no solved body is on it, so its poses did not change
+    // and no sweep updated it): it gets the updates of all the iterations now, one after the other, which is what separate dispatches would have given it.
+    uint updates = 1u;
+    if (_ClearMarks != 0u)
+    {
+        uint mark = asuint(c.c0Ang.w);
+        if (mark != 0u)
+        {
+            // The local copy too: the update below stores the whole c0Ang (with its w) back when a joint yields in its angle.
+            c.c0Ang.w = 0.0;
+            _Constraints[index].c0Ang.w = 0.0;
+        }
+        if (_LastSweep != 0u && mark != _LastSweep)
+            updates = max(_FinalUpdates, 1u);
+    }
+
     uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
     uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
     if (kind != AVBD_CONSTRAINT_KIND_JOINT || (flags & AVBD_CONSTRAINT_FLAG_BROKEN))
         return;
-
-    float alpha = AVBD_ALPHA;
-    bool hasA = c.ident.x != AVBD_INVALID;
 
     float3 posA, posB;
     float4 rotA, rotB;
     LoadPose(c.ident.x, false, posA, rotA);
     LoadPose(c.ident.y, false, posB, rotB);
 
-    float3 anchorA = hasA ? AvbdQuatRotate(rotA, c.anchorA.xyz) + posA : c.anchorA.xyz;
-    float3 anchorB = AvbdQuatRotate(rotB, c.anchorB.xyz) + posB;
+    // The plastic data of the first update is requested with the poses, before they are used (see JointPlasticRead).
+    JointPlasticRead plasticRead = AvbdJointPlasticRead(c, flags);
+    float2 fracture = AvbdJointFractureRead(index, flags); // requested with them; the thresholds never change
 
-    float3 penaltyLin = c.penaltyLin.xyz;
-    float3 penaltyAng = c.penaltyAng.xyz;
-    float3 lambdaLin = c.lambdaLin.xyz;
-    float3 lambdaAng = c.lambdaAng.xyz;
-
-    float4 rest = float4(0.0, 0.0, 0.0, 1.0);
-#if defined(AVBD_PLASTIC_JOINTS)
-    PlasticRecord plastic = (PlasticRecord)0;
-    bool isPlastic = (flags & AVBD_CONSTRAINT_FLAG_PLASTIC) != 0u;
-    if (flags & (AVBD_CONSTRAINT_FLAG_PLASTIC | AVBD_CONSTRAINT_FLAG_PLASTIC_LIN))
+    [loop]
+    for (uint k = 0u; k < updates; k++)
     {
-        plastic = _Plastic[c.ident.w];
-        if (isPlastic)
-            rest = plastic.rest;
+        flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+        if (flags & AVBD_CONSTRAINT_FLAG_BROKEN)
+            break; // it broke in an earlier one of the updates
+        if (k > 0u)
+            plasticRead = AvbdJointPlasticRead(c, flags); // an earlier update may have moved the rest rotation (the record is written back each time)
+        float4 rest;
+        JointDualResult result = AvbdJointDual(c, flags, posA, rotA, posB, rotB, plasticRead, fracture, rest);
+        AvbdJointDualStore(index, c, result, rest);
     }
-    bool yielded = false;
-    bool yieldedLin = false;
-#endif
-
-    // Linear constraint
-    if (dot(penaltyLin, penaltyLin) > 0.0)
-    {
-        float3 C = anchorA - anchorB;
-        float cap = AVBD_PENALTY_MAX; // a hard constraint is limited by the maximum penalty only
-
-        if (flags & AVBD_CONSTRAINT_FLAG_HARD_LIN)
-        {
-            // Stabilization
-            C -= c.c0Lin.xyz * alpha;
-
-            // Store the updated force as the multiplier.
-            lambdaLin = penaltyLin * C + lambdaLin;
-        }
-        else
-        {
-            cap = min(c.anchorA.w, AVBD_PENALTY_MAX);
-        }
-
-#if defined(AVBD_PLASTIC_JOINTS)
-        // Yield of the linear row: a multiplier above the yield value is clamped to it, and the joint keeps the stretch it has now (the anchor on body A
-        // moves below). A multiplier above the fracture threshold does not yield: the joint breaks.
-        if (flags & AVBD_CONSTRAINT_FLAG_PLASTIC_LIN)
-        {
-            float force = length(lambdaLin);
-            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && force > c.reserved.x;
-            if (force > plastic.limits.z && !fractures)
-            {
-                lambdaLin *= plastic.limits.z / force;
-                yieldedLin = true;
-            }
-        }
-        // A yielding row does not ramp its penalty: the joint is not getting stiffer while it gives way.
-        if (!yieldedLin)
-#endif
-        // Ramp the penalty, clamped to the material stiffness (Eq. 16).
-        penaltyLin = min(penaltyLin + abs(C) * AVBD_BETA_LIN, float3(cap, cap, cap));
-    }
-
-    // Angular constraint
-    if (dot(penaltyAng, penaltyAng) > 0.0)
-    {
-        float3 C = AvbdJointAngularError(rotA, rotB, rest) * c.c0Lin.w; // times the torque arm; rotA is the identity for a world joint
-        float cap = AVBD_PENALTY_MAX;
-
-        if (flags & AVBD_CONSTRAINT_FLAG_HARD_ANG)
-        {
-            C -= c.c0Ang.xyz * alpha;
-            lambdaAng = penaltyAng * C + lambdaAng;
-        }
-        else
-        {
-            cap = min(c.anchorB.w, AVBD_PENALTY_MAX);
-        }
-
-#if defined(AVBD_PLASTIC_JOINTS)
-        // Yield: a multiplier above the yield value is clamped to it, and the joint keeps the bend it has now (the rest rotation moves below).
-        // A multiplier above the fracture threshold does not yield: the joint breaks.
-        if (isPlastic)
-        {
-            float force = length(lambdaAng);
-            bool fractures = (flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && force > c.c0Ang.w;
-            if (force > plastic.limits.x && !fractures)
-            {
-                lambdaAng *= plastic.limits.x / force;
-                yielded = true;
-            }
-        }
-        // A yielding row does not ramp its penalty: the joint is not getting stiffer while it gives way.
-        if (!yielded)
-#endif
-        penaltyAng = min(penaltyAng + abs(C) * AVBD_BETA_ANG, float3(cap, cap, cap));
-    }
-
-    bool bentOff = false;
-    bool stretchedOff = false;
-#if defined(AVBD_PLASTIC_JOINTS)
-    if (yielded)
-    {
-        rest = AvbdJointRestFromPose(rotA, rotB);
-        if (flags & AVBD_CONSTRAINT_FLAG_BEND_BREAK)
-            bentOff = AvbdJointBend(plastic.restStart, rest) > plastic.limits.y;
-    }
-    if (yieldedLin)
-    {
-        // The anchor on body A moves to where the anchor on body B is now (in the body space of A; a joint to the world keeps a world point), so the
-        // linear error is zero from here on and the multiplier alone holds the joint at the stretch it has.
-        float3 moved = hasA ? AvbdQuatRotate(AvbdQuatConjugate(rotA), anchorB - posA) : anchorB;
-        c.anchorA = float4(moved, c.anchorA.w);
-        if (flags & AVBD_CONSTRAINT_FLAG_STRETCH_BREAK)
-            stretchedOff = length(moved - plastic.reserved.xyz) > plastic.limits.w;
-        c.c0Lin = float4(0.0, 0.0, 0.0, c.c0Lin.w); // the stabilization reference of this step must not pull the stretch back (the torque arm stays)
-    }
-#endif
-
-    // Fracture tests of the two rows, and the bend and stretch limits of a plastic joint
-    if (bentOff || stretchedOff
-        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE) && dot(lambdaAng, lambdaAng) > c.c0Ang.w * c.c0Ang.w)
-        || ((flags & AVBD_CONSTRAINT_FLAG_FRACTURABLE_LIN) && dot(lambdaLin, lambdaLin) > c.reserved.x * c.reserved.x))
-    {
-        penaltyLin = float3(0.0, 0.0, 0.0);
-        penaltyAng = float3(0.0, 0.0, 0.0);
-        lambdaLin = float3(0.0, 0.0, 0.0);
-        lambdaAng = float3(0.0, 0.0, 0.0);
-        c.ident.z |= AVBD_CONSTRAINT_FLAG_BROKEN;
-    }
-
-#if defined(AVBD_PLASTIC_JOINTS)
-    if (yielded)
-    {
-        // The joint now holds the bend it has: the stored C0 (the stabilization reference of this step) must not pull it back.
-        c.c0Ang.xyz = float3(0.0, 0.0, 0.0);
-        _Plastic[c.ident.w].rest = rest;
-    }
-#endif
-
-    c.penaltyLin.xyz = penaltyLin;
-    c.penaltyAng.xyz = penaltyAng;
-    c.lambdaLin.xyz = lambdaLin;
-    c.lambdaAng.xyz = lambdaAng;
-    _Constraints[index] = c;
 }
 
 // Dual update of a manifold (the reference solver's Manifold.UpdateDual): one thread per manifold slot, which walks the points of its pair. It

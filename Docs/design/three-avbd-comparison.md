@@ -36,7 +36,7 @@ Compared: `Packages/com.mckrill.avbd` (HLSL compute, Unity) against `three-avbd-
 
 **Verdict: theirs.** The cost of ours is not the GPU time of the rounds but the sync: the CPU cannot queue the next frame's work or overlap with the GPU, and Unity's `GetData` also waits for the previous frame's GPU work. Their scheme avoids it entirely. Their weakness is the serial fallback when the cap is stale, which they handle with a per-body clashing mask and grow-at-once rules; they found a real bug there (colour-cap overflow made a pyramid collapse in 13 of 40 runs), so it needs care and a test that starts with a cap that is too small.
 
-**What it would take here.** Keep colors in `_BodyMeta.state.x` between steps (only re-color bodies whose neighbors' colors clash or that are new), run a fixed round count, dispatch `colorCap` indirect dispatches per iteration, and update the cap and round count from an `AsyncGPUReadback` of the counters one or two frames later. `ColorPlan` already writes per-color indirect arguments, so the sweep side exists.
+**What it would take here.** Keep colors in `_BodyColor` (it was `_BodyMeta.state.x` when this was written) between steps (only re-color bodies whose neighbors' colors clash or that are new), run a fixed round count, dispatch `colorCap` indirect dispatches per iteration, and update the cap and round count from an `AsyncGPUReadback` of the counters one or two frames later. `ColorPlan` already writes per-color indirect arguments, so the sweep side exists.
 
 ## 2. Primal: lanes per body
 
