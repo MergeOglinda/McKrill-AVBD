@@ -35,9 +35,7 @@
 RWStructuredBuffer<BodyStateRecord>    _BodyState;
 RWStructuredBuffer<BodyPoseRecord>     _BodyPose;       // the current pose of every body, 32 B per body: what the neighbors of a joint or spring are read from
 StructuredBuffer<BodyInertialRecord>   _BodyInertial;
-StructuredBuffer<BodyMassRecord>       _BodyMass;
-StructuredBuffer<uint>                 _BodyFlags;      // flags | kind << 24 of every body, one uint per body
-StructuredBuffer<BodyRangeRecord>      _BodyRange;
+StructuredBuffer<BodySolveRecord>      _BodySolve;      // moments and mass, flags and list range of every body in one 32 B record (built once per step, see AvbdPredict.compute)
 #if defined(AVBD_FUSED_DUAL)
 RWStructuredBuffer<ConstraintRecord>   _Constraints;    // joints and springs (written by the dual update of the first body of a joint in a sweep)
 StructuredBuffer<FractureRecord>       _Fracture;       // fracture thresholds, four joints per record (read by the dual update, for a joint with a FRACTURABLE flag)
@@ -519,11 +517,13 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
         slot = _ColorBodies[_ColorWork[AVBD_COLOR_STARTS_OFFSET + _Color] + index];
 
         // Everything the body needs is requested at once, before any of it is tested: the reads depend on the slot only, so they are in flight together
-        // instead of one after the other (flags, then mass, then pose, then the range of the list). A body that is skipped below has wasted a few reads.
-        uint bodyFlags = _BodyFlags[slot];
-        momentMass = _BodyMass[slot].momentMass;
+        // instead of one after the other (solve header, then pose). A body that is skipped below has wasted a few reads. The header (flags, mass, range of
+        // the list) is one 32 B sector; the three arrays it mirrors were three.
+        BodySolveRecord solve = _BodySolve[slot];
+        uint bodyFlags = solve.info.x;
+        momentMass = solve.momentMass;
         BodyPoseRecord ownPose = _BodyPose[slot];
-        range = _BodyRange[slot].range.xy;
+        range = solve.info.yz;
         if (lane == 0u)
             inertial = _BodyInertial[slot];
 

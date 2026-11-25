@@ -38,6 +38,7 @@ namespace McKrill.Avbd
         static readonly int BodyRangeId = Shader.PropertyToID("_BodyRange");
         static readonly int BodyFlagsId = Shader.PropertyToID("_BodyFlags");
         static readonly int BodyColorId = Shader.PropertyToID("_BodyColor");
+        static readonly int BodySolveId = Shader.PropertyToID("_BodySolve");
 
         readonly BodyEditQueue queue;
         readonly ComputeShader shader;
@@ -57,6 +58,7 @@ namespace McKrill.Avbd
         GraphicsBuffer range;
         GraphicsBuffer flags;
         GraphicsBuffer color;
+        GraphicsBuffer solve;
         GraphicsBuffer commands;
         bool disposed;
 
@@ -92,6 +94,7 @@ namespace McKrill.Avbd
                 range = Create(capacity, BodyRecordStrides.Range);
                 flags = Create(capacity, BodyRecordStrides.Flags);
                 color = Create(capacity, BodyRecordStrides.Color);
+                solve = Create(capacity, BodyRecordStrides.Solve);
                 commands = Create(commandBatchSize, EditCommandStride.Size);
             }
             catch
@@ -163,6 +166,9 @@ namespace McKrill.Avbd
 
         /// <summary>The graph color of every body, one uint per body: <see cref="AvbdConst.Invalid"/> for a body that is not solved.</summary>
         public GraphicsBuffer Color => color;
+
+        /// <summary>The primal sweep's view of every body (<see cref="BodySolveRecord"/>), derived once per step by <see cref="AvbdSolver.DispatchSolveHeader"/>. Stale between edits and that dispatch.</summary>
+        public GraphicsBuffer Solve => solve;
 
         // ---- edits (recorded now, applied by ApplyEdits) ------------------------------------------------
 
@@ -315,8 +321,8 @@ namespace McKrill.Avbd
         void BindBodyBuffers(int kernel) => BindTo(shader, kernel);
 
         /// <summary>
-        /// Binds all ten body arrays to a kernel under the standard names (_BodyState, _BodyPose, _BodyInertial, _BodyMass,
-        /// _BodyMotion, _BodyShape, _BodyMeta, _BodyRange, _BodyFlags, _BodyColor). A kernel that does not declare one of them ignores it.
+        /// Binds all eleven body arrays to a kernel under the standard names (_BodyState, _BodyPose, _BodyInertial, _BodyMass,
+        /// _BodyMotion, _BodyShape, _BodyMeta, _BodyRange, _BodyFlags, _BodyColor, _BodySolve). A kernel that does not declare one of them ignores it.
         /// </summary>
         internal void BindTo(ComputeShader target, int kernel)
         {
@@ -330,6 +336,7 @@ namespace McKrill.Avbd
             target.SetBuffer(kernel, BodyRangeId, range);
             target.SetBuffer(kernel, BodyFlagsId, flags);
             target.SetBuffer(kernel, BodyColorId, color);
+            target.SetBuffer(kernel, BodySolveId, solve);
         }
 
         void ThrowIfDisposed()
@@ -354,6 +361,7 @@ namespace McKrill.Avbd
             Release(ref range);
             Release(ref flags);
             Release(ref color);
+            Release(ref solve);
             Release(ref commands);
         }
 

@@ -75,7 +75,10 @@ namespace McKrill.Avbd
         /// <summary>The graph color of a body, one uint per body, for the same reason. Written by stage C (and cleared by stage E).</summary>
         public const int Color = 4;
 
-        public const int Total = State + Pose + Inertial + Mass + Motion + Shape + Meta + Range + Flags + Color;
+        /// <summary>The primal sweep's view of a body (<see cref="BodySolveRecord"/>): moments and mass, flags, and the range in the constraint list in one 32 B sector. Derived once per step.</summary>
+        public const int Solve = 32;
+
+        public const int Total = State + Pose + Inertial + Mass + Motion + Shape + Meta + Range + Flags + Color + Solve;
         public const int Largest = 64;
     }
 
@@ -157,6 +160,21 @@ namespace McKrill.Avbd
 
         /// <summary>x = unused (always 0: the graph color is in <c>_BodyColor</c>), y = sleep counter, zw unused. Written by stage Z.</summary>
         public uint4 state;
+    }
+
+    /// <summary>
+    /// Hot. What the primal sweep needs of a body besides its pose and inertial target, in one sector: a copy of <see cref="BodyMassRecord"/>, the flags
+    /// word and the offset and count of <see cref="BodyRangeRecord"/>. Derived once per step, after stage D's init and so after the edits, the lists and the
+    /// colors of that step; nothing writes it between the sweeps. A mirror, like <see cref="BodyPoseRecord"/>: the three arrays stay the source.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BodySolveRecord
+    {
+        /// <summary>xyz = principal moments of inertia, w = mass.</summary>
+        public float4 momentMass;
+
+        /// <summary>x = flags word, y = list offset, z = list count, w unused.</summary>
+        public uint4 info;
     }
 
     /// <summary>Hot. Range of this body's entries in the constraint list. Written by stage G.</summary>

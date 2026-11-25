@@ -184,7 +184,7 @@ These rules apply to every GPU buffer. No struct is defined until they are writt
 
 ## 3. Body arrays
 
-Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Ten arrays, indexed by body slot, 264 B per body in total. Each record follows the packing rules in section 2 (float4 and uint4 words only, unused lanes zero); the two arrays of 4 B (Flags and Color) are the scalar exception of the rule table, like an index list. The C# mirrors are in `Runtime/Layout/BodyRecords.cs`, the HLSL in `Shaders/Include/AvbdBodyRecords.hlsl`.
+Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Eleven arrays, indexed by body slot, 296 B per body in total. Each record follows the packing rules in section 2 (float4 and uint4 words only, unused lanes zero); the two arrays of 4 B (Flags and Color) are the scalar exception of the rule table, like an index list. The C# mirrors are in `Runtime/Layout/BodyRecords.cs`, the HLSL in `Shaders/Include/AvbdBodyRecords.hlsl`.
 
 | Array | Stride | Words | Class | Written by | Read by |
 | --- | --- | --- | --- | --- | --- |
@@ -197,7 +197,8 @@ Scope: rigid boxes. Contacts, joints and the other buffers are step 4. Ten array
 | Meta | 32 B | group mask, appearance id; sleep counter (the words that held the flags and the graph color are unused) | Cold | E, Z | P, group mover and labeler |
 | Flags | 4 B | flags (low 24 bits) and shape kind (high 8), one uint per body | Hot | E | everything that asks whether a body is live or solved (S, P, V, B, N, G, C, R, group mover and labeler) |
 | Color | 4 B | graph color, one uint per body | Hot | C, E (clears it) | C |
-| Range | 16 B | constraint-list offset, count and number of contact entries | Hot | G | V |
+| Range | 16 B | constraint-list offset, count and number of contact entries | Hot | G | V (through Solve) |
+| Solve | 32 B | moments and mass, flags word, list offset and count: a derived copy of Mass, Flags and Range for the primal sweep | Hot | V (`BuildSolveHeader`, once per step) | V |
 
 Decisions made here, where section 1 left them open:
 
@@ -209,6 +210,7 @@ Decisions made here, where section 1 left them open:
 - **Mass and the three principal moments share one word.** V reads them together.
 - **Appearance id** is in the Meta record (finding 7). Group mask is there too.
 - **Flags and graph color are arrays of their own** (`_BodyFlags`, `_BodyColor`, one uint per body). They used to be words of the 32 B Meta record, so a kernel that asked whether a body was live and solved loaded a 32 B sector for 4 B, and the coloring loaded one for the color of every neighbor it looked at. In a 4 B array a sector holds the words of 8 bodies. The Meta record keeps its size and its other words (`ident.x` and `state.x` are always 0).
+- **Solve header** (`_BodySolve`, `BodySolveRecord`). The primal sweep started each body with three reads by slot: the flags (4 B), the mass (16 B) and the list range (16 B), each in a sector of its own, 32 B fetched for 4 or 16 used, and bodies of one color are far apart in memory. `BuildSolveHeader` (in `AvbdPredict.compute`, dispatched by `AvbdSolver.DispatchSolveHeader` once per step after the constraint init) gathers the three into one 32 B record, and the sweep reads that. A mirror, like Pose: Mass, Flags and Range stay the arrays everything else reads and writes, nothing writes Solve but that kernel, and it is rebuilt every step, so it cannot drift. Anything that dispatches a sweep alone after changing a body's flags, mass or list must call `DispatchSolveHeader` first. Cost: 32 B of memory per body, one small dispatch per step (about 4 sectors per body of traffic); saving: about 1 to 2 sectors per solved body per sweep, so it pays from the second or third sweep on. Not measured; the expected effect is on the order of 1% of the sweep's traffic.
 - **Free slots**: the Free flag is set, the appearance id and the graph color (in `_BodyColor`) are `AVBD_INVALID`, the mass is zero and rotations are identity (rule P9).
 - **Mass 0 means static.** A static body needs no flag. Static colliders in the sense of section 1 (the separate table) are still step 4.
 
@@ -218,7 +220,7 @@ Matrix changes from this step: E also writes the step-start pose (spawn and pose
 
 `BodyBufferCapacity` (`Runtime/Buffers/BodyBufferCapacity.cs`) holds the cost and the limits of the body arrays.
 
-- Cost: 264 B per body, so 1,000,000 bodies take 264 MB for the body arrays alone.
+- Cost: 296 B per body, so 1,000,000 bodies take 296 MB for the body arrays alone.
 - Limit: the largest array is 64 B per body, so the capacity is capped at `int.MaxValue / 64` = 33,554,431 bodies to keep every buffer under 2 GiB. This is far below `0x7FFFFFFF`, so rule P6 holds.
 - Minimum capacity is 1. Capacity is fixed when the buffers are created (section 7).
 - The edit command buffer (128 B per command, 1024 commands by default) is separate and small.

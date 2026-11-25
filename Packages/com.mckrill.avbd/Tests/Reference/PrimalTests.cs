@@ -176,6 +176,7 @@ namespace McKrill.Avbd.Tests
 
                 var solver = new AvbdSolver(buffers, settings, null, constraints);
                 solver.DispatchPredict();
+                solver.DispatchSolveHeader();
                 solver.DispatchPrimalSweep();
 
                 CpuPredict.Run(oracle, settings, scene.bodyCount);

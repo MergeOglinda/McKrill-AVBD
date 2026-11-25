@@ -79,6 +79,14 @@ struct BodyRangeRecord
     uint4 range; // x = offset, y = count, z = contact entries (the first z of the count, written by stage G), w unused
 };
 
+// 32 B, hot. The primal sweep's view of a body, derived once per step (AvbdSolver.DispatchSolveHeader, after ConstraintInit) from _BodyFlags, _BodyMass and
+// _BodyRange, so that the sweep reads one sector per body for what it used to read from three arrays (and three sectors). Never written by anything else.
+struct BodySolveRecord
+{
+    float4 momentMass; // xyz = principal moments of inertia, w = mass (as in BodyMassRecord)
+    uint4 info;        // x = flags word (as in _BodyFlags), y = offset and z = count of the body's entries in the constraint list (as in BodyRangeRecord), w unused
+};
+
 // Flags word of a free slot of the given kind.
 uint AvbdFreeFlagsWord(uint kindBits)
 {

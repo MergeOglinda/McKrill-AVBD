@@ -29,6 +29,7 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(BodyRecordStrides.Shape, UnsafeUtility.SizeOf<BodyShapeRecord>());
             Assert.AreEqual(BodyRecordStrides.Meta, UnsafeUtility.SizeOf<BodyMetaRecord>());
             Assert.AreEqual(BodyRecordStrides.Range, UnsafeUtility.SizeOf<BodyRangeRecord>());
+            Assert.AreEqual(BodyRecordStrides.Solve, UnsafeUtility.SizeOf<BodySolveRecord>());
             Assert.AreEqual(sizeof(uint), BodyRecordStrides.Flags, "the flags word is one uint per body");
             Assert.AreEqual(sizeof(uint), BodyRecordStrides.Color, "the graph color is one uint per body");
             Assert.AreEqual(EditCommandStride.Size, UnsafeUtility.SizeOf<EditCommand>());
@@ -40,7 +41,7 @@ namespace McKrill.Avbd.Tests
             int[] all =
             {
                 BodyRecordStrides.State, BodyRecordStrides.Pose, BodyRecordStrides.Inertial, BodyRecordStrides.Mass, BodyRecordStrides.Motion,
-                BodyRecordStrides.Shape, BodyRecordStrides.Meta, BodyRecordStrides.Range, EditCommandStride.Size,
+                BodyRecordStrides.Shape, BodyRecordStrides.Meta, BodyRecordStrides.Range, BodyRecordStrides.Solve, EditCommandStride.Size,
             };
             foreach (int stride in all)
             {
@@ -49,7 +50,7 @@ namespace McKrill.Avbd.Tests
             }
 
             // Records the solver stages gather by body id: 16 B or a multiple of 32 B.
-            int[] gathered = { BodyRecordStrides.State, BodyRecordStrides.Pose, BodyRecordStrides.Inertial, BodyRecordStrides.Mass, BodyRecordStrides.Shape, BodyRecordStrides.Range };
+            int[] gathered = { BodyRecordStrides.State, BodyRecordStrides.Pose, BodyRecordStrides.Inertial, BodyRecordStrides.Mass, BodyRecordStrides.Shape, BodyRecordStrides.Range, BodyRecordStrides.Solve };
             foreach (int stride in gathered)
                 Assert.IsTrue(stride == 16 || stride % 32 == 0, "gathered stride " + stride + " breaks rule P3");
         }
@@ -57,9 +58,9 @@ namespace McKrill.Avbd.Tests
         [Test]
         public void Total_IsTheSumOfTheArrays()
         {
-            Assert.AreEqual(264, BodyRecordStrides.Total);
+            Assert.AreEqual(296, BodyRecordStrides.Total);
             Assert.AreEqual(BodyRecordStrides.Total, BodyBufferCapacity.BytesPerBody);
-            Assert.AreEqual(264000L, BodyBufferCapacity.BodyArrayBytes(1000));
+            Assert.AreEqual(296000L, BodyBufferCapacity.BodyArrayBytes(1000));
             Assert.AreEqual(BodyRecordStrides.Largest, Math.Max(
                 Math.Max(BodyRecordStrides.State, BodyRecordStrides.Inertial),
                 Math.Max(Math.Max(BodyRecordStrides.Mass, BodyRecordStrides.Motion),
@@ -176,6 +177,7 @@ namespace McKrill.Avbd.Tests
             AssertStructMatches(records, "BodyShapeRecord", typeof(BodyShapeRecord));
             AssertStructMatches(records, "BodyMetaRecord", typeof(BodyMetaRecord));
             AssertStructMatches(records, "BodyRangeRecord", typeof(BodyRangeRecord));
+            AssertStructMatches(records, "BodySolveRecord", typeof(BodySolveRecord));
             AssertStructMatches(commands, "EditCommand", typeof(EditCommand));
         }
 
