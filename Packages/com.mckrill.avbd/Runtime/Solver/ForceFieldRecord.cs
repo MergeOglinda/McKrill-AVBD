@@ -16,7 +16,7 @@ namespace McKrill.Avbd
         /// <summary>Wing: xyz = the normal of the wing in the body's frame (unit).</summary>
         public float4 axis;
 
-        /// <summary>Gravity scale: x = scale. Drag: x = linear, y = quadratic. Wing: x = lift slope, y = drag coefficient, z = half the air density times the area.</summary>
+        /// <summary>Gravity scale: x = scale. Drag: x = linear, y = quadratic, z = joints of a fully shielded body (0 for no shielding), w = joints of a body on a flat surface. Wing: x = lift slope, y = drag coefficient, z = half the air density times the area.</summary>
         public float4 coefficients;
 
         /// <summary>x = <see cref="ForceKind"/> (0 for an empty slot), y = group mask of the bodies the field acts on, z = flags.</summary>

@@ -156,6 +156,14 @@ namespace McKrill.Avbd.Samples
         [Tooltip("Off: the grabbed blocks are pulled with a spring force (Force, Damping ratio and Offset gain). On: each block is placed directly, every frame, at its own place relative to the held point.")]
         [SerializeField] bool grabDirect = false;
 
+        [Header("Air")]
+        [Tooltip("Drag on every voxel of the demo: a force against its velocity that grows with the square of the speed, F = k |v| v (a ForceFieldDescriptor.Drag field on DemoGroup). It takes effect at the next step, without a Reset.")]
+        [SerializeField] bool airDrag = false;
+        [Tooltip("k in N s^2/m^2: half the air density times the drag coefficient times the area of a voxel. 0.024 is a 0.2 m voxel in air (1.2 kg/m^3) with a coefficient of 1; a voxel of 0.25 kg then has a terminal velocity of about 10 m/s.")]
+        [SerializeField, Range(0.0005f, 1f)] float dragCoefficient = 0.024f;
+        [Tooltip("A voxel with many joints is inside a chunk and is out of the wind: its drag falls from full at the joints of a voxel on a flat face (13 of 18) to none at the joints of a buried voxel (18). A voxel that broke off feels all of it. Off: every voxel has the full drag.")]
+        [SerializeField] bool shieldBuriedVoxels = true;
+
         [Header("View")]
         [Tooltip("Fly camera: right drag to look, W A S D to move, Q and E for down and up, Shift for faster, mouse wheel to dolly.")]
         [SerializeField] bool controlCamera = true;
@@ -262,6 +270,9 @@ namespace McKrill.Avbd.Samples
         float grabDistance;            // meters from the camera to the point that is held
         ForceFieldHandle grabField;
         string grabStatus = "";
+        ForceFieldHandle dragField;    // the air drag field, while airDrag is on
+        float dragFieldCoefficient;    // what the field has now
+        bool dragFieldShielded;
 
         // Throw: in Throw mode the first left click casts a ray on the GPU (like an explosion) and selects the voxel it hits and every voxel that is joined to
         // it by a joint that has not fractured (the whole object while it is whole, one piece of it after it broke); the selection is drawn in SelectedColor. The
@@ -420,6 +431,8 @@ namespace McKrill.Avbd.Samples
             // The settings (the panel at the right) take effect at the next step.
             solver.Settings = CurrentSettings();
             solver.FuseDualUpdate = fuseDualUpdate;
+
+            UpdateAirDrag();
 
             // Make spawns and removals visible to the readback below, also while paused.
             bodies.ApplyEdits();
@@ -863,6 +876,7 @@ namespace McKrill.Avbd.Samples
             grabHeld = false;
             grabToken++;
             grabField = ForceFieldHandle.Invalid;
+            dragField = ForceFieldHandle.Invalid; // the solver that held it is disposed below
             grabStatus = "";
             grabIsDirect = false;
             if (labeler != null) labeler.Dispose();
@@ -1338,6 +1352,31 @@ namespace McKrill.Avbd.Samples
                 RemoveShot(shots.Count - 1);
         }
 
+        // The air drag field: added when airDrag is turned on, changed when its settings change, removed when it is turned off (at most one table upload per change).
+        // The voxels of a chunk have 18 joints inside it and 13 on a flat face (18-neighborhood), which the shielding turns into an exposure; the rest of the demo
+        // does not depend on it.
+        void UpdateAirDrag()
+        {
+            if (solver == null)
+                return;
+            if (!airDrag)
+            {
+                if (dragField.IsValid)
+                    solver.RemoveForceField(dragField);
+                dragField = ForceFieldHandle.Invalid;
+                return;
+            }
+            ForceFieldDescriptor field = shieldBuriedVoxels
+                ? ForceFieldDescriptor.ShieldedDrag(DemoGroup, 0f, dragCoefficient, float3.zero, 18f, 13f)
+                : ForceFieldDescriptor.Drag(DemoGroup, 0f, dragCoefficient);
+            if (!dragField.IsValid)
+                dragField = solver.AddForceField(field);
+            else if (dragFieldCoefficient != dragCoefficient || dragFieldShielded != shieldBuriedVoxels)
+                solver.UpdateForceField(dragField, field);
+            dragFieldCoefficient = dragCoefficient;
+            dragFieldShielded = shieldBuriedVoxels;
+        }
+
         void StepOnce()
         {
             var watch = System.Diagnostics.Stopwatch.StartNew();
@@ -1582,6 +1621,16 @@ namespace McKrill.Avbd.Samples
 
                 GUILayout.Label(grabActive ? "Holding at " + grabDistance.ToString("0.0") + " m from the camera" : grabStatus);
             }
+
+            // Air drag: the controls are always drawn (greyed out when it is off).
+            GUILayout.Space(4f);
+            airDrag = GUILayout.Toggle(airDrag, "Air drag on the voxels");
+            bool airEnabled = GUI.enabled;
+            GUI.enabled = airEnabled && airDrag;
+            GUILayout.Label("Drag k: " + dragCoefficient.ToString("0.000") + " N s^2/m^2   (terminal speed of a voxel ~ " + Mathf.Sqrt(voxelMass * 9.81f / dragCoefficient).ToString("0") + " m/s)");
+            dragCoefficient = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(dragCoefficient), Mathf.Log10(0.0005f), 0f)), 0.0005f, 1f);
+            shieldBuriedVoxels = GUILayout.Toggle(shieldBuriedVoxels, "Shield voxels inside a chunk (by their joints)");
+            GUI.enabled = airEnabled;
 
             GUILayout.Space(4f);
             GUILayout.BeginHorizontal();

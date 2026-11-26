@@ -8,6 +8,13 @@ namespace McKrill.Avbd.Reference
     /// </summary>
     internal static class CpuPredict
     {
+        // Joints and springs in the body's constraint list: the entries (range.y) after the contacts (range.z). Mirrors the shielding of a drag field in the kernel.
+        static uint JointCount(CpuBodyArrays bodies, int slot)
+        {
+            uint4 range = bodies.Range[slot].range;
+            return range.y > range.z ? range.y - range.z : 0u;
+        }
+
         /// <param name="explosions">The explosions queued for the step (<see cref="AvbdSolver.Explode"/>), or null for none.</param>
         /// <param name="forceFields">The table of force fields (<see cref="AvbdSolver.AddForceField"/>), or null for none; looked at in [0, forceFieldSlots).</param>
         public static void Run(CpuBodyArrays bodies, in AvbdSolverSettings settings, int count, CpuExplosion[] explosions = null, int explosionCount = 0,
@@ -50,7 +57,7 @@ namespace McKrill.Avbd.Reference
                 inertialPos += gravity * (dt * dt);
                 if (forceFields != null && forceFieldSlots > 0)
                 {
-                    inertialPos += CpuForceFieldMath.Acceleration(bodies.Meta[slot].ident.y, bodies.Mass[slot].momentMass.w, new quaternion(s.rotation),
+                    inertialPos += CpuForceFieldMath.Acceleration(bodies.Meta[slot].ident.y, JointCount(bodies, slot), bodies.Mass[slot].momentMass.w, new quaternion(s.rotation),
                         linearVel, gravity, dt, forceFields, forceFieldSlots, springSums) * (dt * dt);
                 }
                 float4 predictedRot = AvbdQuat.IntegrateAngular(new quaternion(s.rotation), angularVel * dt).value;

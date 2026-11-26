@@ -69,6 +69,18 @@ namespace McKrill.Avbd
         /// <summary>Drag: N s^2/m^2 (see <see cref="linearDrag"/>).</summary>
         public float quadraticDrag;
 
+        /// <summary>
+        /// Drag: shielding of buried bodies. 0 (the default) gives every body the full drag. Above 0 it is the number of joints of a body that is fully shielded
+        /// from the air (18 for a voxel inside a chunk of voxels linked to their 18 neighbors): the drag of a body falls linearly from full at
+        /// <see cref="surfaceJoints"/> joints to none at this many, so a voxel in the middle of a chunk feels no wind, one on its surface feels it all, and a
+        /// voxel that broke off (fewer joints) feels it too. The count is that of the body's constraint list at the last build of the lists (a step old at most);
+        /// contacts are not counted.
+        /// </summary>
+        public float buriedJoints;
+
+        /// <summary>Drag: the number of joints of a body that is fully exposed, such as a voxel on a flat face (13 of 18). Used with <see cref="buriedJoints"/>.</summary>
+        public float surfaceJoints;
+
         /// <summary>Wing: the normal of the plate, in the body's frame: the direction of lift for a body flying level. A unit vector is not required.</summary>
         public float3 normal;
 
@@ -116,6 +128,20 @@ namespace McKrill.Avbd
         public static ForceFieldDescriptor Drag(uint groupMask, float linear, float quadratic, float3 wind = default)
         {
             return new ForceFieldDescriptor { kind = ForceKind.Drag, groupMask = groupMask, linearDrag = linear, quadraticDrag = quadratic, wind = wind };
+        }
+
+        /// <summary>
+        /// As <see cref="Drag(uint, float, float, float3)"/>, with the drag of a body scaled by how exposed it is, from its number of joints (see
+        /// <see cref="buriedJoints"/>): <paramref name="buriedJoints"/> joints and more mean no drag, <paramref name="surfaceJoints"/> and fewer mean all of it.
+        /// The defaults are those of a voxel with the 18-neighborhood joints of the voxelizer (<c>--connectivity 18</c>).
+        /// </summary>
+        public static ForceFieldDescriptor ShieldedDrag(uint groupMask, float linear, float quadratic, float3 wind = default, float buriedJoints = 18f, float surfaceJoints = 13f)
+        {
+            return new ForceFieldDescriptor
+            {
+                kind = ForceKind.Drag, groupMask = groupMask, linearDrag = linear, quadraticDrag = quadratic, wind = wind,
+                buriedJoints = buriedJoints, surfaceJoints = surfaceJoints,
+            };
         }
 
         /// <summary>
@@ -169,6 +195,10 @@ namespace McKrill.Avbd
                     RequireFinite(wind);
                     if (!float.IsFinite(linearDrag) || !float.IsFinite(quadraticDrag) || linearDrag < 0f || quadraticDrag < 0f)
                         throw new ArgumentException("The drag coefficients must be finite and not negative.");
+                    if (!float.IsFinite(buriedJoints) || !float.IsFinite(surfaceJoints) || buriedJoints < 0f || surfaceJoints < 0f)
+                        throw new ArgumentException("The joint counts of the shielding must be finite and not negative.");
+                    if (buriedJoints > 0f && !(surfaceJoints < buriedJoints))
+                        throw new ArgumentException("The joints of an exposed body must be fewer than those of a shielded one.");
                     break;
                 case ForceKind.Wing:
                     RequireFinite(wind);
@@ -216,7 +246,7 @@ namespace McKrill.Avbd
                     break;
                 case ForceKind.Drag:
                     r.value = new float4(wind, 0f);
-                    r.coefficients = new float4(linearDrag, quadraticDrag, 0f, 0f);
+                    r.coefficients = new float4(linearDrag, quadraticDrag, buriedJoints, buriedJoints > 0f ? surfaceJoints : 0f);
                     break;
                 case ForceKind.Wing:
                     r.value = new float4(wind, 0f);

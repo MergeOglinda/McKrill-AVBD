@@ -25,7 +25,7 @@ struct ForceFieldRecord
 {
     float4 value;        // constant: the force in N. drag and wing: the velocity of the air (wind) in m/s. spring: the target point
     float4 axis;         // wing: xyz = the normal of the wing in the body's frame (unit). spring: xyz = the direction of a line through the target (unit, or 0 for none)
-    float4 coefficients; // gravity scale: x = scale. drag: x = linear, y = quadratic. wing: x = lift slope, y = drag coefficient, z = half the air density times the area.
+    float4 coefficients; // gravity scale: x = scale. drag: x = linear, y = quadratic, z = joints of a fully shielded body (0: no shielding), w = joints of a body on a flat surface. wing: x = lift slope, y = drag coefficient, z = half the air density times the area.
                          // spring: x = stiffness in N/m, y = damping ratio, z = how much the stiffness grows with the distance of the centroid from the line, in 1/m
     uint4  ident;        // x = kind, y = group mask of the bodies it acts on, z = flags
 };

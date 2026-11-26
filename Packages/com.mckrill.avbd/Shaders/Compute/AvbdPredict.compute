@@ -120,7 +120,7 @@ RWStructuredBuffer<uint> _ForceFieldAccum;         // 4 words per field: for a s
 
 // The acceleration that the force fields give a body, in m/s^2: the sum over the fields whose mask shares a bit with the body's group mask.
 // linearVel is the velocity at the start of the step (explosions included), gravity the gravity of the solver, dt its time step.
-float3 ForceFieldAcceleration(uint groupMask, float mass, float4 rotation, float3 linearVel, float3 gravity, float dt)
+float3 ForceFieldAcceleration(uint slot, uint groupMask, float mass, float4 rotation, float3 linearVel, float3 gravity, float dt)
 {
     float3 acceleration = float3(0.0, 0.0, 0.0);
     for (uint i = 0u; i < _ForceFieldCount; i++)
@@ -191,6 +191,17 @@ float3 ForceFieldAcceleration(uint groupMask, float mass, float4 rotation, float
             if (kind == AVBD_FORCE_DRAG)
             {
                 force = -(f.coefficients.x + f.coefficients.y * speed) * relative;
+
+                // Shielding (coefficients.z > 0): a voxel inside a chunk is out of the wind. The number of joints of the body stands for how buried it is: z joints
+                // (18 for the 18-neighborhood of a voxel) is fully shielded, w joints (13, a voxel on a flat face) or fewer is fully exposed, linear in between. The
+                // count is the joints and springs of the body's list (the entries after its contacts) as of the last build of the lists, so a joint that broke
+                // exposes its voxels from the next build on. One 16 B read, only for fields that shield.
+                if (f.coefficients.z > 0.0)
+                {
+                    uint2 counts = _BodyRange[slot].range.yz; // x = entries, y = contacts among them
+                    float joints = (float)(counts.x > counts.y ? counts.x - counts.y : 0u);
+                    force *= saturate((f.coefficients.z - joints) / max(f.coefficients.z - f.coefficients.w, 1e-3));
+                }
             }
             else
             {
@@ -253,7 +264,7 @@ void PredictSlot(uint slot)
     float3 inertialPos = position + linearVel * dt;
     inertialPos += gravity * (dt * dt);
 #ifdef AVBD_FORCES
-    inertialPos += ForceFieldAcceleration(_BodyMeta[slot].ident.y, mass, s.rotation, linearVel, gravity, dt) * (dt * dt);
+    inertialPos += ForceFieldAcceleration(slot, _BodyMeta[slot].ident.y, mass, s.rotation, linearVel, gravity, dt) * (dt * dt);
 #endif
     float4 predictedRot = AvbdIntegrateAngular(s.rotation, angularVel * dt);
 

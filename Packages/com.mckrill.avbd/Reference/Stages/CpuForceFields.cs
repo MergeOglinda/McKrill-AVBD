@@ -47,11 +47,12 @@ namespace McKrill.Avbd.Reference
         }
 
         /// <summary>
-        /// The acceleration the fields give a body, in m/s^2.
+        /// The acceleration the fields give a body, in m/s^2. <paramref name="jointCount"/> is the number of joints and springs in its constraint list (the
+        /// entries after the contacts), which a drag field with shielding turns into an exposure.
         /// </summary>
         /// <param name="fields">The table (<see cref="AvbdSolver.AddForceField"/>), looked at in [0, slots); empty slots have kind 0.</param>
         /// <param name="springSums">The result of <see cref="SpringSums"/>; may be null if there is no spring field.</param>
-        public static float3 Acceleration(uint groupMask, float mass, quaternion rotation, float3 linearVel, float3 gravity, float dt, ForceFieldRecord[] fields, int slots,
+        public static float3 Acceleration(uint groupMask, uint jointCount, float mass, quaternion rotation, float3 linearVel, float3 gravity, float dt, ForceFieldRecord[] fields, int slots,
             int[] springSums = null)
         {
             float3 acceleration = float3.zero;
@@ -116,6 +117,8 @@ namespace McKrill.Avbd.Reference
                     if (kind == Drag)
                     {
                         force = -(f.coefficients.x + f.coefficients.y * speed) * relative;
+                        if (f.coefficients.z > 0f)
+                            force *= math.saturate((f.coefficients.z - jointCount) / math.max(f.coefficients.z - f.coefficients.w, 1e-3f));
                     }
                     else
                     {

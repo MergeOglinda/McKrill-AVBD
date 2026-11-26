@@ -157,6 +157,50 @@ namespace McKrill.Avbd.Tests
         }
 
         [Test]
+        public void ShieldedDrag_ScalesTheDragByTheJointsOfTheBody_ContactsNotCounted()
+        {
+            AvbdSolverSettings settings = Settings(float3.zero);
+            float dt2 = settings.dt * settings.dt;
+            BodyDescriptor moving = Box(new float3(0f), 2f, Wings); // 2 kg
+            moving.linearVelocity = new float3(10f, 0f, 0f);
+            CpuBodyArrays plain = Scene(moving);
+            CpuPredict.Run(plain, settings, 1);
+
+            // Full drag: -(1 + 0.5 * 10) * 10 = -60 N = -30 m/s^2. Fully shielded at 18 joints, fully exposed at 13 or fewer, linear in between.
+            ForceFieldRecord[] table = Table(ForceFieldDescriptor.ShieldedDrag(Wings, 1f, 0.5f));
+            float[] expected = { 1f, 1f, 1f, 0.8f, 0.6f, 0.4f, 0.2f, 0f, 0f }; // 0, 12, 13, 14, 15, 16, 17, 18, 20 joints
+            uint[] joints = { 0u, 12u, 13u, 14u, 15u, 16u, 17u, 18u, 20u };
+            for (int i = 0; i < joints.Length; i++)
+            {
+                CpuBodyArrays bodies = Scene(moving);
+                bodies.Range[0] = new BodyRangeRecord { range = new uint4(0u, joints[i], 0u, 0u) };
+                CpuPredict.Run(bodies, settings, 1, null, 0, table, 1);
+                Assert.AreEqual(-30f * expected[i] * dt2, bodies.Inertial[0].position.x - plain.Inertial[0].position.x, 1e-5f, joints[i] + " joints");
+            }
+
+            // The contacts are the first entries of the list and do not count: 20 entries of which 7 are contacts is 13 joints, fully exposed.
+            CpuBodyArrays touching = Scene(moving);
+            touching.Range[0] = new BodyRangeRecord { range = new uint4(0u, 20u, 7u, 0u) };
+            CpuPredict.Run(touching, settings, 1, null, 0, table, 1);
+            Assert.AreEqual(-30f * dt2, touching.Inertial[0].position.x - plain.Inertial[0].position.x, 1e-5f);
+
+            // A drag field without shielding ignores the joints.
+            CpuBodyArrays buried = Scene(moving);
+            buried.Range[0] = new BodyRangeRecord { range = new uint4(0u, 18u, 0u, 0u) };
+            CpuPredict.Run(buried, settings, 1, null, 0, Table(ForceFieldDescriptor.Drag(Wings, 1f, 0.5f)), 1);
+            Assert.AreEqual(-30f * dt2, buried.Inertial[0].position.x - plain.Inertial[0].position.x, 1e-5f);
+        }
+
+        [Test]
+        public void ShieldedDrag_RejectsJointCountsThatCannotWork()
+        {
+            Assert.DoesNotThrow(() => ForceFieldDescriptor.ShieldedDrag(Wings, 1f, 0.5f).Validate());
+            Assert.Throws<System.ArgumentException>(() => ForceFieldDescriptor.ShieldedDrag(Wings, 1f, 0.5f, default, 13f, 13f).Validate(), "no room between exposed and shielded");
+            Assert.Throws<System.ArgumentException>(() => ForceFieldDescriptor.ShieldedDrag(Wings, 1f, 0.5f, default, 18f, -1f).Validate());
+            Assert.Throws<System.ArgumentException>(() => ForceFieldDescriptor.ShieldedDrag(Wings, 1f, 0.5f, default, float.NaN, 13f).Validate());
+        }
+
+        [Test]
         public void Drag_NeverReversesTheRelativeVelocityInOneStep()
         {
             AvbdSolverSettings settings = Settings(float3.zero);
