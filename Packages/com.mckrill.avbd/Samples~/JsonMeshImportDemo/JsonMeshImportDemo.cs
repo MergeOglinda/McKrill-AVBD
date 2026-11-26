@@ -113,6 +113,8 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Range(15f, 240f)] float stepsPerSecond = 60f;
         [SerializeField] Vector3 gravity = new Vector3(0f, -10f, 0f);
         [SerializeField, Range(1, 30)] int iterations = 10;
+        [Tooltip("Passes of color reduction after each coloring from scratch (AvbdConstraintBuffers.ColoringReductionPasses). Every graph color is one dispatch of the primal sweep, and for a few thousand voxels per color a dispatch costs the latency of one body, not its work, so fewer colors are a faster sweep: about a sixth fewer colors on a voxel lattice with 4 passes. Zero is off. Takes effect at Reset.")]
+        [SerializeField, Range(0, 8)] int colorReductionPasses = 4;
         [SerializeField, Range(0f, 1f)] float alpha = 0.925f;
         [SerializeField, Min(0f)] float betaLin = 1e4f;
         [SerializeField, Min(0f)] float betaAng = 100f;
@@ -554,6 +556,7 @@ namespace McKrill.Avbd.Samples
             // The plastic array only exists if the joints can be plastic: without it the solver runs the joint kernels with no plastic code at all.
             int jointCapacity = jointsInFiles + 8;
             constraints = new AvbdConstraintBuffers(bodies, jointCapacity, null, manifoldSlots, (plasticJoints || (linearYield && rigidJoints)) ? jointCapacity : 0);
+            constraints.ColoringReductionPasses = colorReductionPasses;
             solver = new AvbdSolver(bodies, settings, null, constraints);
             raycaster = new AvbdRaycaster(bodies);
             labeler = new AvbdGroupLabeler(bodies);

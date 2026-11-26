@@ -36,9 +36,18 @@
 //   ColorRound       one coloring round, AVBD_COLOR_LANES threads per body; counts the bodies that are still without a color
 //   ColorRoundPlan   persistent: one thread; the indirect arguments of the next extra round (groups if bodies are left, none otherwise)
 //   ColorForce       persistent: colors the bodies that are still without a color after all rounds, without waiting
+//   ColorReduceBegin, ColorReduceRound, ColorReduceApply   optional, after the coloring: fewer colors (see below)
 //   ColorCount       counts the bodies of each color
 //   ColorPlan        one thread; the start of each color (also the bucket cursors), the number of colors and the indirect dispatch arguments
 //   ColorBucket      writes the body slots into the color buckets, at the cursors ColorPlan set; slot order inside a chunk of AVBD_BUCKET_CHUNK slots
+// Color reduction (optional, the host's ReductionPasses). Every color is one dispatch of the primal sweep and a sweep over a few thousand bodies is one
+// partial wave, so its time is the latency of one body and not its work: fewer colors are fewer such latencies. A first-fit coloring of a lattice
+// uses more colors than the lattice needs (12 to 17 against 8 to 10 for a Z-ordered voxel ball of 15k bodies with the hashed order). One pass of iterated
+// greedy (Culberson) recolors the bodies class by class, the classes in falling color order: the bodies of a class have no constraint between them,
+// so a whole class takes its new colors in one parallel round (the lowest color that none of the neighbors already recolored has). The result is a proper
+// coloring with never more colors than before (a body of the k-th class sees at most k - 1 new colors), and the passes after the first
+// shrink it further, a little each. ColorReduceBegin clears the new colors (in _ColorScratch), one ColorReduceRound per class (_Round = the class, the
+// host dispatches the highest class first), ColorReduceApply copies the new colors into _BodyColor. Mirrored by CpuGraphColoring.Reduce.
 // The cap (_ColorCap) is the number of colors the host will dispatch; a body that would need a color at or above it takes the last color below
 // it instead, and is counted in control word 1 (the host raises the cap; until then that body is solved with the bodies of that color, in
 // parallel, which is less accurate but not wrong in the sense of a crash). From scratch the cap is AVBD_COLOR_MAX.
@@ -53,6 +62,9 @@
 #pragma kernel ColorRound
 #pragma kernel ColorRoundPlan
 #pragma kernel ColorForce
+#pragma kernel ColorReduceBegin
+#pragma kernel ColorReduceRound
+#pragma kernel ColorReduceApply
 #pragma kernel ColorCount
 #pragma kernel ColorPlan
 #pragma kernel ColorBucket
@@ -373,6 +385,67 @@ void ColorForce(uint3 id : SV_DispatchThreadID)
     }
     InterlockedMax(_ColorWork[AVBD_COLOR_COUNT_WORD], color + 1u);
     _BodyColor[slot] = color;
+}
+
+// Like FirstFreeColor, over the new colors of the reduction (_ColorScratch; a body not recolored yet holds AVBD_COLOR_PENDING, which no color mask takes).
+uint FirstFreeNewColor(uint2 range)
+{
+    uint low = 0u;
+    uint high = 0u;
+    uint previous = AVBD_INVALID;
+    for (uint e = 0u; e < range.y; e++)
+    {
+        uint other = OtherBody(range.x + e);
+        if (other == previous)
+            continue;
+        previous = other;
+        if (other == AVBD_INVALID)
+            continue;
+        uint c = _ColorScratch[other];
+        if (c < 32u)
+            low |= 1u << c;
+        else if (c < 64u)
+            high |= 1u << (c - 32u);
+    }
+    if (low != 0xFFFFFFFFu)
+        return firstbitlow(~low);
+    if (high != 0xFFFFFFFFu)
+        return 32u + firstbitlow(~high);
+    return AVBD_COLOR_MAX;
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorReduceBegin(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot < _Count)
+        _ColorScratch[slot] = AVBD_COLOR_PENDING;
+}
+
+// The bodies of the class _Round take their new color. A neighbor is never in the class (a proper coloring), so the threads of the round do not read what
+// they write; the neighbors of earlier rounds have their new colors, the ones of later rounds are still PENDING.
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorReduceRound(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+    if (_BodyColor[slot] != _Round)
+        return;
+
+    uint color = FirstFreeNewColor(_BodyRange[slot].range.xy);
+    _ColorScratch[slot] = min(color, _ColorCap - 1u); // below the cap by construction: at most as many colors as before
+}
+
+[numthreads(AVBD_GROUP_SIZE, 1, 1)]
+void ColorReduceApply(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = _Base + id.x;
+    if (slot >= _Count)
+        return;
+    uint color = _BodyColor[slot];
+    if (color < AVBD_COLOR_MAX)
+        _BodyColor[slot] = _ColorScratch[slot];
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]

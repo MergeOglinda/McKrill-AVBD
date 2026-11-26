@@ -90,6 +90,7 @@ namespace McKrill.Avbd
 
         readonly ComputeShader shader;
         readonly int resetKernel, beginKernel, initKernel, keepKernel, markKernel, releaseKernel, roundKernel, roundPlanKernel, forceKernel, countKernel, planKernel, bucketKernel;
+        readonly int reduceBeginKernel, reduceRoundKernel, reduceApplyKernel;
         readonly ColoringTuner tuner = new ColoringTuner();
         readonly Queue<StatsRequest> statsRequests = new Queue<StatsRequest>();
         GraphicsBuffer work;
@@ -137,6 +138,14 @@ namespace McKrill.Avbd
         /// </summary>
         public int FreshInterval { get; set; } = DefaultFreshInterval;
 
+        /// <summary>
+        /// Passes of color reduction after every coloring from scratch (<see cref="Run"/>, and the steps of <see cref="RunPersistent"/> that color from scratch);
+        /// zero (the default) is off, and keeps the coloring exactly the oracle's. A pass recolors class by class and never uses more colors than before; a
+        /// few passes remove about a sixth of the colors of a voxel lattice (see AvbdColoring.compute). Each pass is one tiny dispatch per color and costs
+        /// well under a millisecond for tens of thousands of bodies, once per coloring from scratch.
+        /// </summary>
+        public int ReductionPasses { get; set; }
+
         /// <summary>Colors the primal sweep dispatches after the last <see cref="RunPersistent"/>.</summary>
         public int Cap => tuner.Cap;
 
@@ -178,6 +187,9 @@ namespace McKrill.Avbd
             countKernel = shader.FindKernel("ColorCount");
             planKernel = shader.FindKernel("ColorPlan");
             bucketKernel = shader.FindKernel("ColorBucket");
+            reduceBeginKernel = shader.FindKernel("ColorReduceBegin");
+            reduceRoundKernel = shader.FindKernel("ColorReduceRound");
+            reduceApplyKernel = shader.FindKernel("ColorReduceApply");
             work = new GraphicsBuffer(GraphicsBuffer.Target.Structured, WorkWords, sizeof(uint));
             work.SetData(new uint[WorkWords]);
 
@@ -253,7 +265,15 @@ namespace McKrill.Avbd
 
             int colors = (int)control[ColorCountWord];
 
-            FinishColoring(bodyCount);
+            if (ReductionPasses > 0 && colors > 1)
+            {
+                ReduceColors(bodyCount, colors);
+                FinishColoring(bodyCount);
+                work.GetData(control, 0, 0, ControlWords); // ColorPlan wrote the number of colors that are left
+                colors = (int)control[ColorCountWord];
+            }
+            else
+                FinishColoring(bodyCount);
 
             // The colors in the body records are now a coloring of this graph: the next persistent step may keep them, and starts from scratch
             // (the graph of the contacts is not this one), with the cap at its largest until the first statistics arrive.
@@ -327,9 +347,30 @@ namespace McKrill.Avbd
             }
             AvbdDispatch.Linear(shader, forceKernel, bodyCount);
 
+            // A step that colors from scratch can also shrink the number of colors (the next steps keep them). The classes are the colors below the cap.
+            if (fresh && ReductionPasses > 0 && cap > 1)
+                ReduceColors(bodyCount, cap);
+
             FinishColoring(bodyCount);
             RequestStatistics(fresh, rounds, cap);
             return cap;
+        }
+
+        // Color reduction (see AvbdColoring.compute): ReductionPasses times, the classes from the highest color down. `classes` is at least the number of
+        // colors in use, so each pass visits every class; an empty class is a dispatch whose threads all return at once.
+        void ReduceColors(int bodyCount, int classes)
+        {
+            classes = Math.Min(classes, MaxColors);
+            for (int pass = 0; pass < ReductionPasses; pass++)
+            {
+                AvbdDispatch.Linear(shader, reduceBeginKernel, bodyCount);
+                for (int c = classes - 1; c >= 0; c--)
+                {
+                    shader.SetInt(RoundId, c);
+                    AvbdDispatch.Linear(shader, reduceRoundKernel, bodyCount);
+                }
+                AvbdDispatch.Linear(shader, reduceApplyKernel, bodyCount);
+            }
         }
 
         // The size of every color, then (on the GPU) the start of every color, the number of colors and the dispatch arguments, then the bucket fill.
@@ -440,7 +481,7 @@ namespace McKrill.Avbd
         void BindAll(AvbdBodyBuffers bodies, GraphicsBuffer records, GraphicsBuffer list, GraphicsBuffer other, GraphicsBuffer colorBodies)
         {
             EnsureScratch(bodies.Capacity);
-            foreach (int kernel in new[] { resetKernel, beginKernel, initKernel, keepKernel, markKernel, releaseKernel, roundKernel, roundPlanKernel, forceKernel, countKernel, planKernel, bucketKernel })
+            foreach (int kernel in new[] { resetKernel, beginKernel, initKernel, keepKernel, markKernel, releaseKernel, roundKernel, roundPlanKernel, forceKernel, countKernel, planKernel, bucketKernel, reduceBeginKernel, reduceRoundKernel, reduceApplyKernel })
                 Bind(kernel, bodies, records, list, other, colorBodies);
         }
 

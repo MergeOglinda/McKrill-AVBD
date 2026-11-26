@@ -123,6 +123,44 @@ namespace McKrill.Avbd.Reference
             return colors;
         }
 
+        /// <summary>
+        /// Color reduction, as ColorReduceBegin, ColorReduceRound and ColorReduceApply do it: <paramref name="passes"/> times, the bodies are recolored class by class,
+        /// the classes from the highest color down, each body taking the lowest color that none of its neighbors recolored so far has. The bodies of a class have
+        /// no constraint between them, so the order inside a class does not matter. The result is a proper coloring with no more colors than the input.
+        /// </summary>
+        public static int[] Reduce(ConstraintRecord[] records, ConstraintTopology topology, bool[] solved, int bodyCount, int[] colors, int passes)
+        {
+            int[] current = (int[])colors.Clone();
+            for (int pass = 0; pass < passes; pass++)
+            {
+                int top = -1;
+                for (int s = 0; s < bodyCount; s++)
+                    top = Math.Max(top, current[s]);
+
+                var next = new int[bodyCount];
+                for (int s = 0; s < bodyCount; s++)
+                    next[s] = -1;
+                for (int c = top; c >= 0; c--)
+                {
+                    for (int s = 0; s < bodyCount; s++)
+                    {
+                        if (!solved[s] || current[s] != c)
+                            continue;
+                        var used = new System.Collections.Generic.HashSet<int>();
+                        foreach (int o in Neighbors(records, topology, solved, (uint)s))
+                            if (next[o] >= 0)
+                                used.Add(next[o]);
+                        int color = 0;
+                        while (used.Contains(color))
+                            color++;
+                        next[s] = color;
+                    }
+                }
+                current = next;
+            }
+            return current;
+        }
+
         /// <summary>The solved bodies joined to <paramref name="slot"/> by a constraint (a body may come more than once).</summary>
         public static System.Collections.Generic.IEnumerable<int> Neighbors(ConstraintRecord[] records, ConstraintTopology topology, bool[] solved, uint slot)
         {

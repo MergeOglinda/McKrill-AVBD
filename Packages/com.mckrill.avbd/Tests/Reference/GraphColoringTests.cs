@@ -63,6 +63,47 @@ namespace McKrill.Avbd.Tests
                         Assert.AreNotEqual(CpuGraphColoring.ColorsBefore(a, b, GraphColoringOrder.Hashed), CpuGraphColoring.ColorsBefore(b, a, GraphColoringOrder.Hashed));
         }
 
+        [TestCase(1)]
+        [TestCase(4)]
+        public void Oracle_Reduce_IsAProperColoring_WithNoMoreColors(int passes)
+        {
+            for (int seed = 1; seed <= 12; seed++)
+            {
+                var solver = new ReferenceSolver();
+                ConstraintTestScenes.RandomLattice(solver, 600 + seed);
+                SceneArrays scene = ConstraintTestScenes.FromReference(solver, Capacity);
+                ConstraintTopology topology = scene.BuildTopology();
+                bool[] solved = scene.Solved();
+
+                int[] before = CpuGraphColoring.Color(scene.constraints, topology, solved, scene.bodyCount, GraphColoringOrder.Hashed);
+                int[] after = CpuGraphColoring.Reduce(scene.constraints, topology, solved, scene.bodyCount, before, passes);
+
+                AssertProper(scene.constraints, scene.constraintCount, solved, after, "random scene " + seed);
+                Assert.LessOrEqual(Max(after) + 1, Max(before) + 1, "random scene " + seed + ": reduction must not add colors");
+            }
+        }
+
+        [TestCase(1)]
+        [TestCase(3)]
+        public void Gpu_Reduction_MatchesTheOracle_OnRandomScenes(int passes)
+        {
+            RequireCompute();
+            for (int seed = 1; seed <= 8; seed++)
+            {
+                var solver = new ReferenceSolver();
+                ConstraintTestScenes.RandomLattice(solver, 700 + seed);
+                CheckScene(solver, GraphColoringOrder.Hashed, "random scene " + seed + ", " + passes + " pass(es)", passes);
+            }
+        }
+
+        static int Max(int[] values)
+        {
+            int max = -1;
+            foreach (int v in values)
+                max = Math.Max(max, v);
+            return max;
+        }
+
         // ---- the GPU against the oracle ----------------------------------------------------------------------------
 
         [TestCase(GraphColoringOrder.SlotOrder)]
@@ -93,12 +134,14 @@ namespace McKrill.Avbd.Tests
             }
         }
 
-        static void CheckScene(ReferenceSolver reference, GraphColoringOrder order, string what)
+        static void CheckScene(ReferenceSolver reference, GraphColoringOrder order, string what, int reductionPasses = 0)
         {
             SceneArrays scene = ConstraintTestScenes.FromReference(reference, Capacity);
             ConstraintTopology topology = scene.BuildTopology();
             bool[] solved = scene.Solved();
             int[] expected = CpuGraphColoring.Color(scene.constraints, topology, solved, scene.bodyCount, order);
+            if (reductionPasses > 0)
+                expected = CpuGraphColoring.Reduce(scene.constraints, topology, solved, scene.bodyCount, expected, reductionPasses);
 
             using (var buffers = new AvbdBodyBuffers(Capacity))
             using (var constraints = new AvbdConstraintBuffers(buffers, 128))
@@ -108,6 +151,7 @@ namespace McKrill.Avbd.Tests
                 for (int i = 0; i < scene.constraintCount; i++)
                     constraints.AddRecord(scene.constraints[i]);
                 constraints.ColoringOrder = order;
+                constraints.ColoringReductionPasses = reductionPasses;
                 constraints.Rebuild();
 
                 AssertColoring(buffers, constraints, scene.constraints, scene.constraintCount, solved, expected, scene.bodyCount, what);

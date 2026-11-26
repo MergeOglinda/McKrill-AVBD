@@ -363,6 +363,26 @@ namespace McKrill.Avbd
             }
         }
 
+        /// <summary>
+        /// Passes of color reduction after every coloring from scratch (<see cref="AvbdGraphColoring.ReductionPasses"/>); zero, the default, is off. Fewer
+        /// colors are fewer dispatches of the primal sweep, which on a few thousand bodies per color is dominated by the latency of one body and not by its work.
+        /// A lattice of voxels goes from 12 to 17 colors to about a sixth fewer in 4 passes. The coloring is no longer exactly <see cref="CpuGraphColoring.Color"/>
+        /// (it is <see cref="CpuGraphColoring.Reduce"/> of it). Changing it recolors at the next <see cref="Rebuild"/>.
+        /// </summary>
+        public int ColoringReductionPasses
+        {
+            get => coloring.ReductionPasses;
+            set
+            {
+                value = Math.Max(0, value);
+                if (value != coloring.ReductionPasses)
+                {
+                    coloring.ReductionPasses = value;
+                    topologyDirty = true;
+                }
+            }
+        }
+
         /// <summary>Rounds the last coloring needed. Fewer is faster; see <see cref="GraphColoringOrder"/>.</summary>
         public int LastColoringRounds => coloring.LastRounds;
 
