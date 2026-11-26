@@ -1,4 +1,4 @@
-// Stage V: primal update. AVBD_PRIMAL_LANES threads cooperate on one body: each assembles the 6x6 system of its share of the constraints in
+// Stage V: primal update. 2, 4 or 8 threads (AvbdPrimalLanes of the size of the color) cooperate on one body: each assembles the 6x6 system of its share of the constraints in
 // the body's list (lane 0 also adds the inertia term), the shares are added up in groupshared memory, and lane 0 solves the sum with an LDL^T
 // factorization and applies the Newton step (Eqs. 4-6). A body with many constraints (a contact-heavy body has dozens of entries) is then
 // walked by several threads instead of one, which is what bounds the time of a color when the colors are small.
@@ -336,15 +336,11 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
 #define AVBD_TERM_CROSS 12u
 #define AVBD_TERM_RHS   21u
 
-#if AVBD_PRIMAL_LANES < 2
-#error The partial systems are added up in two halves: AVBD_PRIMAL_LANES must be at least 2.
-#endif
-
 // The lanes of a body add their partial systems in two steps, so shared memory only has to hold half of them: the upper half of the lanes (lane >= H, with
-// H = AVBD_PRIMAL_LANES / 2) writes its terms, the lower half adds them to its own, and then the lower half writes the result and every sum over its H lanes is
+// H = lanes / 2, lanes being 2, 4 or 8 by the size of the color) writes its terms, the lower half adds them to its own, and then the lower half writes the result and every sum over its H lanes is
 // formed by one thread. A slot holds the terms of one lane of the lower half: slot b * H + l is lane l of body b of the group, and the terms of a slot are
-// term-major, term t of slot s at t * AVBD_PRIMAL_SLOTS + s, so the neighboring threads of a warp write neighboring words.
-#define AVBD_PRIMAL_HALF_LANES (AVBD_PRIMAL_LANES / 2u)
+// term-major, term t of slot s at t * AVBD_PRIMAL_SLOTS + s, so the neighboring threads of a warp write neighboring words. A group of AVBD_GROUP_SIZE / lanes
+// bodies has (AVBD_GROUP_SIZE / lanes) * (lanes / 2) = AVBD_GROUP_SIZE / 2 slots whatever the number of lanes.
 #define AVBD_PRIMAL_SLOTS (AVBD_GROUP_SIZE / 2u)
 groupshared float gsTerms[AVBD_PRIMAL_TERMS * AVBD_PRIMAL_SLOTS];
 
@@ -394,7 +390,8 @@ void AddTerms(uint slot, inout float p[AVBD_PRIMAL_TERMS])
 // The summed system of every body of the group, term-major like gsTerms, but with the body as the fast index: term t of body b is at t * AVBD_PRIMAL_BODIES + b.
 // The lanes write the sums here and lane 0 of each body factorizes it where it is. The LDL^T used to run on a local array of 36 + 6 floats, which stayed in
 // registers for the whole solve; here the lane 0 threads of the group (one per body, so adjacent bodies) touch consecutive words, which is free of bank conflicts.
-#define AVBD_PRIMAL_BODIES (AVBD_GROUP_SIZE / AVBD_PRIMAL_LANES)
+// A group solves AVBD_GROUP_SIZE / lanes bodies, up to AVBD_GROUP_SIZE / 2 with the fewest lanes (2), so the array is sized for that and indexed with that stride.
+#define AVBD_PRIMAL_BODIES (AVBD_GROUP_SIZE / 2u)
 groupshared float gsSums[AVBD_PRIMAL_TERMS * AVBD_PRIMAL_BODIES];
 
 // The term of the lower-triangle element (i, j), i >= j, of the symmetric 6x6 matrix: the linear block (rows and columns 0 to 2), the cross block (rows 3 to 5,
@@ -490,21 +487,24 @@ bool SolveLdlt6(uint body)
 // flight is 128 B of registers: 1 gives the plain one-at-a-time loop, and a larger batch buys more loads in flight with more registers.
 #define AVBD_PRIMAL_BATCH 1u
 
-// AVBD_PRIMAL_LANES threads solve one body. Lane l stamps the entries l, l + AVBD_PRIMAL_LANES, ... of the body's list into its own partial system;
-// the partial systems are added up in groupshared memory, and lane 0 solves the sum once and writes the pose. The lanes of a body are
-// adjacent threads of a group, so a group of AVBD_GROUP_SIZE threads solves AVBD_GROUP_SIZE / AVBD_PRIMAL_LANES bodies.
+// `lanes` threads solve one body (the same for every body of a color, so it is uniform in a dispatch). Lane l stamps the entries l, l + lanes, ... of
+// the body's list into its own partial system; the partial systems are added up in groupshared memory, and lane 0 solves the sum once and writes
+// the pose. The lanes of a body are adjacent threads of a group, so a group of AVBD_GROUP_SIZE threads solves AVBD_GROUP_SIZE / lanes bodies.
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 {
     // Item of the dispatch: body (entry of the color) times lanes, plus the lane. A big color is laid out in rows of AVBD_COLOR_ROW_GROUPS
     // groups (see AvbdColoringParams.hlsl). Every thread reaches the barriers below, so nothing returns early.
     uint item = id.y * (AVBD_COLOR_ROW_GROUPS * AVBD_GROUP_SIZE) + id.x;
-    uint index = item / AVBD_PRIMAL_LANES;
-    uint lane = item % AVBD_PRIMAL_LANES;
-    uint first = tid - lane; // the thread of lane 0 of this body
-    uint body = tid / AVBD_PRIMAL_LANES; // the body's number in the group
+    uint bodies = _ColorWork[AVBD_COLOR_COUNTS_OFFSET + _Color];
+    uint lanes = AvbdPrimalLanes(bodies); // the number ColorPlan sized this dispatch with: 2, 4 or 8
+    uint laneShift = firstbitlow(lanes);
+    uint index = item >> laneShift;
+    uint lane = item & (lanes - 1u);
+    uint body = tid >> laneShift; // the body's number in the group
+    uint halfLanes = lanes >> 1u; // H: the lanes of the lower half (1, 2 or 4)
 
-    bool active = index < _ColorWork[AVBD_COLOR_COUNTS_OFFSET + _Color];
+    bool active = index < bodies;
     uint slot = 0u;
     float mass = 0.0;
     float4 momentMass = float4(0.0, 0.0, 0.0, 0.0);
@@ -560,7 +560,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
         // This lane's share of the constraints of the body, AVBD_PRIMAL_BATCH entries at a time: the entries, then the records of the joints and springs
         // among them (both requested before any stamp starts), then the stamps.
-        for (uint e = lane; e < range.y; e += AVBD_PRIMAL_LANES * AVBD_PRIMAL_BATCH)
+        for (uint e = lane; e < range.y; e += lanes * AVBD_PRIMAL_BATCH)
         {
             uint entries[AVBD_PRIMAL_BATCH];
             ConstraintRecord records[AVBD_PRIMAL_BATCH];
@@ -569,22 +569,22 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
             for (uint b0 = 0; b0 < AVBD_PRIMAL_BATCH; b0++)
             {
                 entries[b0] = 0u;
-                if (e + b0 * AVBD_PRIMAL_LANES < range.y)
-                    entries[b0] = _ConstraintList[range.x + e + b0 * AVBD_PRIMAL_LANES];
+                if (e + b0 * lanes < range.y)
+                    entries[b0] = _ConstraintList[range.x + e + b0 * lanes];
             }
 
             [unroll]
             for (uint b1 = 0; b1 < AVBD_PRIMAL_BATCH; b1++)
             {
                 records[b1] = (ConstraintRecord)0;
-                if (e + b1 * AVBD_PRIMAL_LANES < range.y && !(entries[b1] & AVBD_LIST_CONTACT_FLAG))
+                if (e + b1 * lanes < range.y && !(entries[b1] & AVBD_LIST_CONTACT_FLAG))
                     records[b1] = _Constraints[entries[b1]];
             }
 
             [unroll]
             for (uint b2 = 0; b2 < AVBD_PRIMAL_BATCH; b2++)
             {
-                if (e + b2 * AVBD_PRIMAL_LANES < range.y)
+                if (e + b2 * lanes < range.y)
                 {
                     uint entry = entries[b2];
                     if (entry & AVBD_LIST_CONTACT_FLAG)
@@ -606,19 +606,19 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
         }
     }
 
-    // Add up the partial systems of the body's lanes in two steps (see AVBD_PRIMAL_HALF_LANES), then into the body's column of gsSums. The order of the
+    // Add up the partial systems of the body's lanes in two steps (see the comment of gsTerms), then into the body's column of gsSums. The order of the
     // additions is fixed, so the sum does not depend on timing: lane l of the lower half adds lane l + H to its own terms, and the sum is made in lane order.
-    uint slotOfLane = body * AVBD_PRIMAL_HALF_LANES + (lane % AVBD_PRIMAL_HALF_LANES);
+    uint slotOfLane = body * halfLanes + (lane & (halfLanes - 1u));
 
     float terms[AVBD_PRIMAL_TERMS];
     PackSystem(sys, terms);
-    if (active && lane >= AVBD_PRIMAL_HALF_LANES)
+    if (active && lane >= halfLanes)
         StoreTerms(slotOfLane, terms);
 
     GroupMemoryBarrierWithGroupSync();
 
     // A lane of the lower half reads and then overwrites its own slot, and no other thread touches it between the two barriers: no barrier between them.
-    if (active && lane < AVBD_PRIMAL_HALF_LANES)
+    if (active && lane < halfLanes)
     {
         AddTerms(slotOfLane, terms);
         StoreTerms(slotOfLane, terms);
@@ -626,15 +626,14 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
     GroupMemoryBarrierWithGroupSync();
 
-    // Lane l adds the terms l, l + AVBD_PRIMAL_LANES, ... over the H slots of the body; a term is read and written by one lane only.
+    // Lane l adds the terms l, l + lanes, ... over the H slots of the body; a term is read and written by one lane only.
     if (active)
     {
-        uint firstSlot = body * AVBD_PRIMAL_HALF_LANES;
-        for (uint t = lane; t < AVBD_PRIMAL_TERMS; t += AVBD_PRIMAL_LANES)
+        uint firstSlot = body * halfLanes;
+        for (uint t = lane; t < AVBD_PRIMAL_TERMS; t += lanes)
         {
             float sum = 0.0;
-            [unroll]
-            for (uint l = 0; l < AVBD_PRIMAL_HALF_LANES; l++)
+            for (uint l = 0; l < halfLanes; l++) // a runtime bound (1, 2 or 4)
                 sum += gsTerms[t * AVBD_PRIMAL_SLOTS + firstSlot + l];
             gsSums[t * AVBD_PRIMAL_BODIES + body] = sum;
         }
