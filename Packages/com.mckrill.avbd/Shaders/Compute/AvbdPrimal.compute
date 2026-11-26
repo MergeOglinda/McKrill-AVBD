@@ -271,7 +271,7 @@ void StampSpring(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, 
     sys.rhsAng += jAng * f;
 }
 
-// The contact points of manifold slot `manifold` (see Include/AvbdContactSolve.hlsl). The bodies, their displacements from the start of the step
+// The contact points of manifold slot `manifold` (the math of Include/AvbdContactSolve.hlsl, written out for the one body that is solved). The bodies, their displacements from the start of the step
 // and the contact basis are the same for every point of the pair, so they are loaded and made once; both bodies' displacements enter the
 // constraint value: the body being solved is passed in, the other is read from the state array.
 void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
@@ -301,29 +301,67 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
         posB = selfPos;
         rotB = selfRot;
     }
-    float3 dqALin = posA - stateA.startPosition.xyz;
-    float3 dqBLin = posB - stateB.startPosition.xyz;
+    // The constraint value of a point is c0 (1 - alpha) + J_A dq_A + J_B dq_B with J_A = [B; r_A x B] and J_B = [-B; -(r_B x B)] (B the contact basis,
+    // one row per direction). Row k of each body contributes b_k . dqLin + (r x b_k) . dqAng = b_k . (dqLin + dqAng x r) (with the sign of the body), so the whole product is the basis times
+    // one vector, w = dqALin - dqBLin + dqAAng x rA - dqBAng x rB (a scalar triple product moved around: (r x b) . d = b . (d x r)). w is made once per point,
+    // and the four 3x3 Jacobians of AvbdEvaluateContactInBasis (36 floats, two of which are thrown away by the stamp) are never built.
+    float3 dLin = (posA - stateA.startPosition.xyz) - (posB - stateB.startPosition.xyz);
     float3 dqAAng = AvbdQuatDifference(rotA, stateA.startRotation);
     float3 dqBAng = AvbdQuatDifference(rotB, stateB.startRotation);
 
     float3x3 basis = AvbdContactBasis(pair.normalFriction.xyz);
+    float3 b0 = basis[0];
+    float3 b1 = basis[1];
+    float3 b2 = basis[2];
     float friction = pair.normalFriction.w;
+    float sgn = isA ? 1.0 : -1.0; // the linear Jacobian of the body being solved is sgn * basis
 
     uint first = manifold * AVBD_MAX_CONTACTS;
     for (uint k = 0; k < count; k++)
     {
         ContactPointRecord p = _ContactPoints[first + k];
         float3 penalty = ContactPointPenalty(p);
-        AvbdContactEval e = AvbdEvaluateContactInBasis(
-            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, rotA, rotB,
-            dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
-        AvbdContactStamp s = AvbdStampContact(e, penalty, isA);
 
-        sys.lhsLin += s.lhsLin;
-        sys.lhsAng += s.lhsAng;
-        sys.lhsCross += s.lhsCross;
-        sys.rhsLin += s.rhsLin;
-        sys.rhsAng += s.rhsAng;
+        float3 rAWorld = AvbdQuatRotate(rotA, p.anchorA.xyz);
+        float3 rBWorld = AvbdQuatRotate(rotB, p.anchorB.xyz);
+        float3 w = dLin + cross(dqAAng, rAWorld) - cross(dqBAng, rBWorld);
+        float3 C = ContactPointC0(p) * (1.0 - AVBD_ALPHA) + float3(dot(b0, w), dot(b1, w), dot(b2, w));
+
+        // Force: normal force <= 0, friction clamped to the cone (as AvbdEvaluateContactInBasis).
+        float3 F = penalty * C + ContactPointLambda(p);
+        F.x = min(F.x, 0.0);
+        float bounds = abs(F.x) * friction;
+        float frictionScale = sqrt(F.y * F.y + F.z * F.z);
+        if (frictionScale > bounds && frictionScale > 0.0)
+        {
+            F.y *= bounds / frictionScale;
+            F.z *= bounds / frictionScale;
+        }
+
+        // The terms for the body being solved, with its angular Jacobian rows sgn * a_k, a_k = r x b_k (sgn cancels in every product of two Jacobian
+        // rows): lhsLin = sum_k p_k b_k b_k^T, lhsAng = sum_k p_k a_k a_k^T, lhsCross[i][j] = sum_k p_k a_k[i] b_k[j], rhs = sgn sum_k F_k (b_k | a_k).
+        float3 r = isA ? rAWorld : rBWorld;
+        float3 a0 = cross(r, b0);
+        float3 a1 = cross(r, b1);
+        float3 a2 = cross(r, b2);
+        float3 pb0 = penalty.x * b0;
+        float3 pb1 = penalty.y * b1;
+        float3 pb2 = penalty.z * b2;
+        float3 pa0 = penalty.x * a0;
+        float3 pa1 = penalty.y * a1;
+        float3 pa2 = penalty.z * a2;
+
+        sys.lhsLin[0] += b0.x * pb0 + b1.x * pb1 + b2.x * pb2;
+        sys.lhsLin[1] += b0.y * pb0 + b1.y * pb1 + b2.y * pb2;
+        sys.lhsLin[2] += b0.z * pb0 + b1.z * pb1 + b2.z * pb2;
+        sys.lhsAng[0] += a0.x * pa0 + a1.x * pa1 + a2.x * pa2;
+        sys.lhsAng[1] += a0.y * pa0 + a1.y * pa1 + a2.y * pa2;
+        sys.lhsAng[2] += a0.z * pa0 + a1.z * pa1 + a2.z * pa2;
+        sys.lhsCross[0] += pa0.x * b0 + pa1.x * b1 + pa2.x * b2;
+        sys.lhsCross[1] += pa0.y * b0 + pa1.y * b1 + pa2.y * b2;
+        sys.lhsCross[2] += pa0.z * b0 + pa1.z * b1 + pa2.z * b2;
+        sys.rhsLin += sgn * (F.x * b0 + F.y * b1 + F.z * b2);
+        sys.rhsAng += sgn * (F.x * a0 + F.y * a1 + F.z * a2);
     }
 }
 
