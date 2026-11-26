@@ -107,6 +107,7 @@ namespace McKrill.Avbd.Tests.Performance
             int manifoldSlots = Mathf.Min(BlockCount * 8 + c.maxShots * 16 + 256, AvbdConstraintBuffers.MaxContactManifolds);
             int jointCapacity = BlockCount * 3 + 8;
             Constraints = new AvbdConstraintBuffers(Bodies, jointCapacity, null, manifoldSlots, c.plasticJoints ? jointCapacity : 0);
+            Constraints.ColoringReductionPasses = 4;
             Solver = new AvbdSolver(Bodies, settings, null, Constraints);
 
             // Ground: a static slab whose top face is the plane y = 0.

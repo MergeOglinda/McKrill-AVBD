@@ -135,6 +135,7 @@ namespace McKrill.Avbd.Tests.Performance
             // The plastic array only exists if the joints can be plastic: linear yield on a rigid joint needs it too.
             bool plastic = c.plasticJoints || (c.linearYield && c.rigidJoints);
             Constraints = new AvbdConstraintBuffers(Bodies, jointCapacity, null, manifoldSlots, plastic ? jointCapacity : 0);
+            Constraints.ColoringReductionPasses = 4;
             Solver = new AvbdSolver(Bodies, settings, null, Constraints);
 
             // The ground and every voxel go in one batch (the ground first, then the objects one after the other, their voxels in the order of the shape),
