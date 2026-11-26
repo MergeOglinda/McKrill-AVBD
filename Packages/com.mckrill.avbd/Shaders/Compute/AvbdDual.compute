@@ -131,7 +131,14 @@ void ConstraintInit(uint3 id : SV_DispatchThreadID)
         penaltyAng = min(penaltyAng, c.anchorB.www);
 
     AvbdSetConstraintState(c, penaltyLin, penaltyAng, lambdaLin, lambdaAng);
-    _Constraints[index] = c;
+
+    // Only five of the eight words change (the constraint values at the start of the step, with their w lanes as they were, and the three state words):
+    // the identity and the two anchors, 48 B of the 128 B, are not written back.
+    _Constraints[index].c0Lin = c.c0Lin;
+    _Constraints[index].c0Ang = c.c0Ang;
+    _Constraints[index].state0 = c.state0;
+    _Constraints[index].state1 = c.state1;
+    _Constraints[index].state2 = c.state2;
 }
 
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
