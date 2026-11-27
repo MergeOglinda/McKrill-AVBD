@@ -80,6 +80,8 @@ namespace McKrill.Avbd.Samples
 
         [Header("Objects (applied on Reset)")]
         [SerializeField] bool smoothSurface = true;
+        [Tooltip("Off: every voxel is a box. On: every voxel is a sphere whose diameter is the edge of the box it replaces (the voxel size less the gap), with the same mass (the density follows from the volume). The joints are the same. The smooth surface is not drawn, the spheres are. The ground and the shots stay boxes.")]
+        [SerializeField] bool sphereVoxels = false;
         [Tooltip("Mass of one voxel in kg.")]
         [SerializeField, Min(0.001f)] float voxelMass = 0.25f;
         [SerializeField] bool rigidJoints = true;
@@ -197,6 +199,12 @@ namespace McKrill.Avbd.Samples
         readonly List<string> objectLines = new List<string>();                  // one line per file of the folder for the panel: what was read, or why not
         Material boxMaterial;
         Material chunkMaterial;
+        // Spheres: the draw of the voxels (the instances after the ground) with the sphere mesh, and the draw of the shots after them with the cube mesh; both
+        // use the instance buffer of the boxes from another instance on (the material's _InstanceOffset).
+        Material sphereMaterial;
+        Material shotMaterial;
+        Mesh sphereMesh;
+        bool spheresInScene; // sphereVoxels as the scene was built (the toggle applies on Reset)
         Mesh cubeMesh;
         // The smooth pieces: one record (slot, color) for each block that is drawn as a chunk, and one mesh of all the chunks.
         GraphicsBuffer chunkInstanceBuffer;
@@ -292,6 +300,8 @@ namespace McKrill.Avbd.Samples
                 return;
             }
             boxMaterial = new Material(boxShader) { hideFlags = HideFlags.HideAndDontSave };
+            sphereMaterial = new Material(boxShader) { hideFlags = HideFlags.HideAndDontSave };
+            shotMaterial = new Material(boxShader) { hideFlags = HideFlags.HideAndDontSave };
 
             // Optional: without the chunk shader (or where it is not supported) every block is a cube.
             Shader chunkShader = AvbdShaderSet.Load()?.BlockChunks;
@@ -303,6 +313,8 @@ namespace McKrill.Avbd.Samples
             // The cube mesh comes from a primitive that is destroyed again: it keeps the demo free of mesh assets.
             meshSource = GameObject.CreatePrimitive(PrimitiveType.Cube);
             cubeMesh = meshSource.GetComponent<MeshFilter>().sharedMesh;
+            // The sphere mesh is built here: a sphere of diameter 1 (so that the instance size is the diameter) with few triangles (Unity's own has 768).
+            sphereMesh = CreateSphereMesh(SphereSegments, SphereRings);
             meshSource.SetActive(false);
 
             SetUpCameraAndLight();
@@ -320,6 +332,12 @@ namespace McKrill.Avbd.Samples
             boxMaterial = null;
             if (chunkMaterial != null) Destroy(chunkMaterial);
             chunkMaterial = null;
+            if (sphereMaterial != null) Destroy(sphereMaterial);
+            sphereMaterial = null;
+            if (shotMaterial != null) Destroy(shotMaterial);
+            shotMaterial = null;
+            if (sphereMesh != null) Destroy(sphereMesh);
+            sphereMesh = null;
 
             if (createdLight != null) Destroy(createdLight);
             createdLight = null;
@@ -583,12 +601,14 @@ namespace McKrill.Avbd.Samples
                 // The box is a little smaller than the cell: neighbors that are not joined (those that touch along an edge or at a corner) start apart.
                 float edge = data.voxelSize - Mathf.Min(VoxelGap, MaxGapFraction * data.voxelSize);
                 var size = new float3(edge);
-                float density = voxelMass / (edge * edge * edge);
+                // A sphere has the edge as its diameter (the instance size of a sphere is its diameter) and the same mass: the density follows from the volume.
+                float volume = sphereVoxels ? Mathf.PI / 6f * edge * edge * edge : edge * edge * edge;
+                float density = voxelMass / volume;
                 for (int n = 0; n < data.voxelCount; n++)
                 {
                     float3 position = data.VoxelCenter(n) + o.offset;
                     positions[first + n] = position;
-                    descriptors.Add(DemoBox(size, density, position));
+                    descriptors.Add(sphereVoxels ? DemoSphere(0.5f * edge, density, position) : DemoBox(size, density, position));
                     instanceSizes.Add(size);
                     instanceColors.Add(VoxelColor(i, data.voxels[3 * n], data.voxels[3 * n + 1], data.voxels[3 * n + 2]));
                 }
@@ -600,7 +620,7 @@ namespace McKrill.Avbd.Samples
             // The blocks that are drawn as chunks (those of a file with chunks, with the smooth surface on) are not cubes in the instance list: they get a record in
             // the chunk instance buffer instead. Index in the list of descriptors: 1 + the voxel's number in the whole scene.
             bool[] drawnAsChunk = new bool[spawned.Length];
-            bool chunksWanted = smoothSurface && chunkMaterial != null;
+            bool chunksWanted = smoothSurface && chunkMaterial != null && !sphereVoxels; // spheres are drawn as spheres, not as pieces of a smooth surface
             if (chunksWanted)
             {
                 first = 0;
@@ -803,6 +823,14 @@ namespace McKrill.Avbd.Samples
 
             boxMaterial.SetBuffer("_Poses", bodies.State);
             boxMaterial.SetBuffer("_Instances", instanceBuffer);
+            spheresInScene = sphereVoxels;
+            // Sphere mode: the ground is instance 0, the voxels 1 to staticCount - 1 and the shots follow.
+            sphereMaterial.SetBuffer("_Poses", bodies.State);
+            sphereMaterial.SetBuffer("_Instances", instanceBuffer);
+            sphereMaterial.SetFloat("_InstanceOffset", 1f);
+            shotMaterial.SetBuffer("_Poses", bodies.State);
+            shotMaterial.SetBuffer("_Instances", instanceBuffer);
+            shotMaterial.SetFloat("_InstanceOffset", staticCount);
         }
 
         // The solver's constants as the panel has them. A value that would not pass the solver's check is brought into range (the highest penalty is not below the lowest).
@@ -821,6 +849,14 @@ namespace McKrill.Avbd.Samples
                 penaltyMin = lowest,
                 penaltyMax = Mathf.Max(penaltyMax, lowest),
             };
+        }
+
+        // A sphere of the demo: in DemoGroup only.
+        static BodyDescriptor DemoSphere(float radius, float density, float3 position)
+        {
+            BodyDescriptor d = BodyDescriptor.Sphere(radius, density, position);
+            d.groupMask = DemoGroup;
+            return d;
         }
 
         // A box of the demo: in DemoGroup only.
@@ -1366,9 +1402,10 @@ namespace McKrill.Avbd.Samples
                 toLight = -sun.transform.forward;
                 lightColor = sun.color * sun.intensity;
             }
-            boxMaterial.SetVector("_LightDirection", toLight);
-            boxMaterial.SetColor("_LightColor", lightColor);
-            boxMaterial.SetColor("_AmbientColor", new Color(0.35f, 0.37f, 0.40f));
+            Color ambient = new Color(0.35f, 0.37f, 0.40f);
+            SetLight(boxMaterial, toLight, lightColor, ambient);
+            SetLight(sphereMaterial, toLight, lightColor, ambient);
+            SetLight(shotMaterial, toLight, lightColor, ambient);
 
             var renderParams = new RenderParams(boxMaterial)
             {
@@ -1378,7 +1415,23 @@ namespace McKrill.Avbd.Samples
                 receiveShadows = false,
                 layer = gameObject.layer,
             };
-            Graphics.RenderMeshPrimitives(renderParams, cubeMesh, 0, staticCount + shots.Count);
+            if (!spheresInScene)
+            {
+                Graphics.RenderMeshPrimitives(renderParams, cubeMesh, 0, staticCount + shots.Count);
+            }
+            else
+            {
+                Graphics.RenderMeshPrimitives(renderParams, cubeMesh, 0, 1); // the ground
+                renderParams.material = sphereMaterial;
+                if (staticCount > 1)
+                    Graphics.RenderMeshPrimitives(renderParams, sphereMesh, 0, staticCount - 1); // the voxels
+                if (shots.Count > 0)
+                {
+                    renderParams.material = shotMaterial;
+                    Graphics.RenderMeshPrimitives(renderParams, cubeMesh, 0, shots.Count);
+                }
+                renderParams.material = boxMaterial;
+            }
 
             // The smooth pieces of the blocks on the surface: the same light, one more draw call for all of them.
             if (chunkMesh != null)
@@ -1389,6 +1442,60 @@ namespace McKrill.Avbd.Samples
                 renderParams.material = chunkMaterial;
                 Graphics.RenderMeshPrimitives(renderParams, chunkMesh, 0, 1);
             }
+        }
+
+        static void SetLight(Material material, Vector3 toLight, Color lightColor, Color ambient)
+        {
+            material.SetVector("_LightDirection", toLight);
+            material.SetColor("_LightColor", lightColor);
+            material.SetColor("_AmbientColor", ambient);
+        }
+
+        // ---- sphere mesh -------------------------------------------------------------------------------
+
+        const int SphereSegments = 12; // around the vertical axis
+        const int SphereRings = 8;     // from pole to pole: 2 * 12 * 7 + 2 * 12 = 192 triangles
+
+        // A sphere of diameter 1 (radius 0.5) with smooth normals: the shader scales it by the instance size, which is the diameter.
+        static Mesh CreateSphereMesh(int segments, int rings)
+        {
+            var vertices = new Vector3[(rings + 1) * (segments + 1)];
+            var normals = new Vector3[vertices.Length];
+            for (int ring = 0; ring <= rings; ring++)
+            {
+                float polar = ring / (float)rings * Mathf.PI;
+                float y = Mathf.Cos(polar);
+                float radial = Mathf.Sin(polar);
+                for (int seg = 0; seg <= segments; seg++)
+                {
+                    float azimuth = seg / (float)segments * 2f * Mathf.PI;
+                    var n = new Vector3(radial * Mathf.Cos(azimuth), y, radial * Mathf.Sin(azimuth));
+                    int i = ring * (segments + 1) + seg;
+                    normals[i] = n;
+                    vertices[i] = n * 0.5f;
+                }
+            }
+
+            var triangles = new List<int>(rings * segments * 6);
+            for (int ring = 0; ring < rings; ring++)
+                for (int seg = 0; seg < segments; seg++)
+                {
+                    int a = ring * (segments + 1) + seg; // this ring, this segment
+                    int b = a + segments + 1;            // the next ring, this segment
+                    int c = a + 1;                       // this ring, the next segment
+                    int d = b + 1;
+                    // Unity draws the triangles that are clockwise seen from outside. The two triangles at a pole are degenerate (the vertices of a pole
+                    // coincide) and draw nothing.
+                    triangles.Add(a); triangles.Add(c); triangles.Add(b);
+                    triangles.Add(c); triangles.Add(d); triangles.Add(b);
+                }
+
+            var mesh = new Mesh { name = "AVBD Sphere", hideFlags = HideFlags.HideAndDontSave };
+            mesh.vertices = vertices;
+            mesh.normals = normals;
+            mesh.SetTriangles(triangles, 0);
+            mesh.bounds = new Bounds(Vector3.zero, Vector3.one);
+            return mesh;
         }
 
         // ---- camera and light --------------------------------------------------------------------------
@@ -1590,6 +1697,7 @@ namespace McKrill.Avbd.Samples
 
             // Mass, stiffness and the threshold on log scales.
             smoothSurface = GUILayout.Toggle(smoothSurface, "Smooth surface (needs chunks in the file, see the objects panel)");
+            sphereVoxels = GUILayout.Toggle(sphereVoxels, "Spheres instead of boxes   (applied on Reset; no smooth surface)");
 
             GUILayout.Label("Voxel mass: " + voxelMass.ToString(voxelMass < 1f ? "0.000" : "0.0") + " kg");
             voxelMass = Mathf.Clamp(Mathf.Pow(10f, GUILayout.HorizontalSlider(Mathf.Log10(voxelMass), -2f, 1f)), 0.01f, 10f);

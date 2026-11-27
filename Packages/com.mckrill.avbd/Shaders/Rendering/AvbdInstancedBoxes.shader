@@ -6,7 +6,8 @@
 //
 // The shader is plain unlit-style code with one fixed directional light plus ambient, so it renders the same in the built-in pipeline and in URP
 // (a pass without a LightMode tag is drawn by both). It has no shadow pass and receives no shadows. The colors in _Instances are the final
-// colors: convert them to linear first when the project uses the linear color space.
+// colors: convert them to linear first when the project uses the linear color space. The mesh can be any mesh of diameter 1 (a unit sphere, say): the
+// size scales it. A float _InstanceOffset on the material starts the draw at that instance.
 Shader "McKrill/AVBD Instanced Boxes"
 {
     SubShader
@@ -48,6 +49,10 @@ Shader "McKrill/AVBD Instanced Boxes"
             StructuredBuffer<Pose> _Poses;
             StructuredBuffer<Instance> _Instances;
 
+            // The number of the first instance of the draw: a material that sets it draws a range of _Instances (the buffer holds the ground, the voxels and the
+            // shots, say, and the voxels are spheres drawn with another mesh). 0 when the property is not set: the instances from the start.
+            float _InstanceOffset;
+
             float4 _LightDirection; // xyz: unit vector towards the light
             float4 _LightColor;
             float4 _AmbientColor;
@@ -66,7 +71,7 @@ Shader "McKrill/AVBD Instanced Boxes"
 
             Varyings Vert(float4 vertex : POSITION, float3 normal : NORMAL, uint instanceId : SV_InstanceID)
             {
-                Instance instance = _Instances[instanceId];
+                Instance instance = _Instances[instanceId + (uint)_InstanceOffset];
                 Pose pose = _Poses[instance.slot];
 
                 float3 local = vertex.xyz * float3(instance.sizeX, instance.sizeY, instance.sizeZ);
