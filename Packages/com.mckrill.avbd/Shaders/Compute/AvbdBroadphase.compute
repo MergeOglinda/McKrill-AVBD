@@ -248,6 +248,18 @@ BpBox MakeBpBox(uint slot, bool sphere)
     return box;
 }
 
+// True if a sphere is apart from a box by more than AVBD_BP_SEPARATION_PAD: the distance from the center of the sphere to the closest point of the box (in the
+// frame of the box) against the radius, which is what the narrow phase tests (AvbdCollideSphereBox) with the pad added. A center inside the box has distance 0.
+// A NaN never separates.
+bool SphereBoxSeparated(float3 sphereCenter, float radius, BpBox box)
+{
+    float3 d = sphereCenter - box.center;
+    float3 p = float3(dot(d, box.axis0), dot(d, box.axis1), dot(d, box.axis2));
+    float3 e = p - clamp(p, -box.halfSize, box.halfSize);
+    float reach = radius + AVBD_BP_SEPARATION_PAD;
+    return dot(e, e) > reach * reach;
+}
+
 // Half width of the box along the unit vector n.
 float BpExtent(BpBox box, float3 n)
 {
@@ -559,9 +571,18 @@ void TestPair(BpProbe probe, uint other)
     {
         // Two spheres: the sphere test above is the exact test of the narrow phase, and the box test could not reject a pair that passes it (the cube
         // around a sphere contains the sphere, and the box test has the pad besides), so it is not made: no box for the other body, no axis tests.
+        // A sphere and a box: the sphere against the box exactly, not the cube around the sphere (a cube is 1.9 times the volume of its sphere, so the
+        // cube lets through the candidates near its corners, which the narrow phase then finds apart).
         bool boxesApart = false;
-        if (!(probe.sphere && otherSphere))
-            boxesApart = BoxesSeparated(probe.box, MakeBpBox(other, otherSphere));
+        if (probe.sphere != otherSphere)
+        {
+            if (probe.sphere)
+                boxesApart = SphereBoxSeparated(probe.position, probe.radius, MakeBpBox(other, false));
+            else
+                boxesApart = SphereBoxSeparated(otherRecord.xyz, otherRecord.w, probe.box);
+        }
+        else if (!probe.sphere)
+            boxesApart = BoxesSeparated(probe.box, MakeBpBox(other, false));
         if (!boxesApart)
         {
             // The list of the solved body of the pair has the joints and springs that exclude it.

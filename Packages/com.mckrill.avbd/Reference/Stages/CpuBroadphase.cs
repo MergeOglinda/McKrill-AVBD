@@ -8,7 +8,7 @@ namespace McKrill.Avbd.Reference
     /// with the same rules as the shader (and as the reference solver's broadphase, minus the pairs of two static bodies):
     ///   a pair needs at least one solved body (not free, not kinematic, mass above zero),
     ///   the bounding spheres (center = position, radius = |size| / 2) touch: |dp|^2 &lt;= (rA + rB)^2,
-    ///   the boxes are not visibly apart (<see cref="BoxesSeparated(float3, quaternion, float3, float3, quaternion, float3)"/>: world bounding boxes, face axes),
+    ///   the shapes are not visibly apart (<see cref="BoxesSeparated(float3, quaternion, float3, float3, quaternion, float3)"/>: world bounding boxes, face axes; a sphere and a box: the exact distance, <see cref="SphereBoxSeparated"/>; two spheres: no test),
     ///   no joint or spring joins the two bodies (a broken one, as far as the records say, no longer does, and contacts do not count: this is the narrowphase's exclusion),
     ///   body A is the higher slot; the kind is dynamic-dynamic if both are solved, else dynamic-static.
     /// A body at a non-finite position makes no pairs. The GPU's pair order is unspecified, so a pair set is a set of keys.
@@ -72,14 +72,38 @@ namespace McKrill.Avbd.Reference
             return Separates(a0) || Separates(a1) || Separates(a2) || Separates(b0) || Separates(b1) || Separates(b2);
         }
 
-        /// <summary>The same test on the bodies as the GPU holds them (position and rotation of the state record, full box size).</summary>
+        /// <summary>
+        /// Mirrors SphereBoxSeparated in the shader: true if a sphere (center, radius) is apart from a box (center, rotation, full sizes) by more than
+        /// <see cref="AvbdBroadphase.SeparationPad"/>: the distance from the center to the closest point of the box against the radius. A NaN never separates.
+        /// </summary>
+        public static bool SphereBoxSeparated(float3 sphereCenter, float radius, float3 boxCenter, quaternion boxRotation, float3 boxSize)
+        {
+            float3 half = boxSize * 0.5f;
+            float3 d = sphereCenter - boxCenter;
+            float3 p = new float3(math.dot(d, AvbdQuat.Rotate(boxRotation, new float3(1f, 0f, 0f))),
+                                  math.dot(d, AvbdQuat.Rotate(boxRotation, new float3(0f, 1f, 0f))),
+                                  math.dot(d, AvbdQuat.Rotate(boxRotation, new float3(0f, 0f, 1f))));
+            float3 e = p - math.clamp(p, -half, half);
+            float reach = radius + AvbdBroadphase.SeparationPad;
+            return math.dot(e, e) > reach * reach;
+        }
+
+        /// <summary>
+        /// The shape test of the shader's TestPair on the bodies as the GPU holds them (position and rotation of the state record, full size): two spheres are never
+        /// separated by it (the sphere test is the exact one), a sphere and a box are tested exactly, two boxes by <see cref="BoxesSeparated(float3, quaternion, float3, float3, quaternion, float3)"/>.
+        /// </summary>
         public static bool BoxesSeparated(CpuBodyArrays bodies, int a, int b)
         {
-            // A sphere is tested as the cube around it along the world axes, like the shader's MakeBpBox: its rotation is ignored.
-            quaternion rotationA = IsSphere(bodies, a) ? quaternion.identity : new quaternion(bodies.State[a].rotation);
-            quaternion rotationB = IsSphere(bodies, b) ? quaternion.identity : new quaternion(bodies.State[b].rotation);
-            return BoxesSeparated(bodies.State[a].position.xyz, rotationA, bodies.Shape[a].sizeFriction.xyz,
-                                  bodies.State[b].position.xyz, rotationB, bodies.Shape[b].sizeFriction.xyz);
+            bool sphereA = IsSphere(bodies, a);
+            bool sphereB = IsSphere(bodies, b);
+            if (sphereA && sphereB)
+                return false;
+            if (sphereA)
+                return SphereBoxSeparated(bodies.State[a].position.xyz, Radius(bodies, a), bodies.State[b].position.xyz, new quaternion(bodies.State[b].rotation), bodies.Shape[b].sizeFriction.xyz);
+            if (sphereB)
+                return SphereBoxSeparated(bodies.State[b].position.xyz, Radius(bodies, b), bodies.State[a].position.xyz, new quaternion(bodies.State[a].rotation), bodies.Shape[a].sizeFriction.xyz);
+            return BoxesSeparated(bodies.State[a].position.xyz, new quaternion(bodies.State[a].rotation), bodies.Shape[a].sizeFriction.xyz,
+                                  bodies.State[b].position.xyz, new quaternion(bodies.State[b].rotation), bodies.Shape[b].sizeFriction.xyz);
         }
 
         /// <summary>A pair as one number, for sets and comparisons. Slots must be below 2^30.</summary>
