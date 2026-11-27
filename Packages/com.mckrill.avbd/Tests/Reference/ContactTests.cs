@@ -300,6 +300,80 @@ namespace McKrill.Avbd.Tests
             }
         }
 
+        // The contact dual update inside the primal sweeps (AvbdSolver.FuseDualUpdate: the first solved body of a manifold updates its points before it
+        // stamps them, DualContact runs once after the last sweep) against the dispatch after every sweep. Both make the constraint value the same way, so
+        // the bodies and the points (penalty, multiplier, stick) agree to rounding, and no mark is left in a pair. With 1 iteration the only update is the
+        // one after the sweep; with more, the later sweeps do theirs inside.
+        [TestCase("ground", 1)]
+        [TestCase("ground", 2)]
+        [TestCase("ground", 6)]
+        [TestCase("stack", 1)]
+        [TestCase("stack", 3)]
+        [TestCase("stack", 8)]
+        public void Gpu_Step_WithTheContactDualUpdateInTheSweeps_MatchesTheSeparateDispatch(string scene, int iterations)
+        {
+            RequireCompute();
+            ReferenceSolver reference = Colored(scene, out AvbdSolverSettings settings);
+            settings.iterations = iterations;
+            SceneArrays arrays = ConstraintTestScenes.FromReference(reference, Capacity);
+            const int steps = 12;
+
+            using (var buffersA = new AvbdBodyBuffers(Capacity))
+            using (var constraintsA = new AvbdConstraintBuffers(buffersA, 4, null, ContactSlots))
+            using (var buffersB = new AvbdBodyBuffers(Capacity))
+            using (var constraintsB = new AvbdConstraintBuffers(buffersB, 4, null, ContactSlots))
+            {
+                foreach (BodyDescriptor d in arrays.descriptors)
+                {
+                    buffersA.Spawn(d);
+                    buffersB.Spawn(d);
+                }
+                var fused = new AvbdSolver(buffersA, settings, null, constraintsA) { FuseDualUpdate = true };
+                var separate = new AvbdSolver(buffersB, settings, null, constraintsB) { FuseDualUpdate = false };
+                var stateA = new BodyStateRecord[Capacity];
+                var stateB = new BodyStateRecord[Capacity];
+
+                bool sawContacts = false;
+                for (int step = 1; step <= steps; step++)
+                {
+                    fused.Step();
+                    separate.Step();
+
+                    ContactSnapshot snapA = constraintsA.ReadContacts();
+                    ContactSnapshot snapB = constraintsB.ReadContacts();
+                    sawContacts |= snapA.SlotsWithContacts > 0;
+                    Assert.AreEqual(snapB.SlotsWithContacts, snapA.SlotsWithContacts, scene + " step " + step + ": manifolds");
+                    ConstraintRecord[] recordsA = constraintsA.ReadContactRecords();
+                    ConstraintRecord[] recordsB = constraintsB.ReadContactRecords();
+                    var pairsA = constraintsA.ReadContactPairs();
+                    for (int a = 1; a < arrays.bodyCount; a++)
+                        for (int b = 0; b < a; b++)
+                        {
+                            Assert.AreEqual(snapB.CountOf(a, b), snapA.CountOf(a, b), scene + " step " + step + " pair (" + a + ", " + b + ") contacts");
+                            if (snapA.CountOf(a, b) == 0u)
+                                continue;
+                            int slotA = snapA.SlotOf(a, b);
+                            int slotB = snapB.SlotOf(a, b);
+                            Assert.AreEqual(0u, ContactCodec.Mark(pairsA[slotA]), scene + " step " + step + " pair (" + a + ", " + b + "): the step leaves no mark");
+                            for (int k = 0; k < (int)snapA.CountOf(a, b); k++)
+                                AssertRecordNear(recordsB[slotB * ContactLayout.MaxContactsPerPair + k], recordsA[slotA * ContactLayout.MaxContactsPerPair + k],
+                                    1e-3f, scene + " step " + step + " pair (" + a + ", " + b + ") contact " + k);
+                        }
+
+                    buffersA.State.GetData(stateA);
+                    buffersB.State.GetData(stateB);
+                    for (int s = 0; s < arrays.bodyCount; s++)
+                    {
+                        string what = scene + " step " + step + " slot " + s;
+                        AssertNear(stateB[s].position.xyz, stateA[s].position.xyz, 1e-3f, what + " position");
+                        AssertNear(stateB[s].rotation, stateA[s].rotation, 1e-3f, what + " rotation");
+                    }
+                    Assert.AreEqual(0, constraintsA.ReadSolveFailures(), scene + " step " + step + ": GPU solve failures");
+                }
+                Assert.IsTrue(sawContacts, scene + ": the scene never produced a contact, so nothing was tested");
+            }
+        }
+
         [Test]
         public void Gpu_Step_BoxesJoinedByAJointDoNotCollide()
         {

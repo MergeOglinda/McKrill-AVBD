@@ -901,6 +901,15 @@ namespace McKrill.Avbd
             return records;
         }
 
+        /// <summary>The pair records of the pool, one per manifold slot (a free slot has both bodies <c>AvbdConst.Invalid</c>). Waits for the GPU. For tests.</summary>
+        internal ContactPairRecord[] ReadContactPairs()
+        {
+            ThrowIfDisposed();
+            var pairs = new ContactPairRecord[contactPairBuffer.count];
+            contactPairBuffer.GetData(pairs);
+            return pairs;
+        }
+
         /// <summary>One contact of <see cref="ReadContactRecords"/>. Waits for the GPU. For tests.</summary>
         internal ConstraintRecord ReadContactRecord(int slot, int k)
         {

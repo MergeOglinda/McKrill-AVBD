@@ -16,6 +16,49 @@ float3x3 AvbdContactBasis(float3 normal)
     return float3x3(normal, t1, t2);
 }
 
+// The force of one contact point from its constraint value: the part of the evaluation that the dual update and the primal stamp share. The fused dual
+// update (AVBD_FUSED_DUAL in AvbdPrimal.compute) evaluates a point twice at the same poses, before and after the dual update has changed its penalty and
+// multiplier, so C is made once and this runs on it.
+struct AvbdContactForce
+{
+    float3 C;             // Taylor-approximated constraint value
+    float3 F;             // force K C + lambda, normal force <= 0 and friction clamped to the cone
+    float bounds;         // friction cone radius
+    float frictionScale;  // norm of the tangential force before the cone clamp
+};
+
+AvbdContactForce AvbdContactForceFromC(float3 C, float3 penalty, float3 lambda, float friction)
+{
+    AvbdContactForce e;
+    e.C = C;
+
+    float3 F = penalty * C + lambda;
+
+    // Clamp the normal force.
+    F.x = min(F.x, 0.0);
+
+    // Clamp the norm of the friction force to the friction cone.
+    e.bounds = abs(F.x) * friction;
+    e.frictionScale = sqrt(F.y * F.y + F.z * F.z);
+    if (e.frictionScale > e.bounds && e.frictionScale > 0.0)
+    {
+        F.y *= e.bounds / e.frictionScale;
+        F.z *= e.bounds / e.frictionScale;
+    }
+    e.F = F;
+    return e;
+}
+
+// The constraint value of a point without the 3x3 Jacobians: c0 (1 - alpha) + J_A dq_A + J_B dq_B with J_A = [B; r_A x B] and J_B = [-B; -(r_B x B)] (B the
+// contact basis, rows b0 to b2) is the basis times one vector, w = dqALin - dqBLin + dqAAng x rA - dqBAng x rB (a scalar triple product moved around:
+// (r x b) . d = b . (d x r)). dLin is dqALin - dqBLin; rAWorld and rBWorld are the anchors rotated by the current rotations. The primal stamp and the dual
+// update of a contact both make C this way, so that the dual update that runs inside the sweep and the one that runs after it see the same value.
+float3 AvbdContactValue(float3 b0, float3 b1, float3 b2, float3 dLin, float3 dqAAng, float3 dqBAng, float3 rAWorld, float3 rBWorld, float3 c0, float alpha)
+{
+    float3 w = dLin + cross(dqAAng, rAWorld) - cross(dqBAng, rBWorld);
+    return c0 * (1.0 - alpha) + float3(dot(b0, w), dot(b1, w), dot(b2, w));
+}
+
 struct AvbdContactEval
 {
     float3x3 jALin;
@@ -50,20 +93,10 @@ AvbdContactEval AvbdEvaluateContactInBasis(
         + mul(e.jALin, dqALin) + mul(e.jBLin, dqBLin)
         + mul(e.jAAng, dqAAng) + mul(e.jBAng, dqBAng);
 
-    float3 F = penalty * e.C + lambda;
-
-    // Clamp the normal force.
-    F.x = min(F.x, 0.0);
-
-    // Clamp the norm of the friction force to the friction cone.
-    e.bounds = abs(F.x) * friction;
-    e.frictionScale = sqrt(F.y * F.y + F.z * F.z);
-    if (e.frictionScale > e.bounds && e.frictionScale > 0.0)
-    {
-        F.y *= e.bounds / e.frictionScale;
-        F.z *= e.bounds / e.frictionScale;
-    }
-    e.F = F;
+    AvbdContactForce f = AvbdContactForceFromC(e.C, penalty, lambda, friction);
+    e.F = f.F;
+    e.bounds = f.bounds;
+    e.frictionScale = f.frictionScale;
     return e;
 }
 
@@ -127,7 +160,7 @@ struct AvbdContactDualResult
 
 // Dual update of one contact: stores the force as the multiplier and ramps the penalties (Eq. 16). `stick` is only changed when the
 // friction rows are inside the cone, like upstream.
-AvbdContactDualResult AvbdContactDual(AvbdContactEval e, float3 penalty, bool stick, float betaLin, float penaltyMax)
+AvbdContactDualResult AvbdContactDualOfForce(AvbdContactForce e, float3 penalty, bool stick, float betaLin, float penaltyMax)
 {
     AvbdContactDualResult r;
     r.lambda = e.F;
@@ -143,6 +176,16 @@ AvbdContactDualResult AvbdContactDual(AvbdContactEval e, float3 penalty, bool st
         r.stick = sqrt(e.C.y * e.C.y + e.C.z * e.C.z) < AVBD_STICK_THRESHOLD;
     }
     return r;
+}
+
+AvbdContactDualResult AvbdContactDual(AvbdContactEval e, float3 penalty, bool stick, float betaLin, float penaltyMax)
+{
+    AvbdContactForce f;
+    f.C = e.C;
+    f.F = e.F;
+    f.bounds = e.bounds;
+    f.frictionScale = e.frictionScale;
+    return AvbdContactDualOfForce(f, penalty, stick, betaLin, penaltyMax);
 }
 
 #endif // MCKRILL_AVBD_CONTACT_SOLVE_INCLUDED

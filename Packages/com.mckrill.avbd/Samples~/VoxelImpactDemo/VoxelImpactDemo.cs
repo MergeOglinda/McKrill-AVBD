@@ -80,7 +80,7 @@ namespace McKrill.Avbd.Samples
         [Header("Solver")]
         [Tooltip("Solver iterations per step: 25 in the performance test.")]
         [SerializeField, Range(1, 30)] int iterations = 25;
-        [Tooltip("Do the dual update of the joints in the next primal sweep (one pass over the joint records fewer per iteration).")]
+        [Tooltip("Do the dual update of the joints and the contacts in the next primal sweep (one pass over the joint records and the manifolds fewer per iteration).")]
         [SerializeField] bool fuseDualUpdate = true;
         [Tooltip("Upper bound on solver steps per rendered frame. If the GPU cannot keep up, the simulation runs slower than real time instead of stalling.")]
         [SerializeField, Range(1, 4)] int maxStepsPerFrame = 1;

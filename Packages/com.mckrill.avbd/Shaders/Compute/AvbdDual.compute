@@ -14,7 +14,7 @@
 //
 // One thread per constraint. A thread writes only its own record and reads body poses, which no stage writes meanwhile, so no
 // ordering, coloring or atomics are needed. Springs have no state and are skipped. Dual stores only the words of the record that it changed.
-// DualContact is the dual update of the contacts, one thread per slot of the manifold pool that has ever been used (below the pool's high-water
+// DualContact is the dual update of the contacts (after every primal sweep, or with AVBD_FUSED_DUAL once, after the last one), one thread per slot of the manifold pool that has ever been used (below the pool's high-water
 // mark; see ContactLayout), which updates the points of its pair: a free slot skips. It is dispatched indirectly with arguments the narrow phase
 // wrote, so the host never needs the number of manifolds. A contact's warm start is part of the narrow phase (AvbdNarrowphase.compute).
 // The update of one joint is in Include/AvbdJointDual.hlsl, which the primal kernel uses too.
@@ -199,6 +199,11 @@ void Dual(uint3 id : SV_DispatchThreadID)
 // Dual update of a manifold (the reference solver's Manifold.UpdateDual): one thread per manifold slot, which walks the points of its pair. It
 // loads the two bodies and makes the contact basis once, then for every point stores the clamped force as the multiplier, ramps the penalties and
 // updates the stick bit. The displacements are measured from the start-of-step poses, which every body has, static ones included.
+// The constraint value is made the way the primal stamp makes it (AvbdContactValue), because with AVBD_FUSED_DUAL the sweeps run this update themselves
+// (StampManifold) and the two must agree.
+// After a step that fused the update (_ClearMarks, as for the joints) this runs once, after the last sweep: for the update of that sweep, to clear the
+// marks the sweeps left in the pairs, and for a pair that no sweep touched (no solved body is on it: its bodies did not move, so no sweep updated it) to
+// give it the updates of all the iterations, one after the other, which is what separate dispatches would have given it.
 [numthreads(AVBD_GROUP_SIZE, 1, 1)]
 void DualContact(uint3 id : SV_DispatchThreadID)
 {
@@ -212,35 +217,55 @@ void DualContact(uint3 id : SV_DispatchThreadID)
     if (pair.ident.x == AVBD_INVALID || count == 0u)
         return;
 
+    uint stick = pair.ident.w & AVBD_CONTACT_STICK_MASK;
+    uint mark = pair.ident.w >> AVBD_CONTACT_MARK_SHIFT;
+    uint updates = 1u;
+    if (_ClearMarks != 0u)
+    {
+        if (_LastSweep != 0u && mark != _LastSweep)
+            updates = max(_FinalUpdates, 1u);
+        mark = 0u; // the pairs leave the step without a mark
+    }
+
     BodyStateRecord stateA = _BodyState[pair.ident.x];
     BodyStateRecord stateB = _BodyState[pair.ident.y];
-    float3 dqALin = stateA.position.xyz - stateA.startPosition.xyz;
-    float3 dqBLin = stateB.position.xyz - stateB.startPosition.xyz;
+    float3 dLin = (stateA.position.xyz - stateA.startPosition.xyz) - (stateB.position.xyz - stateB.startPosition.xyz);
     float3 dqAAng = AvbdQuatDifference(stateA.rotation, stateA.startRotation);
     float3 dqBAng = AvbdQuatDifference(stateB.rotation, stateB.startRotation);
     float3x3 basis = AvbdContactBasis(pair.normalFriction.xyz);
     float friction = pair.normalFriction.w;
 
-    uint stick = pair.ident.w & AVBD_CONTACT_STICK_MASK;
-    uint mark = pair.ident.w & ~AVBD_CONTACT_STICK_MASK; // kept as it is
     uint first = slot * AVBD_MAX_CONTACTS;
     for (uint k = 0; k < count; k++)
     {
         ContactPointRecord p = _ContactPoints[first + k];
         float3 penalty = ContactPointPenalty(p);
-        AvbdContactEval e = AvbdEvaluateContactInBasis(
-            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, stateA.rotation, stateB.rotation,
-            dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
-        AvbdContactDualResult r = AvbdContactDual(e, penalty, (stick & (1u << k)) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
+        float3 lambda = ContactPointLambda(p);
+        bool sticking = (stick & (1u << k)) != 0u;
 
-        if (r.stick)
+        float3 rAWorld = AvbdQuatRotate(stateA.rotation, p.anchorA.xyz);
+        float3 rBWorld = AvbdQuatRotate(stateB.rotation, p.anchorB.xyz);
+        float3 C = AvbdContactValue(basis[0], basis[1], basis[2], dLin, dqAAng, dqBAng, rAWorld, rBWorld, ContactPointC0(p), AVBD_ALPHA);
+
+        // The poses do not change between the updates of a pair that no sweep touched, so C stays and the force follows the penalty and the multiplier.
+        [loop]
+        for (uint u = 0u; u < updates; u++)
+        {
+            AvbdContactForce force = AvbdContactForceFromC(C, penalty, lambda, friction);
+            AvbdContactDualResult r = AvbdContactDualOfForce(force, penalty, sticking, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
+            penalty = r.penalty;
+            lambda = r.lambda;
+            sticking = r.stick;
+        }
+
+        if (sticking)
             stick |= 1u << k;
         else
             stick &= ~(1u << k);
 
         // Only the penalty and the multiplier change: write those two words, not the whole 64-byte point.
-        _ContactPoints[first + k].c0Penalty = float4(p.c0Penalty.xy, r.penalty.xy);
-        _ContactPoints[first + k].penaltyLambda = float4(r.penalty.z, r.lambda);
+        _ContactPoints[first + k].c0Penalty = float4(p.c0Penalty.xy, penalty.xy);
+        _ContactPoints[first + k].penaltyLambda = float4(penalty.z, lambda);
     }
-    _ContactPairs[slot].ident = uint4(pair.ident.xyz, mark | stick);
+    _ContactPairs[slot].ident = uint4(pair.ident.xyz, (mark << AVBD_CONTACT_MARK_SHIFT) | stick);
 }

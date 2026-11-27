@@ -51,7 +51,8 @@ namespace McKrill.Avbd
         /// 30 iterations that is 1 dual dispatch instead of 30, and 29 fewer reads of every joint record and of both of its poses. The result is the same as
         /// without, to rounding (a joint that no solved body touches, such as one between two static bodies, gets all its updates in the last dispatch, one
         /// after the other). It adds the update to the register-bound primal kernel, so it is a switch: compare both in a GPU trace. Takes effect at the
-        /// next step. Contacts are not affected (<see cref="DispatchDualContacts"/> still runs after every sweep).
+        /// next step. The contacts do the same: the first solved body of a manifold runs the dual update of its points in the stamp, and marks the pair in
+        /// <c>ident.w</c> (above the stick bits); <c>DualContact</c> runs once after the last sweep instead of after every one.
         /// </summary>
         public bool FuseDualUpdate { get; set; } = true;
 
@@ -254,7 +255,7 @@ namespace McKrill.Avbd
             }
             DispatchConstraintInit();
             DispatchSolveHeader();
-            bool fused = FuseDualUpdate && constraints.RecordCount > 0;
+            bool fused = FuseDualUpdate && (constraints.RecordCount > 0 || constraints.HasContacts);
             lastDualSweep = 0u;
             bool track = ConvergenceTolerance > 0f && settings.iterations > MinAdaptiveIterations && settings.iterations <= MaxAdaptiveIterations;
             int iterations = track ? ChooseIterations(disturbed) : settings.iterations;
@@ -269,12 +270,14 @@ namespace McKrill.Avbd
                 sweepToTrack = track ? (uint)it : uint.MaxValue;
                 DispatchPrimalSweep(fused, fused && it > 0); // the first sweep has no dual update before it
                 if (!fused)
+                {
                     DispatchDual();
-                DispatchDualContacts();
+                    DispatchDualContacts(false);
+                }
             }
             sweepToTrack = uint.MaxValue;
             if (fused && iterations > 0)
-                DispatchFinalDual(); // the update of the last sweep, which no sweep follows, and the marks of the sweeps
+                DispatchFinalDual(); // the update of the last sweep, which no sweep follows, and the marks of the sweeps (of joints and of contacts)
             finalUpdates = -1;
             if (track)
                 RequestConvergence(iterations);
@@ -685,19 +688,25 @@ namespace McKrill.Avbd
         // Stage D, after every primal sweep: multiplier, penalty and fracture update of every joint.
         internal void DispatchDual()
         {
-            shaders.Dual.SetInt(ClearMarksId, 0);
-            DispatchConstraintKernel(dualKernel);
+            DispatchConstraintKernel(dualKernel, false);
+        }
+
+        // The words that make a dispatch of the Dual or DualContact kernel the last one of a step that fused the dual update (or not): see DispatchFinalDual.
+        void SetFinalDualUniforms(bool final)
+        {
+            ComputeShader shader = shaders.Dual;
+            shader.SetInt(ClearMarksId, final ? 1 : 0);
+            shader.SetInt(LastSweepId, final ? (int)lastDualSweep : 0);
+            shader.SetInt(FinalUpdatesId, final ? (finalUpdates >= 0 ? finalUpdates : settings.iterations) : 0);
         }
 
         // Stage D, after the last sweep of a step that fused the update into the sweeps: the update of that last sweep, the clearing of the marks the sweeps
-        // left in the records, and for a joint that no sweep touched (no solved body is on it) the updates of all the iterations.
+        // left in the records and in the contact pairs, and for a joint or a manifold that no sweep touched (no solved body is on it) the updates of all the
+        // iterations. Joints first, then contacts: they do not depend on each other.
         internal void DispatchFinalDual()
         {
-            ComputeShader shader = shaders.Dual;
-            shader.SetInt(ClearMarksId, 1);
-            shader.SetInt(LastSweepId, (int)lastDualSweep);
-            shader.SetInt(FinalUpdatesId, finalUpdates >= 0 ? finalUpdates : settings.iterations);
-            DispatchConstraintKernel(dualKernel);
+            DispatchConstraintKernel(dualKernel, true);
+            DispatchDualContacts(true);
         }
 
         // Stage B: with contacts it is created at the first step, with capacities that go with the contact capacity. Runs on the poses of the end
@@ -758,14 +767,16 @@ namespace McKrill.Avbd
 
         static uint NpArgsOffset(int entry) => (uint)(entry * AvbdIndirect.ArgsStride);
 
-        // Stage D for the contacts, after every primal sweep: one thread per manifold slot below the pool's high-water mark (a free slot skips), which
-        // updates the points of its pair. Dispatched indirectly with the arguments the narrow phase of this step planned.
-        internal void DispatchDualContacts()
+        // Stage D for the contacts, after every primal sweep (or, for a step that fused the update into the sweeps, once after the last: `final`, see
+        // DispatchFinalDual): one thread per manifold slot below the pool's high-water mark (a free slot skips), which updates the points of its pair.
+        // Dispatched indirectly with the arguments the narrow phase of this step planned.
+        internal void DispatchDualContacts(bool final = false)
         {
             if (constraints == null || !constraints.HasContacts)
                 return;
 
             ComputeShader shader = shaders.Dual;
+            SetFinalDualUniforms(final);
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, dualContactKernel);
             shader.SetBuffer(dualContactKernel, ContactPairsId, constraints.ContactPairsBuffer);
@@ -776,12 +787,14 @@ namespace McKrill.Avbd
         }
 
         // One thread per constraint. Constraints are independent, so there is no coloring and one dispatch covers them all.
-        void DispatchConstraintKernel(int kernel)
+        void DispatchConstraintKernel(int kernel, bool final = false)
         {
             if (constraints == null || constraints.RecordCount == 0)
                 return;
 
             ComputeShader shader = shaders.Dual;
+            if (kernel == dualKernel)
+                SetFinalDualUniforms(final);
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, kernel);
             shader.SetBuffer(kernel, RecordsId, constraints.Records);

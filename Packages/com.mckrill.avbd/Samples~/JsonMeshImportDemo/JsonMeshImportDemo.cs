@@ -123,7 +123,7 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Min(1e-3f)] float penaltyMax = 1e10f;
         [Tooltip("The most steps run in one frame; a frame that needs more runs slower than real time.")]
         [SerializeField, Range(1, 4)] int maxStepsPerFrame = 2;
-        [Tooltip("Run the dual update of the joints inside the primal sweeps and once more after the last one (AvbdSolver.FuseDualUpdate), instead of a dispatch after every sweep. The same result; compare the frame time of both.")]
+        [Tooltip("Run the dual update of the joints and the contacts inside the primal sweeps and once more after the last one (AvbdSolver.FuseDualUpdate), instead of a dispatch after every sweep. The same result; compare the frame time of both.")]
         [SerializeField] bool fuseDualUpdate = true;
         [Tooltip("Run only as many sweeps as the last steps needed (AvbdSolver.ConvergenceTolerance): the GPU records the largest step of each sweep and the answer arrives a few frames late. Off = every step runs all iterations. The tolerance is in meters and radians.")]
         [SerializeField] bool adaptiveIterations = false;

@@ -32,7 +32,7 @@ The project needs a render pipeline that draws a `Universal Render Pipeline/Lit`
 | --- | --- |
 | Shot: speed, size, mass | The box that a click fires (a voxel weighs 0.25 kg) |
 | Iterations | Solver iterations per step, 1 to 30 (25 in the test). Takes effect at the next step |
-| Fuse the dual update | `AvbdSolver.FuseDualUpdate`: the dual update of the joints runs inside the next primal sweep. The same result with fewer dispatches; switch it to compare frame times |
+| Fuse the dual update | `AvbdSolver.FuseDualUpdate`: the dual update of the joints and the contacts runs inside the next primal sweep. The same result with fewer dispatches; switch it to compare frame times |
 | Speed of each object | 0 to 60 m/s, default 25 (twice that head-on). **Reset to apply** |
 | Skin | 1 to 4 voxels (0.2 to 0.8 m). 2 is the test's scene (34 880 voxels, 241 872 joints); 1 has 19 264 voxels and 92 592 joints, 3 has 46 304 and 352 864, 4 has 53 760 and 428 528. **Reset to apply** |
 | Plastic yield, Linear fracture, Linear yield | The joint options of the test. The thresholds are serialized fields of the component (**Reset to apply**) |
