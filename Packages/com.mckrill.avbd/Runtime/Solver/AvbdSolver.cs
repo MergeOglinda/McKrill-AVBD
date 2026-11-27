@@ -1,5 +1,6 @@
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace McKrill.Avbd
 {
@@ -51,6 +52,39 @@ namespace McKrill.Avbd
         /// </summary>
         public bool FuseDualUpdate { get; set; } = true;
 
+        /// <summary>
+        /// Adaptive number of sweeps, off at 0 (default): every step runs <see cref="AvbdSolverSettings.iterations"/> sweeps. Above 0 the GPU records the
+        /// largest step that any body takes in each sweep (in meters or radians, whichever is larger), the numbers come back a few frames late like the
+        /// ray cast's answer (no wait), and a step runs only as many sweeps as the last answer needed: up to and including the first sweep whose largest step
+        /// was within this tolerance, plus <see cref="AdaptiveMargin"/>, at least <see cref="MinAdaptiveIterations"/> and at most the iterations of the
+        /// settings. If the last sweep of that step was still above the tolerance, the step runs them all. A step with edits, explosions or constraint changes
+        /// runs them all, and so does the next one. Because of the delay the first steps of an impact run with the count of the quiet steps before it: it is
+        /// a trade of accuracy in those steps for the time of the quiet ones, so raise the margin or the minimum if contacts look soft at the start of a
+        /// collision. The multipliers and penalties are those of the sweeps that ran, as with fewer iterations in the settings. Ignored with more than
+        /// <see cref="MaxAdaptiveIterations"/> iterations. Takes effect at the next step.
+        /// </summary>
+        public float ConvergenceTolerance { get; set; }
+
+        /// <summary>Sweeps run after the first one that is within the tolerance (see <see cref="ConvergenceTolerance"/>). Default 1.</summary>
+        public int AdaptiveMargin { get; set; } = 1;
+
+        /// <summary>The fewest sweeps an adaptive step runs (see <see cref="ConvergenceTolerance"/>). Default 3.</summary>
+        public int MinAdaptiveIterations { get; set; } = 3;
+
+        /// <summary>The most iterations that are tracked: with more, <see cref="ConvergenceTolerance"/> is ignored.</summary>
+        public const int MaxAdaptiveIterations = 64;
+
+        /// <summary>The number of sweeps the last <see cref="Step"/> ran (the iterations of the settings unless <see cref="ConvergenceTolerance"/> shortened it).</summary>
+        public int LastIterations { get; private set; }
+
+        GraphicsBuffer convergenceBuffer;               // MaxAdaptiveIterations words: the largest step of every sweep of a step (the bits of a float)
+        float[] convergenceHistory = new float[MaxAdaptiveIterations]; // what the last answer says, per sweep
+        int convergenceSweeps;                          // the number of sweeps the answer is about, 0 = none yet
+        int convergenceEpoch;                           // changes when an answer in flight should be thrown away
+        int convergenceInFlight;
+        uint sweepToTrack = uint.MaxValue;              // the word of the buffer that the next sweep records into (none: uint.MaxValue)
+        int finalUpdates = -1;                          // the iterations of the step that DispatchFinalDual passes on, -1 = those of the settings
+
         // Keyword of the variants of the primal and dual shaders that read the plastic array (AvbdPlasticRecords.hlsl).
         const string PlasticKeyword = "AVBD_PLASTIC_JOINTS";
         // Keyword of the variant of the primal shader that runs the dual update of the joints itself (see FuseDualUpdate).
@@ -63,6 +97,8 @@ namespace McKrill.Avbd
         static readonly int ColorWorkId = Shader.PropertyToID("_ColorWork");
         static readonly int ColorId = Shader.PropertyToID("_Color");
         static readonly int DualSweepId = Shader.PropertyToID("_DualSweep");
+        static readonly int ConvergenceId = Shader.PropertyToID("_Convergence");
+        static readonly int TrackSweepId = Shader.PropertyToID("_TrackSweep");
         static readonly int ClearMarksId = Shader.PropertyToID("_ClearMarks");
         static readonly int LastSweepId = Shader.PropertyToID("_LastSweep");
         static readonly int FinalUpdatesId = Shader.PropertyToID("_FinalUpdates");
@@ -189,14 +225,17 @@ namespace McKrill.Avbd
         /// </summary>
         public void Step()
         {
-            bodies.ApplyEdits();
+            bool disturbed = bodies.ApplyEdits() > 0 || pendingExplosionCount > 0 || forceFieldsDirty;
             if (constraints == null)
             {
                 constraints = new AvbdConstraintBuffers(bodies, 1, shaders);
                 ownsConstraints = true;
             }
             if (constraints.NeedsRebuild)
+            {
                 constraints.Rebuild();
+                disturbed = true;
+            }
 
             // Stage B, on the poses of the end of the previous step, like the reference solver's broadphase.
             DispatchBroadphase();
@@ -212,16 +251,82 @@ namespace McKrill.Avbd
             DispatchSolveHeader();
             bool fused = FuseDualUpdate && constraints.RecordCount > 0;
             lastDualSweep = 0u;
-            for (int it = 0; it < settings.iterations; it++)
+            bool track = ConvergenceTolerance > 0f && settings.iterations > MinAdaptiveIterations && settings.iterations <= MaxAdaptiveIterations;
+            int iterations = track ? ChooseIterations(disturbed) : settings.iterations;
+            if (!track)
+                convergenceSweeps = 0; // an answer about another number of sweeps does not apply any more
+            if (track)
+                ClearConvergence(iterations);
+            LastIterations = iterations;
+            finalUpdates = iterations;
+            for (int it = 0; it < iterations; it++)
             {
+                sweepToTrack = track ? (uint)it : uint.MaxValue;
                 DispatchPrimalSweep(fused, fused && it > 0); // the first sweep has no dual update before it
                 if (!fused)
                     DispatchDual();
                 DispatchDualContacts();
             }
-            if (fused && settings.iterations > 0)
+            sweepToTrack = uint.MaxValue;
+            if (fused && iterations > 0)
                 DispatchFinalDual(); // the update of the last sweep, which no sweep follows, and the marks of the sweeps
+            finalUpdates = -1;
+            if (track)
+                RequestConvergence(iterations);
             DispatchVelocity();
+        }
+
+        // The number of sweeps of this step from the last answer about the largest step of each sweep (see ConvergenceTolerance).
+        int ChooseIterations(bool disturbed)
+        {
+            int full = settings.iterations;
+            if (disturbed)
+            {
+                convergenceEpoch++; // answers about the steps before the change do not say how this one converges
+                convergenceSweeps = 0;
+                return full;
+            }
+            int sweeps = convergenceSweeps;
+            if (sweeps <= 0 || convergenceHistory[sweeps - 1] > ConvergenceTolerance)
+                return full; // no answer yet, or the step it is about had not settled by its last sweep
+            int first = 0;
+            while (first < sweeps && convergenceHistory[first] > ConvergenceTolerance)
+                first++;
+            int wanted = first + 1 + Mathf.Max(0, AdaptiveMargin);
+            return Mathf.Clamp(wanted, Mathf.Min(MinAdaptiveIterations, full), full);
+        }
+
+        void ClearConvergence(int sweeps)
+        {
+            if (convergenceBuffer == null)
+            {
+                convergenceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, MaxAdaptiveIterations, sizeof(uint));
+                convergenceBuffer.SetData(new uint[MaxAdaptiveIterations]);
+            }
+            else
+                convergenceBuffer.SetData(new uint[sweeps], 0, 0, sweeps);
+        }
+
+        // After the sweeps: asks for the words the sweeps filled. The answer arrives a few frames later and is used by ChooseIterations; one that was asked
+        // for before a disturbance (or before the buffer was released) is dropped.
+        void RequestConvergence(int sweeps)
+        {
+            if (convergenceBuffer == null || convergenceInFlight >= 4)
+                return;
+            GraphicsBuffer buffer = convergenceBuffer;
+            int epoch = convergenceEpoch;
+            convergenceInFlight++;
+            AsyncGPUReadback.Request(buffer, sweeps * sizeof(uint), 0, request =>
+            {
+                convergenceInFlight--;
+                if (convergenceBuffer != buffer || epoch != convergenceEpoch || request.hasError)
+                    return;
+                Unity.Collections.NativeArray<uint> words = request.GetData<uint>();
+                int count = Mathf.Min(sweeps, words.Length);
+                for (int i = 0; i < count; i++)
+                    convergenceHistory[i] = math.asfloat(words[i]);
+                convergenceSweeps = count;
+            });
         }
 
         /// <summary>
@@ -408,6 +513,10 @@ namespace McKrill.Avbd
             forceFieldBuffer = null;
             forceFieldAccumBuffer?.Release();
             forceFieldAccumBuffer = null;
+            convergenceBuffer?.Release();
+            convergenceBuffer = null;
+            convergenceEpoch++;
+            convergenceSweeps = 0;
             if (ownsConstraints)
                 constraints.Dispose();
             constraints = null;
@@ -529,6 +638,13 @@ namespace McKrill.Avbd
             shader.SetBuffer(primalKernel, ColorBodiesId, constraints.ColorBodies);
             shader.SetBuffer(primalKernel, ColorWorkId, constraints.ColorWork);
             shader.SetBuffer(primalKernel, StatusId, constraints.Status);
+            if (convergenceBuffer == null)
+            {
+                convergenceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, MaxAdaptiveIterations, sizeof(uint));
+                convergenceBuffer.SetData(new uint[MaxAdaptiveIterations]);
+            }
+            shader.SetBuffer(primalKernel, ConvergenceId, convergenceBuffer); // only written when sweepToTrack names a word
+            shader.SetInt(TrackSweepId, unchecked((int)sweepToTrack));
 
             for (int color = 0; color < constraints.ColorCount; color++)
             {
@@ -570,7 +686,7 @@ namespace McKrill.Avbd
             ComputeShader shader = shaders.Dual;
             shader.SetInt(ClearMarksId, 1);
             shader.SetInt(LastSweepId, (int)lastDualSweep);
-            shader.SetInt(FinalUpdatesId, settings.iterations);
+            shader.SetInt(FinalUpdatesId, finalUpdates >= 0 ? finalUpdates : settings.iterations);
             DispatchConstraintKernel(dualKernel);
         }
 
