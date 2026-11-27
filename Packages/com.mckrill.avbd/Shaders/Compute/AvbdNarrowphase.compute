@@ -203,10 +203,13 @@ void NpAllocate(uint3 id : SV_DispatchThreadID)
     // A candidate is a pair of overlapping bounding spheres, far more often than a pair of touching boxes: only a pair whose boxes collide takes a
     // slot, or the slots would be spent on candidates that the next kernel frees again. (The collision is computed twice for a new pair, once
     // here and once in Narrowphase; pairs that have a slot are only collided there.)
+    // The shape kinds come with the pair (AVBD_PAIR_SPHERE_*), so that a pair does not read _BodyFlags here. Two spheres are not collided: the broadphase
+    // passed the pair with the test that this one repeats (the distance of the centers against the sum of the radii, on the same poses), so the slot is
+    // taken for it, and if rounding made the two disagree, Narrowphase frees the slot again, as for any pair that has one.
+    if ((pairWord.w & (AVBD_PAIR_SPHERE_A | AVBD_PAIR_SPHERE_B)) != (AVBD_PAIR_SPHERE_A | AVBD_PAIR_SPHERE_B))
     {
         BodyStateRecord stateA = _BodyState[bodies.x];
         BodyStateRecord stateB = _BodyState[bodies.y];
-        // The shape kinds come with the pair (AVBD_PAIR_SPHERE_*), so that a pair does not read _BodyFlags here.
         uint kindA = (pairWord.w & AVBD_PAIR_SPHERE_A) != 0u ? AVBD_KIND_SPHERE : AVBD_KIND_BOX;
         uint kindB = (pairWord.w & AVBD_PAIR_SPHERE_B) != 0u ? AVBD_KIND_SPHERE : AVBD_KIND_BOX;
         if (AvbdCollideShapes(kindA, stateA.startPosition.xyz, stateA.startRotation, _BodyShape[bodies.x].sizeFriction.xyz,
