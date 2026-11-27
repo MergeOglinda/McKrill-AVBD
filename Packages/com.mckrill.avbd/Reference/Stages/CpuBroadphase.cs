@@ -34,7 +34,7 @@ namespace McKrill.Avbd.Reference
         }
 
         /// <summary>True if the body is a sphere (the shape kind in the flags word).</summary>
-        public static bool IsSphere(CpuBodyArrays bodies, int slot) => BodyFlagLayout.KindOf(bodies.Meta[slot].ident.x) == ShapeKind.Sphere;
+        public static bool IsSphere(CpuBodyArrays bodies, int slot) => BodyFlagLayout.KindOf(bodies.Flags[slot]) == ShapeKind.Sphere;
 
         /// <summary>The radius of the bounding sphere: half the diagonal of a box, the radius of a sphere (half of size.x, its diameter).</summary>
         public static float Radius(CpuBodyArrays bodies, int slot)
