@@ -68,3 +68,21 @@ Instead of `-Candidate`, `-TargetCommit` takes the last commit of a range. The b
 - Each candidate gets its own `-Runs` runs (and its own `-Warmup`), and the baseline is run again next to each one, so that a drift of the machine between candidates does not move a comparison. The cost is `-Runs` times two suite runs per commit.
 - Each candidate's results are in `<OutRoot>\<timestamp>\NN-<commit>\`, laid out as for a single comparison (`baseline`, `candidate`, `meta.json`, `comparison.csv`). `range.json` in `<timestamp>` lists the commits with the status of each (`pending`, `ok`, `problems`) and is updated after every candidate.
 - A commit in the middle of a range may not build. That candidate is reported (and makes the exit code 1) and the range goes on with the next commit.
+
+#### Each commit against the one before: `-CompareConsecutive`
+
+```
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -TargetCommit 5555555 -CompareConsecutive [-Runs 8] [-Warmup]
+```
+
+With `-CompareConsecutive` (only together with `-TargetCommit`) every commit of the range is compared with the commit before it instead of with the baseline, so each result is the effect of one commit. The call above does the same as:
+
+```
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -Candidate 3333333
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 3333333 -Candidate 4444444
+.\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 4444444 -Candidate 5555555
+```
+
+- "The commit before" is the previous commit in the listed range (see above), which in a range with a merge is not always the parent. The first candidate's baseline is `-Baseline`.
+- Every comparison runs both sides, so a commit in the middle is run twice (once as a candidate, once as a baseline) and the cost is `-Runs` times two suite runs per commit. `range.json` has `compareConsecutive` and the `baseline` of every commit; `meta.json` of each folder names the baseline commit of that comparison.
+- If a commit does not build, the comparison after it has a baseline that does not build either and is reported as well.

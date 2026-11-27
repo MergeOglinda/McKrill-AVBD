@@ -30,8 +30,20 @@
     in it too). With the commits 1111111 (oldest), 2222222, 3333333, 4444444 and 5555555 (newest), "-Baseline 2222222 -TargetCommit 5555555" does the same
     as three invocations with "-Baseline 2222222 -Candidate X" for X = 3333333, 4444444 and 5555555: each candidate gets its own -Runs runs, and the baseline
     is run again next to each of them (so a drift of the machine between candidates does not move the comparisons), with its own warm-up if -Warmup is
-    given. The baseline must be an ancestor of the target. A candidate that does not build or run is reported and the range goes on with the next commit.
+    given. The baseline must be an ancestor of the target. (With -CompareConsecutive the baseline changes from candidate to candidate, see there.) A candidate that does not build or run is reported and the range goes on with the next commit.
     The results of the candidates are in the folders <OutRoot>\<timestamp>\NN-<commit>\, each laid out as below, and range.json lists them.
+
+.PARAMETER CompareConsecutive
+    Only with -TargetCommit. Every commit of the range is compared with the commit before it, not with the baseline: the baseline of the first candidate is
+    -Baseline, and the baseline of every later one is the candidate before it. With the commits 1111111 (oldest), 2222222, 3333333, 4444444 and 5555555
+    (newest), "-Baseline 2222222 -TargetCommit 5555555 -CompareConsecutive" does the same as these three invocations:
+        -Baseline 2222222 -Candidate 3333333
+        -Baseline 3333333 -Candidate 4444444
+        -Baseline 4444444 -Candidate 5555555
+    so the result of each folder is the effect of one commit. "Before" is the previous commit of the range as listed (see -TargetCommit); in a range with
+    merged branches that is the one listed before, which is not always its parent. Each comparison runs both sides (-Runs each, with -Warmup if given), so
+    the commits in the middle are run twice. A commit that does not build or run is reported, and the range goes on: the next comparison then has a
+    baseline that does not build either and is reported too.
 
 .PARAMETER Runs
     Result files per side (default 8). Each is a run of the whole suite, which is what multi_compare_perf.py expects.
@@ -75,6 +87,9 @@
     .\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -TargetCommit 5555555 -Runs 4
 
 .EXAMPLE
+    .\Tools\PerfCompare\run_perf_ab.ps1 -Baseline 2222222 -TargetCommit 5555555 -CompareConsecutive -Runs 4
+
+.EXAMPLE
     .\Tools\PerfCompare\run_perf_ab.ps1 -Baseline origin/gpu-trace-dual-primal -Candidate origin/primal-lds-accumulate -Runs 4 -Warmup `
         -TestFilter "Scenario5_BrickRing110k"
 #>
@@ -83,6 +98,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Baseline,
     [Parameter(Mandatory = $true, ParameterSetName = 'Single')][string]$Candidate,
     [Parameter(Mandatory = $true, ParameterSetName = 'Range')][string]$TargetCommit,
+    [Parameter(ParameterSetName = 'Range')][switch]$CompareConsecutive,
     [int]$Runs = 8,
     [string]$RepoPath,
     [string]$WorkRoot,
@@ -369,18 +385,22 @@ else {
     for ($i = 0; $i -lt $range.Count; $i++) {
         $sha = $range[$i]
         $subject = (Invoke-Git $RepoPath @('log', '-1', '--format=%h %s', $sha) | Select-Object -First 1).Trim()
+        # The commit that this one is compared with: the baseline, or with -CompareConsecutive the commit before it.
+        $compareWith = if ($CompareConsecutive -and $i -gt 0) { $range[$i - 1] } else { $baselineSha }
         $entries += [pscustomobject]@{
-            index   = $i + 1
-            commit  = $sha
+            index    = $i + 1
+            baseline = $compareWith
+            commit   = $sha
             subject = $subject
             folder  = ('{0:D2}-{1}' -f ($i + 1), $sha.Substring(0, 9))
             status  = 'pending'
         }
     }
     [ordered]@{
-        baseline = $baselineSha
-        target   = $targetSha
-        commits  = $entries
+        baseline           = $baselineSha
+        target             = $targetSha
+        compareConsecutive = [bool]$CompareConsecutive
+        commits            = $entries
     } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'range.json') -Encoding UTF8
 
     Write-Step ('{0} candidate commit(s) between {1} (not included) and {2} (included):' -f $entries.Count, $baselineSha.Substring(0, 9), $targetSha.Substring(0, 9))
@@ -389,10 +409,11 @@ else {
     foreach ($entry in $entries) {
         Write-Host ''
         Write-Step ('=== candidate {0}/{1}: {2}' -f $entry.index, $entries.Count, $entry.subject)
+        if ($CompareConsecutive) { Write-Step ('    against {0}' -f $entry.baseline.Substring(0, 9)) }
         $candidateFailures = New-Object 'System.Collections.Generic.List[string]'
         try {
-            $info = [ordered]@{ index = $entry.index; count = $entries.Count; baselineCommit = $baselineSha; targetCommit = $targetSha }
-            Invoke-Comparison $baselineSha $entry.commit (Join-Path $outDir $entry.folder) $candidateFailures $info
+            $info = [ordered]@{ index = $entry.index; count = $entries.Count; baselineCommit = $entry.baseline; targetCommit = $targetSha }
+            Invoke-Comparison $entry.baseline $entry.commit (Join-Path $outDir $entry.folder) $candidateFailures $info
         }
         catch {
             # A commit in the middle of a range may not build; the next one can.
@@ -402,7 +423,7 @@ else {
         $entry.status = if ($candidateFailures.Count -eq 0) { 'ok' } else { 'problems' }
         foreach ($problem in $candidateFailures) { $failures.Add(('{0}: {1}' -f $entry.subject, $problem)) }
         # Kept up to date, so that a range that is stopped halfway still says how far it got.
-        [ordered]@{ baseline = $baselineSha; target = $targetSha; commits = $entries } |
+        [ordered]@{ baseline = $baselineSha; target = $targetSha; compareConsecutive = [bool]$CompareConsecutive; commits = $entries } |
             ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'range.json') -Encoding UTF8
     }
 
