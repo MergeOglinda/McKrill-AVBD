@@ -279,8 +279,11 @@ namespace McKrill.Avbd
     /// </summary>
     internal static class ContactLayout
     {
-        /// <summary>Contacts per manifold (the reference solver's MAX_CONTACTS).</summary>
+        /// <summary>Contacts per manifold (the reference solver's MAX_CONTACTS). The stick bits of a pair are bits 0 to 7 of its <c>ident.w</c>, so this cannot be more than <see cref="StickBits"/>.</summary>
         public const int MaxContactsPerPair = 8;
+
+        /// <summary>The number of low bits of a pair's <c>ident.w</c> that hold its stick flags (<c>AVBD_CONTACT_STICK_MASK</c>). The bits above are the mark of the fused dual update.</summary>
+        public const int StickBits = 8;
 
         /// <summary>Distance added to the normal row of every contact's initial constraint value.</summary>
         public const float CollisionMargin = 0.01f;

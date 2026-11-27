@@ -38,7 +38,10 @@ namespace McKrill.Avbd
         readonly int npAllocateKernel = -1;
         readonly int dualContactKernel = -1;
         AvbdSolverSettings settings;
-        uint dualSweepCounter; // ids of the sweeps that run a fused dual update: 1, 2, ..., never 0 (see DispatchPrimalSweep)
+        /// <summary>The largest id of a sweep that runs a fused dual update. It must fit the mark of a contact pair (<c>AVBD_CONTACT_MARK_MASK</c>, 24 bits above the stick bits); the ids count up and wrap to 1.</summary>
+        internal const uint MaxSweepId = ContactCodec.MarkMask;
+
+        uint dualSweepCounter; // ids of the sweeps that run a fused dual update: 1, 2, ..., MaxSweepId, never 0 (see DispatchPrimalSweep)
         uint lastDualSweep;    // the id of the last of them in this step, 0 if the step has none
 
         /// <summary>
@@ -622,8 +625,9 @@ namespace McKrill.Avbd
             if (fusedDual && dualOfPreviousSweep)
             {
                 // A joint that a sweep has updated holds this id, so the next sweep does not take it for updated. The marks are cleared at the end of every
-                // step, so a wrap-around cannot meet an old one; ids stay below 2^31 (the mark is a float word, and a NaN is better avoided).
-                dualSweepCounter = dualSweepCounter >= 0x7FFFFFFFu ? 1u : dualSweepCounter + 1u;
+                // step, so a wrap-around cannot meet an old one. The ids fit the 24 bits of the mark of a contact pair (and a joint's mark is a float word, so they
+                // keep clear of the exponent bits that make a NaN).
+                dualSweepCounter = dualSweepCounter >= MaxSweepId ? 1u : dualSweepCounter + 1u;
                 sweepId = dualSweepCounter;
                 lastDualSweep = sweepId;
             }

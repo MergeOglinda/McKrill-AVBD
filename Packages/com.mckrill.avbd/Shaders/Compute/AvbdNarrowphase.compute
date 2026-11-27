@@ -226,7 +226,7 @@ void Narrowphase(uint3 id : SV_DispatchThreadID)
     uint b = pair.y;
 
     uint oldCount = pair.z;
-    uint oldStick = pair.w;
+    uint oldStick = pair.w & AVBD_CONTACT_STICK_MASK; // the mark of the fused dual update (above the stick bits) is not carried over
     if (oldCount > AVBD_MAX_CONTACTS)
         oldCount = 0u;
 

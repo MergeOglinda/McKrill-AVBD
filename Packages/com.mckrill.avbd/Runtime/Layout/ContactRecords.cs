@@ -73,6 +73,18 @@ namespace McKrill.Avbd
 
         public static bool Stick(in ContactPairRecord pair, int k) => (pair.ident.w & (1u << k)) != 0u;
 
+        /// <summary>The stick bits of a pair: <c>ident.w</c> without the mark of the fused dual update.</summary>
+        public static uint StickBits(in ContactPairRecord pair) => pair.ident.w & StickMask;
+
+        /// <summary>The id of the sweep that ran the dual update of this pair (<c>AVBD_FUSED_DUAL</c>), 0 if no sweep did. It is 0 outside a step.</summary>
+        public static uint Mark(in ContactPairRecord pair) => pair.ident.w >> ContactLayout.StickBits;
+
+        /// <summary><c>ident.w</c> of a pair with these stick bits and this mark.</summary>
+        public static uint PackIdentW(uint stickBits, uint mark) => (mark << ContactLayout.StickBits) | (stickBits & StickMask);
+
+        public const uint StickMask = (1u << ContactLayout.StickBits) - 1u;
+        public const uint MarkMask = 0xFFFFFFu;
+
         /// <summary>The contact in the form the CPU oracle stores: one <see cref="ConstraintRecord"/> per point.</summary>
         public static ConstraintRecord ToRecord(in ContactPairRecord pair, in ContactPointRecord point, int k)
         {

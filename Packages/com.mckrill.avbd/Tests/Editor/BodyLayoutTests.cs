@@ -402,12 +402,34 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(ContactRecordStrides.Point, UnsafeUtility.SizeOf<ContactPointRecord>());
             Assert.AreEqual(0, ContactRecordStrides.Pair % 32, "a pair record is a multiple of 32 B");
             Assert.AreEqual(0, ContactRecordStrides.Point % 32, "a point record is a multiple of 32 B");
-            Assert.LessOrEqual(ContactLayout.MaxContactsPerPair, 32, "the stick bits fit in the w word of the pair");
+            Assert.LessOrEqual(ContactLayout.MaxContactsPerPair, ContactLayout.StickBits, "the stick bits fit in the low bits of the w word of the pair, below the mark");
 
             string text = ReadInclude("AvbdContactRecords.hlsl");
             AssertStructMatches(text, "ContactPairRecord", typeof(ContactPairRecord));
             AssertStructMatches(text, "ContactPointRecord", typeof(ContactPointRecord));
-            Assert.AreEqual(0xFFu, ReadDefines("AvbdContactRecords.hlsl")["AVBD_CONTACT_STICK_MASK"]);
+            Dictionary<string, uint> defines = ReadDefines("AvbdContactRecords.hlsl");
+            Assert.AreEqual(0xFFu, defines["AVBD_CONTACT_STICK_MASK"]);
+            Assert.AreEqual(ContactCodec.StickMask, defines["AVBD_CONTACT_STICK_MASK"]);
+            Assert.AreEqual((uint)ContactLayout.StickBits, defines["AVBD_CONTACT_MARK_SHIFT"]);
+            Assert.AreEqual(ContactCodec.MarkMask, defines["AVBD_CONTACT_MARK_MASK"]);
+            Assert.AreEqual(32, ContactLayout.StickBits + 24, "the stick bits and the mark fill the w word of the pair");
+        }
+
+        [Test]
+        public void ContactPair_MarkSitsAboveTheStickBits()
+        {
+            uint w = ContactCodec.PackIdentW(0b10100101u, 0xFFFFFFu);
+            var pair = new ContactPairRecord { ident = new uint4(7u, 3u, 8u, w) };
+            Assert.AreEqual(0b10100101u, ContactCodec.StickBits(pair));
+            Assert.AreEqual(0xFFFFFFu, ContactCodec.Mark(pair));
+            for (int k = 0; k < ContactLayout.MaxContactsPerPair; k++)
+                Assert.AreEqual((0b10100101u & (1u << k)) != 0u, ContactCodec.Stick(pair, k), "stick bit " + k + " does not see the mark");
+
+            // ToRecord (what the tests compare with the oracle) does not see the mark either.
+            ContactPointRecord point = ContactCodec.Make(float3.zero, float3.zero, 1, float3.zero, float3.zero, float3.zero);
+            pair.ident.w = ContactCodec.PackIdentW(0u, 5u);
+            Assert.AreEqual(ConstraintFlags.None, ConstraintFlagLayout.FlagsOf(ContactCodec.ToRecord(pair, point, 0).ident.z));
+            Assert.AreEqual(0u, ContactCodec.Mark(new ContactPairRecord { ident = new uint4(7u, 3u, 8u, 0xFFu) }), "stick bits alone are no mark");
         }
 
         [Test]

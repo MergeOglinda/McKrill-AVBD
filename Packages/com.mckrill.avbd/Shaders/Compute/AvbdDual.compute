@@ -221,7 +221,8 @@ void DualContact(uint3 id : SV_DispatchThreadID)
     float3x3 basis = AvbdContactBasis(pair.normalFriction.xyz);
     float friction = pair.normalFriction.w;
 
-    uint stick = pair.ident.w;
+    uint stick = pair.ident.w & AVBD_CONTACT_STICK_MASK;
+    uint mark = pair.ident.w & ~AVBD_CONTACT_STICK_MASK; // kept as it is
     uint first = slot * AVBD_MAX_CONTACTS;
     for (uint k = 0; k < count; k++)
     {
@@ -241,5 +242,5 @@ void DualContact(uint3 id : SV_DispatchThreadID)
         _ContactPoints[first + k].c0Penalty = float4(p.c0Penalty.xy, r.penalty.xy);
         _ContactPoints[first + k].penaltyLambda = float4(r.penalty.z, r.lambda);
     }
-    _ContactPairs[slot].ident = uint4(pair.ident.xyz, stick);
+    _ContactPairs[slot].ident = uint4(pair.ident.xyz, mark | stick);
 }

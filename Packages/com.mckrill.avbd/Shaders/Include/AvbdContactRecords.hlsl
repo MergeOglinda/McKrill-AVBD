@@ -8,13 +8,18 @@
 // _ContactPoints[s * AVBD_MAX_CONTACTS + k], k < the pair's count. What the two bodies, the normal and the friction share is stored once per pair, and the
 // primal and dual stages read the pair, then loop over its points.
 
-// The stick flag of every point of a pair: bit k of ident.w (Owner: stage D; stage N only carries it over to decide which anchors to keep).
+// ident.w of a pair record holds two things. The low bits are the stick flag of every point of the pair: bit k for point k (Owner: stage D; stage N only
+// carries it over to decide which anchors to keep). The bits above are the mark of the fused dual update (AVBD_FUSED_DUAL in AvbdPrimal.compute): the id of
+// the sweep whose first body of the pair already ran the dual update of the pair in that sweep, 0 if none did. The mark is only set between the first
+// sweep and the end of a step (the final dual update clears it), and the narrow phase writes a pair with a mark of 0. Every reader of ident.w masks.
 #define AVBD_CONTACT_STICK_MASK 0xFFu
+#define AVBD_CONTACT_MARK_SHIFT 8u
+#define AVBD_CONTACT_MARK_MASK  0xFFFFFFu // the ids of the sweeps that mark a pair are 1 to 0xFFFFFF (AvbdSolver.MaxSweepId)
 
 // 32 B.
 struct ContactPairRecord
 {
-    uint4  ident;          // x = body A (the higher slot), y = body B (AVBD_INVALID in both: a free slot), z = number of points, w = stick bits
+    uint4  ident;          // x = body A (the higher slot), y = body B (AVBD_INVALID in both: a free slot), z = number of points, w = stick bits | sweep mark << 8
     float4 normalFriction; // xyz = contact normal pointing from B to A, w = friction coefficient
 };
 
