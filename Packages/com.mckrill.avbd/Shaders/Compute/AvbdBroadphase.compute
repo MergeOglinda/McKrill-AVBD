@@ -230,8 +230,17 @@ BpBox MakeBpBox(uint slot, bool sphere)
     box.center = pose.position.xyz;
     box.halfSize = _BodyShape[slot].sizeFriction.xyz * 0.5;
     // A sphere is tested as the cube around it, along the world axes (its rotation changes nothing): its bounding box and its "face axes" are then
-    // exact for the world axes and a little too wide for the others, so a sphere is never rejected wrongly.
-    float4 rotation = sphere ? float4(0.0, 0.0, 0.0, 1.0) : pose.rotation;
+    // exact for the world axes and a little too wide for the others, so a sphere is never rejected wrongly. The axes of that cube are the unit vectors and its
+    // bounding box is its half size: no rotation to compute (the same numbers as rotating by the identity quaternion).
+    if (sphere)
+    {
+        box.axis0 = float3(1.0, 0.0, 0.0);
+        box.axis1 = float3(0.0, 1.0, 0.0);
+        box.axis2 = float3(0.0, 0.0, 1.0);
+        box.aabb = box.halfSize;
+        return box;
+    }
+    float4 rotation = pose.rotation;
     box.axis0 = AvbdQuatRotate(rotation, float3(1.0, 0.0, 0.0));
     box.axis1 = AvbdQuatRotate(rotation, float3(0.0, 1.0, 0.0));
     box.axis2 = AvbdQuatRotate(rotation, float3(0.0, 0.0, 1.0));
