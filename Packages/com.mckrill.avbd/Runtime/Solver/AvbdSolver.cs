@@ -89,6 +89,8 @@ namespace McKrill.Avbd
         const string PlasticKeyword = "AVBD_PLASTIC_JOINTS";
         // Keyword of the variant of the primal shader that runs the dual update of the joints itself (see FuseDualUpdate).
         const string FusedDualKeyword = "AVBD_FUSED_DUAL";
+        // Keyword of the variant of the primal shader without the spring stamp, for a constraint set that has no spring.
+        const string NoSpringsKeyword = "AVBD_NO_SPRINGS";
         static readonly int PlasticId = Shader.PropertyToID("_Plastic");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int FractureId = Shader.PropertyToID("_Fracture");
@@ -625,6 +627,10 @@ namespace McKrill.Avbd
                 sweepId = dualSweepCounter;
                 lastDualSweep = sweepId;
             }
+            if (constraints.HasSprings)
+                shader.DisableKeyword(NoSpringsKeyword);
+            else
+                shader.EnableKeyword(NoSpringsKeyword);
             shader.SetInt(DualSweepId, (int)sweepId);
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, primalKernel);

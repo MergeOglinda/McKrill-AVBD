@@ -22,6 +22,10 @@
 // the last sweep (AvbdDual.compute), for the sweep that has no sweep after it, and clears the marks.
 #pragma multi_compile_local _ AVBD_FUSED_DUAL
 
+// Compiled in when the constraint set has no spring (AvbdConstraintBuffers.HasSprings is false): every constraint entry that is not a manifold is a joint,
+// so the sweep does not decode the kind of the record, does not test it twice, and does not carry the code of the spring stamp.
+#pragma multi_compile_local _ AVBD_NO_SPRINGS
+
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdPlasticRecords.hlsl"
@@ -613,11 +617,16 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
                     entries[b0] = _ConstraintList[range.x + e + b0 * AVBD_PRIMAL_LANES];
             }
 
+            // Whether entry b is a manifold: decided once, here, and used by the load below and the stamp after it (a lane without an entry, which has
+            // entries[b] = 0, is not one, and its stamp is skipped by the range test).
+            bool isManifold[AVBD_PRIMAL_BATCH];
+
             [unroll]
             for (uint b1 = 0; b1 < AVBD_PRIMAL_BATCH; b1++)
             {
+                isManifold[b1] = (entries[b1] & AVBD_LIST_CONTACT_FLAG) != 0u;
                 records[b1] = (ConstraintRecord)0;
-                if (e + b1 * AVBD_PRIMAL_LANES < range.y && !(entries[b1] & AVBD_LIST_CONTACT_FLAG))
+                if (e + b1 * AVBD_PRIMAL_LANES < range.y && !isManifold[b1])
                     records[b1] = _Constraints[entries[b1]];
             }
 
@@ -627,7 +636,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
                 if (e + b2 * AVBD_PRIMAL_LANES < range.y)
                 {
                     uint entry = entries[b2];
-                    if (entry & AVBD_LIST_CONTACT_FLAG)
+                    if (isManifold[b2])
                     {
                         StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, position, rotation, sys);
                     }
@@ -635,11 +644,15 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
                     {
                         ConstraintRecord c = records[b2];
                         uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
+#if defined(AVBD_NO_SPRINGS)
+                        StampJoint(c, flags, entry, slot, position, rotation, sys);
+#else
                         uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
                         if (kind == AVBD_CONSTRAINT_KIND_JOINT)
                             StampJoint(c, flags, entry, slot, position, rotation, sys);
                         else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
                             StampSpring(c, slot, position, rotation, sys);
+#endif
                     }
                 }
             }

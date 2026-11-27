@@ -100,6 +100,7 @@ namespace McKrill.Avbd
         int recordCount;   // records in the CPU array
         int uploadedCount; // records already on the GPU
         bool topologyDirty;
+        int springsAdded;   // the springs ever enqueued (the records of a spring are never removed or turned into a joint)
         int builtSolvedSetVersion;
         int brokenCountVersion = -1; // list build that BrokenCount was last read for
         int brokenCount;
@@ -230,6 +231,12 @@ namespace McKrill.Avbd
         /// joint kernels that read it; without it they are the kernels of a solver that has no plastic joints.
         /// </summary>
         public bool HasPlasticJoints => plasticSlots > 0;
+
+        /// <summary>
+        /// Whether a spring has ever been added (also one that is still queued for the next rebuild). The solver runs the variant of the primal sweep without the
+        /// spring stamp while this is false.
+        /// </summary>
+        public bool HasSprings => springsAdded > 0;
 
         /// <summary>Number of joints that can be plastic.</summary>
         public int PlasticCapacity => plasticSlots;
@@ -705,6 +712,8 @@ namespace McKrill.Avbd
                 return -1;
             }
             pending.Add(spec);
+            if (spec.kind == ConstraintKind.Spring)
+                springsAdded++;
             topologyDirty = true;
             return Count - 1;
         }
