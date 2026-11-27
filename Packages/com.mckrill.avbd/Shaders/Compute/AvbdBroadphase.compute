@@ -535,7 +535,8 @@ BpProbe MakeProbe(uint slot, bool solved)
 }
 
 // `other` is a body of the grid or of the large list (live, finite position). Emits the pair if the tests pass. The tests nest, so that the box
-// tests are only evaluated for a pair whose spheres overlap, whether or not && short-circuits, and the lists only for a pair whose boxes touch.
+// tests are only evaluated for a pair whose spheres overlap, whether or not && short-circuits, and the lists only for a pair whose boxes touch (a pair of two
+// spheres has no box test, see below).
 void TestPair(BpProbe probe, uint other)
 {
     uint otherWord = _BodyCell[other].w;
@@ -547,7 +548,12 @@ void TestPair(BpProbe probe, uint other)
     bool otherSphere = (otherWord & AVBD_BP_SPHERE_FLAG) != 0u; // from the grid word: no flags read per candidate
     if (SpheresOverlap(probe.position, probe.radius, otherRecord.xyz, otherRecord.w))
     {
-        if (!BoxesSeparated(probe.box, MakeBpBox(other, otherSphere)))
+        // Two spheres: the sphere test above is the exact test of the narrow phase, and the box test could not reject a pair that passes it (the cube
+        // around a sphere contains the sphere, and the box test has the pad besides), so it is not made: no box for the other body, no axis tests.
+        bool boxesApart = false;
+        if (!(probe.sphere && otherSphere))
+            boxesApart = BoxesSeparated(probe.box, MakeBpBox(other, otherSphere));
+        if (!boxesApart)
         {
             // The list of the solved body of the pair has the joints and springs that exclude it.
             bool excluded = probe.solved ? Constrained(probe.slot, other) : Constrained(other, probe.slot);
