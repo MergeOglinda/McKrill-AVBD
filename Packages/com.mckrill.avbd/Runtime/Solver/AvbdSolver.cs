@@ -47,14 +47,28 @@ namespace McKrill.Avbd
         /// 30 iterations that is 1 dual dispatch instead of 30, and 29 fewer reads of every joint record and of both of its poses. The result is the same as
         /// without, to rounding (a joint that no solved body touches, such as one between two static bodies, gets all its updates in the last dispatch, one
         /// after the other). It adds the update to the register-bound primal kernel, so it is a switch: compare both in a GPU trace. Takes effect at the
-        /// next step. Contacts are not affected (<see cref="DispatchDualContacts"/> still runs after every sweep).
+        /// next step. Contacts have their own switch, <see cref="FuseContactDualUpdate"/>.
         /// </summary>
         public bool FuseDualUpdate { get; set; } = true;
+
+        /// <summary>
+        /// Run the dual update of the contacts inside the primal sweeps (default true), not in a dispatch of its own after every sweep
+        /// (<see cref="DispatchDualContacts"/>). Like <see cref="FuseDualUpdate"/> for the joints: the update after sweep k happens at the start of sweep k + 1,
+        /// in the thread of the first body of the manifold that is solved (the lower color, so that neither body has moved yet and the manifold sees the poses of
+        /// the end of sweep k), which also marks the pair; the other body finds the mark and only stamps. One dual dispatch after the last sweep does the rest
+        /// (the update of the last sweep, the clearing of the marks, and for a manifold that no solved body touches all the updates), so with 30 iterations that
+        /// is 1 dispatch instead of 30 and 29 fewer reads of every pair, of its points and of both bodies. The result is the same as without, to rounding.
+        /// It adds the update to the register-bound primal kernel and makes the contact buffers writable there, so it is a switch: compare both in a GPU
+        /// trace. Takes effect at the next step.
+        /// </summary>
+        public bool FuseContactDualUpdate { get; set; } = true;
 
         // Keyword of the variants of the primal and dual shaders that read the plastic array (AvbdPlasticRecords.hlsl).
         const string PlasticKeyword = "AVBD_PLASTIC_JOINTS";
         // Keyword of the variant of the primal shader that runs the dual update of the joints itself (see FuseDualUpdate).
         const string FusedDualKeyword = "AVBD_FUSED_DUAL";
+        // Keyword of the variant of the primal shader that runs the dual update of the contacts itself (see FuseContactDualUpdate).
+        const string FusedContactDualKeyword = "AVBD_FUSED_CONTACT_DUAL";
         static readonly int PlasticId = Shader.PropertyToID("_Plastic");
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int FractureId = Shader.PropertyToID("_Fracture");
@@ -211,16 +225,23 @@ namespace McKrill.Avbd
             DispatchConstraintInit();
             DispatchSolveHeader();
             bool fused = FuseDualUpdate && constraints.RecordCount > 0;
+            bool fusedContacts = FuseContactDualUpdate && constraints.HasContacts;
             lastDualSweep = 0u;
             for (int it = 0; it < settings.iterations; it++)
             {
-                DispatchPrimalSweep(fused, fused && it > 0); // the first sweep has no dual update before it
+                DispatchPrimalSweep(fused, (fused || fusedContacts) && it > 0, fusedContacts); // the first sweep has no dual update before it
                 if (!fused)
                     DispatchDual();
-                DispatchDualContacts();
+                if (!fusedContacts)
+                    DispatchDualContacts();
             }
-            if (fused && settings.iterations > 0)
-                DispatchFinalDual(); // the update of the last sweep, which no sweep follows, and the marks of the sweeps
+            if (settings.iterations > 0)
+            {
+                if (fused)
+                    DispatchFinalDual(); // the update of the last sweep, which no sweep follows, and the marks of the sweeps
+                if (fusedContacts)
+                    DispatchDualContacts(true); // the same for the contacts
+            }
             DispatchVelocity();
         }
 
@@ -497,7 +518,10 @@ namespace McKrill.Avbd
         // `fusedDual` picks the variant of the shader that can run the dual update of the joints itself (AVBD_FUSED_DUAL), and `dualOfPreviousSweep` makes this
         // sweep do it: the sweep then updates every joint that a solved body touches, with the poses of the end of the sweep before, so the first sweep of a
         // step does not, and every step that fuses ends with DispatchDual(true). Without fusedDual it is the plain sweep.
-        internal void DispatchPrimalSweep(bool fusedDual = false, bool dualOfPreviousSweep = false)
+        //
+        // `fusedContactDual` is the same for the contacts (AVBD_FUSED_CONTACT_DUAL, FuseContactDualUpdate): with `dualOfPreviousSweep` the sweep also updates every
+        // manifold that a solved body touches, and every step that fuses ends with DispatchDualContacts(true). The two share the sweep id.
+        internal void DispatchPrimalSweep(bool fusedDual = false, bool dualOfPreviousSweep = false, bool fusedContactDual = false)
         {
             if (constraints == null)
                 return;
@@ -507,8 +531,12 @@ namespace McKrill.Avbd
                 shader.EnableKeyword(FusedDualKeyword);
             else
                 shader.DisableKeyword(FusedDualKeyword);
+            if (fusedContactDual)
+                shader.EnableKeyword(FusedContactDualKeyword);
+            else
+                shader.DisableKeyword(FusedContactDualKeyword);
             uint sweepId = 0u;
-            if (fusedDual && dualOfPreviousSweep)
+            if ((fusedDual || fusedContactDual) && dualOfPreviousSweep)
             {
                 // A joint that a sweep has updated holds this id, so the next sweep does not take it for updated. The marks are cleared at the end of every
                 // step, so a wrap-around cannot meet an old one; ids stay below 2^31 (the mark is a float word, and a NaN is better avoided).
@@ -634,12 +662,20 @@ namespace McKrill.Avbd
 
         // Stage D for the contacts, after every primal sweep: one thread per manifold slot below the pool's high-water mark (a free slot skips), which
         // updates the points of its pair. Dispatched indirectly with the arguments the narrow phase of this step planned.
-        internal void DispatchDualContacts()
+        // With `afterFusedSweeps` it is the dispatch after the last sweep of a step whose sweeps ran the dual update of the contacts themselves: it also
+        // updates for the last sweep, clears the marks and gives a manifold that no sweep touched the updates of all the iterations (see AvbdDual.compute).
+        internal void DispatchDualContacts(bool afterFusedSweeps = false)
         {
             if (constraints == null || !constraints.HasContacts)
                 return;
 
             ComputeShader shader = shaders.Dual;
+            shader.SetInt(ClearMarksId, afterFusedSweeps ? 1 : 0);
+            if (afterFusedSweeps)
+            {
+                shader.SetInt(LastSweepId, (int)lastDualSweep);
+                shader.SetInt(FinalUpdatesId, settings.iterations);
+            }
             SolverUniforms.Bind(shader, settings);
             bodies.BindTo(shader, dualContactKernel);
             shader.SetBuffer(dualContactKernel, ContactPairsId, constraints.ContactPairsBuffer);

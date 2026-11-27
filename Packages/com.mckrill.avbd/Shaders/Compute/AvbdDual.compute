@@ -17,6 +17,8 @@
 // DualContact is the dual update of the contacts, one thread per slot of the manifold pool that has ever been used (below the pool's high-water
 // mark; see ContactLayout), which updates the points of its pair: a free slot skips. It is dispatched indirectly with arguments the narrow phase
 // wrote, so the host never needs the number of manifolds. A contact's warm start is part of the narrow phase (AvbdNarrowphase.compute).
+// With AVBD_FUSED_CONTACT_DUAL in the primal kernel DualContact runs once, after the last sweep (with _ClearMarks): for the update of that sweep, for the
+// clearing of the marks the sweeps left in the pairs, and for a manifold that no sweep touched (no solved body is on it) for the updates of all iterations.
 // The update of one joint is in Include/AvbdJointDual.hlsl, which the primal kernel uses too.
 // Mirrored by Reference/Stages/CpuConstraintInit.cs and CpuDual.cs, which the tests compare against.
 
@@ -205,6 +207,13 @@ void DualContact(uint3 id : SV_DispatchThreadID)
     if (pair.ident.x == AVBD_INVALID || count == 0u)
         return;
 
+    // After a step whose sweeps ran the dual update themselves: a manifold that the last sweep did not mark was not touched by any sweep (the poses of its
+    // bodies did not change, and no sweep updated it), so it gets the updates of all the iterations now, one after the other, which is what separate
+    // dispatches would have given it. A marked one only misses the update of the last sweep. The mark is dropped when the word is written back below.
+    uint updates = 1u;
+    if (_ClearMarks != 0u && _LastSweep != 0u && (pair.ident.w >> AVBD_CONTACT_MARK_SHIFT) != AvbdContactSweepMark(_LastSweep))
+        updates = max(_FinalUpdates, 1u);
+
     BodyStateRecord stateA = _BodyState[pair.ident.x];
     BodyStateRecord stateB = _BodyState[pair.ident.y];
     float3 dqALin = stateA.position.xyz - stateA.startPosition.xyz;
@@ -214,7 +223,7 @@ void DualContact(uint3 id : SV_DispatchThreadID)
     float3x3 basis = AvbdContactBasis(pair.normalFriction.xyz);
     float friction = pair.normalFriction.w;
 
-    uint stick = pair.ident.w;
+    uint stick = pair.ident.w & AVBD_CONTACT_STICK_MASK;
     uint first = slot * AVBD_MAX_CONTACTS;
 
     // Lever arms of a sphere contact at the rotation of the start of the step, as in the primal stage, decided once per manifold (see StampManifold).
@@ -226,23 +235,27 @@ void DualContact(uint3 id : SV_DispatchThreadID)
         leverRotB = stateB.startRotation;
     }
 
-    for (uint k = 0; k < count; k++)
+    [loop]
+    for (uint u = 0u; u < updates; u++)
     {
-        ContactPointRecord p = _ContactPoints[first + k];
-        float3 penalty = ContactPointPenalty(p);
-        AvbdContactEval e = AvbdEvaluateContactInBasis(
-            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, leverRotA, leverRotB,
-            dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
-        AvbdContactDualResult r = AvbdContactDual(e, penalty, (stick & (1u << k)) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
+        for (uint k = 0; k < count; k++)
+        {
+            ContactPointRecord p = _ContactPoints[first + k];
+            float3 penalty = ContactPointPenalty(p);
+            AvbdContactEval e = AvbdEvaluateContactInBasis(
+                basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, leverRotA, leverRotB,
+                dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
+            AvbdContactDualResult r = AvbdContactDual(e, penalty, (stick & (1u << k)) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
 
-        if (r.stick)
-            stick |= 1u << k;
-        else
-            stick &= ~(1u << k);
+            if (r.stick)
+                stick |= 1u << k;
+            else
+                stick &= ~(1u << k);
 
-        // Only the penalty and the multiplier change: write those two words, not the whole 64-byte point.
-        _ContactPoints[first + k].c0Penalty = float4(p.c0Penalty.xy, r.penalty.xy);
-        _ContactPoints[first + k].penaltyLambda = float4(r.penalty.z, r.lambda);
+            // Only the penalty and the multiplier change: write those two words, not the whole 64-byte point.
+            _ContactPoints[first + k].c0Penalty = float4(p.c0Penalty.xy, r.penalty.xy);
+            _ContactPoints[first + k].penaltyLambda = float4(r.penalty.z, r.lambda);
+        }
     }
     _ContactPairs[slot].ident = uint4(pair.ident.xyz, stick);
 }

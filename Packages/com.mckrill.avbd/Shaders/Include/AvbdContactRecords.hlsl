@@ -11,6 +11,18 @@
 // The stick flag of every point of a pair: bit k of ident.w (Owner: stage D; stage N only carries it over to decide which anchors to keep).
 #define AVBD_CONTACT_STICK_MASK 0xFFu
 
+// With AVBD_FUSED_CONTACT_DUAL (AvbdPrimal.compute) the sweeps run the dual update of a manifold themselves and leave a mark in the bits above the stick
+// bits of ident.w: the id of the sweep that updated it, folded into 1 .. 0xFFFFFF (AvbdContactSweepMark). The mark is read by the next sweep, so that the
+// second body of the manifold does not update it again, and cleared by the dual dispatch after the last sweep (DualContact with _ClearMarks) and by the
+// narrow phase, which writes the whole word. A record that leaves a step holds no mark.
+#define AVBD_CONTACT_MARK_SHIFT 8u
+
+// The mark of the sweep with this id (above 0). Consecutive ids give different marks, and never 0, which is the mark of a manifold nothing has updated.
+uint AvbdContactSweepMark(uint sweepId)
+{
+    return (sweepId - 1u) % 0xFFFFFFu + 1u;
+}
+
 // 32 B.
 struct ContactPairRecord
 {

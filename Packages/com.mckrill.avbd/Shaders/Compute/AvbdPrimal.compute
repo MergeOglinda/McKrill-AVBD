@@ -22,6 +22,12 @@
 // the last sweep (AvbdDual.compute), for the sweep that has no sweep after it, and clears the marks.
 #pragma multi_compile_local _ AVBD_FUSED_DUAL
 
+// The same for the contacts (AvbdSolver.FuseContactDualUpdate): the dual update of a manifold after sweep k runs at the start of sweep k + 1, in the thread of
+// the first body of the manifold that is solved (the one of the lower color, so that neither body has moved yet), which writes the points and the stick bits
+// and marks the pair (AVBD_CONTACT_MARK_SHIFT in ident.w); the other body finds the mark and only stamps. Independent of AVBD_FUSED_DUAL, and it reads the
+// same _DualSweep. The DualContact kernel runs once after the last sweep (AvbdDual.compute), for the update that no sweep follows.
+#pragma multi_compile_local _ AVBD_FUSED_CONTACT_DUAL
+
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdPlasticRecords.hlsl"
@@ -48,8 +54,13 @@ StructuredBuffer<ConstraintRecord>     _Constraints;    // joints and springs
 StructuredBuffer<PlasticRecord>        _Plastic;        // rest rotation of the joints with the PLASTIC flag, by ident.w
 #endif
 #endif
+#if defined(AVBD_FUSED_CONTACT_DUAL)
+RWStructuredBuffer<ContactPairRecord>  _ContactPairs;   // manifolds of the pool (a list entry with AVBD_LIST_CONTACT_FLAG names one); the dual update of the first body writes the stick bits and the mark
+RWStructuredBuffer<ContactPointRecord> _ContactPoints;  // ... and the penalties and multipliers of the points
+#else
 StructuredBuffer<ContactPairRecord>    _ContactPairs;   // manifolds of the pool (a list entry with AVBD_LIST_CONTACT_FLAG names one)
 StructuredBuffer<ContactPointRecord>   _ContactPoints;
+#endif
 StructuredBuffer<uint>                 _ConstraintList; // entries, grouped per body (see _BodyRange): a joint or spring id, or AVBD_LIST_CONTACT_FLAG | manifold slot
 StructuredBuffer<uint>                 _ColorBodies;    // solved body slots, grouped per color
 StructuredBuffer<uint>                 _ColorWork;      // stage C's work buffer: the size and the start of every color
@@ -311,6 +322,15 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
 
     uint first = manifold * AVBD_MAX_CONTACTS;
 
+#if defined(AVBD_FUSED_CONTACT_DUAL)
+    // The dual update of the sweep before, if this body is the first to see the manifold in this sweep (the mark is not this sweep's): neither body has moved
+    // in this sweep, so the poses read above are those of the end of the sweep before, which is what the separate dispatch sees. The stamp below uses the
+    // updated penalties and multipliers.
+    uint sweepMark = AvbdContactSweepMark(_DualSweep);
+    bool dualNow = _DualSweep != 0u && (pair.ident.w >> AVBD_CONTACT_MARK_SHIFT) != sweepMark;
+    uint stick = pair.ident.w & AVBD_CONTACT_STICK_MASK;
+#endif
+
     // A sphere contact takes its lever arms at the rotation of the start of the step (three-avbd): a rolling sphere turns about 0.1 rad per step,
     // and a lever arm that turned with it would put a false separation into the normal row. The angular displacement is still measured from the start.
     // Decided once per manifold, before the loop (a sphere pair has one point, which carries the key; a box pair has none with this key), so that the
@@ -327,8 +347,27 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
     {
         ContactPointRecord p = _ContactPoints[first + k];
         float3 penalty = ContactPointPenalty(p);
+        float3 lambda = ContactPointLambda(p);
+#if defined(AVBD_FUSED_CONTACT_DUAL)
+        if (dualNow)
+        {
+            AvbdContactEval before = AvbdEvaluateContactInBasis(
+                basis, ContactPointC0(p), penalty, lambda, friction, p.anchorA.xyz, p.anchorB.xyz, leverRotA, leverRotB,
+                dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
+            AvbdContactDualResult r = AvbdContactDual(before, penalty, (stick & (1u << k)) != 0u, AVBD_BETA_LIN, AVBD_PENALTY_MAX);
+            if (r.stick)
+                stick |= 1u << k;
+            else
+                stick &= ~(1u << k);
+            penalty = r.penalty;
+            lambda = r.lambda;
+            // Only the penalty and the multiplier change: write those two words, not the whole 64-byte point.
+            _ContactPoints[first + k].c0Penalty = float4(p.c0Penalty.xy, r.penalty.xy);
+            _ContactPoints[first + k].penaltyLambda = float4(r.penalty.z, r.lambda);
+        }
+#endif
         AvbdContactEval e = AvbdEvaluateContactInBasis(
-            basis, ContactPointC0(p), penalty, ContactPointLambda(p), friction, p.anchorA.xyz, p.anchorB.xyz, leverRotA, leverRotB,
+            basis, ContactPointC0(p), penalty, lambda, friction, p.anchorA.xyz, p.anchorB.xyz, leverRotA, leverRotB,
             dqALin, dqAAng, dqBLin, dqBAng, AVBD_ALPHA);
         AvbdContactStamp s = AvbdStampContact(e, penalty, isA);
 
@@ -338,6 +377,11 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
         sys.rhsLin += s.rhsLin;
         sys.rhsAng += s.rhsAng;
     }
+
+#if defined(AVBD_FUSED_CONTACT_DUAL)
+    if (dualNow)
+        _ContactPairs[manifold].ident.w = stick | (sweepMark << AVBD_CONTACT_MARK_SHIFT);
+#endif
 }
 
 // The terms of a body's system that the lanes add up. The solver reads only the lower triangle of the 6x6 matrix, and the linear and the angular block are

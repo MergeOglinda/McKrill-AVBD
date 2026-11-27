@@ -256,9 +256,12 @@ namespace McKrill.Avbd.Tests
             }
         }
 
-        [TestCase("ground", 90)]
-        [TestCase("stack", 60)]
-        public void Gpu_Step_MatchesTheReferenceSolver(string scene, int steps)
+        // fuseContacts: AvbdSolver.FuseContactDualUpdate, the dual update of the contacts inside the sweeps (the default) or in a dispatch after every sweep.
+        [TestCase("ground", 90, true)]
+        [TestCase("stack", 60, true)]
+        [TestCase("ground", 90, false)]
+        [TestCase("stack", 60, false)]
+        public void Gpu_Step_MatchesTheReferenceSolver(string scene, int steps, bool fuseContacts)
         {
             RequireCompute();
             ReferenceSolver reference = Colored(scene, out AvbdSolverSettings settings);
@@ -269,7 +272,7 @@ namespace McKrill.Avbd.Tests
             {
                 foreach (BodyDescriptor d in arrays.descriptors)
                     buffers.Spawn(d);
-                var solver = new AvbdSolver(buffers, settings, null, constraints);
+                var solver = new AvbdSolver(buffers, settings, null, constraints) { FuseContactDualUpdate = fuseContacts };
                 var state = new BodyStateRecord[Capacity];
                 var motion = new BodyMotionRecord[Capacity];
 
