@@ -15,6 +15,7 @@ namespace McKrill.Avbd.Tests.Performance
         // Voxels
         public float voxelSize = 0.2f;
         public float voxelMass = 0.25f;     // kg of one voxel, whatever its size
+        public bool sphereVoxels;           // every voxel is a sphere whose diameter is the edge of the box it replaces (same mass), not a box
         public float voxelGap = 0.01f;      // meters between the faces of neighboring boxes: the objects start almost at rest
 
         // Objects: skins of 2 voxels, in voxels. 24 / 12 / 11, 7 give 34 880 voxels and 241 872 joints for two of each.
@@ -50,7 +51,7 @@ namespace McKrill.Avbd.Tests.Performance
 
         public override string ToString()
         {
-            return "6 objects (2 cubes, 2 spheres, 2 toruses), voxels " + voxelSize + " m, skin " + shellLayers + " voxels, " + approachSpeed * 2f
+            return "6 objects (2 cubes, 2 spheres, 2 toruses), voxels of " + (sphereVoxels ? "spheres " : "boxes ") + voxelSize + " m, skin " + shellLayers + " voxels, " + approachSpeed * 2f
                 + " m/s head-on, " + iterations + " iterations, linear fracture " + (linearFracture ? linearFractureThreshold.ToString() : "off")
                 + ", linear yield " + (linearYield ? linearYieldThreshold.ToString() : "off");
         }
@@ -145,7 +146,9 @@ namespace McKrill.Avbd.Tests.Performance
             // The box is a little smaller than the cell: neighbors that are not joined (those that touch along an edge or at a corner) start apart.
             float edge = c.voxelSize - Mathf.Min(c.voxelGap, 0.05f * c.voxelSize);
             var size = new float3(edge);
-            float density = c.voxelMass / (edge * edge * edge);
+            // A sphere has the edge as its diameter and the same mass: the density follows from its volume (about 52% of the box's).
+            float volume = c.sphereVoxels ? Mathf.PI / 6f * edge * edge * edge : edge * edge * edge;
+            float density = c.voxelMass / volume;
             var positions = new float3[voxelTotal];
             int first = 0; // index in positions of the first voxel of the object
             for (int o = 0; o < ObjectCount; o++)
@@ -159,7 +162,7 @@ namespace McKrill.Avbd.Tests.Performance
                 {
                     float3 position = center + shape.CellOffset(n) * c.voxelSize;
                     positions[first + n] = position;
-                    BodyDescriptor voxel = BodyDescriptor.Box(size, density, position);
+                    BodyDescriptor voxel = c.sphereVoxels ? BodyDescriptor.Sphere(0.5f * edge, density, position) : BodyDescriptor.Box(size, density, position);
                     voxel.linearVelocity = velocity;
                     descriptors.Add(voxel);
                 }
