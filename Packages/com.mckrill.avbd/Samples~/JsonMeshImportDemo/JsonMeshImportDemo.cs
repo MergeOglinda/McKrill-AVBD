@@ -125,9 +125,6 @@ namespace McKrill.Avbd.Samples
         [SerializeField, Range(1, 4)] int maxStepsPerFrame = 2;
         [Tooltip("Run the dual update of the joints and the contacts inside the primal sweeps and once more after the last one (AvbdSolver.FuseDualUpdate), instead of a dispatch after every sweep. The same result; compare the frame time of both.")]
         [SerializeField] bool fuseDualUpdate = true;
-        [Tooltip("Run only as many sweeps as the last steps needed (AvbdSolver.ConvergenceTolerance): the GPU records the largest step of each sweep and the answer arrives a few frames late. Off = every step runs all iterations. The tolerance is in meters and radians.")]
-        [SerializeField] bool adaptiveIterations = false;
-        [SerializeField] float convergenceTolerance = 1e-4f;
 
         [Header("Throw")]
         [Tooltip("Speed in meters per second of the voxels that Throw lets fly.")]
@@ -423,7 +420,6 @@ namespace McKrill.Avbd.Samples
             // The settings (the panel at the right) take effect at the next step.
             solver.Settings = CurrentSettings();
             solver.FuseDualUpdate = fuseDualUpdate;
-            solver.ConvergenceTolerance = adaptiveIterations ? convergenceTolerance : 0f;
 
             // Make spawns and removals visible to the readback below, also while paused.
             bodies.ApplyEdits();
@@ -1712,13 +1708,6 @@ namespace McKrill.Avbd.Samples
 
             fuseDualUpdate = GUILayout.Toggle(fuseDualUpdate, "Dual update inside the primal sweeps   (same result, fewer dispatches)");
 
-            adaptiveIterations = GUILayout.Toggle(adaptiveIterations, "Adaptive iterations   (fewer sweeps when the last steps had settled; less accurate at an impact)");
-            if (adaptiveIterations)
-            {
-                convergenceTolerance = LogSlider("Convergence tolerance", convergenceTolerance, 1e-6f, 1e-2f, "   (largest step of a sweep, m or rad)");
-                GUILayout.Label("Sweeps in the last step: " + solver.LastIterations + " of " + iterations);
-            }
-
             if (GUILayout.Button("Default solver settings"))
             {
                 AvbdSolverSettings d = AvbdSolverSettings.Default;
@@ -1733,8 +1722,6 @@ namespace McKrill.Avbd.Samples
                 penaltyMax = d.penaltyMax;
                 maxStepsPerFrame = 2;
                 fuseDualUpdate = true;
-                adaptiveIterations = false;
-                convergenceTolerance = 1e-4f;
             }
             GUILayout.EndVertical();
 

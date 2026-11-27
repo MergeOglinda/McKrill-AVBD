@@ -62,9 +62,7 @@ StructuredBuffer<uint>                 _ConstraintList; // entries, grouped per 
 StructuredBuffer<uint>                 _ColorBodies;    // solved body slots, grouped per color
 StructuredBuffer<uint>                 _ColorWork;      // stage C's work buffer: the size and the start of every color
 RWStructuredBuffer<uint>               _Status;         // x = number of failed solves
-RWStructuredBuffer<uint>               _Convergence;    // the largest step any body took in sweep k of the step, as the bits of a float (a non-negative float orders like its bits), at word k
 
-uint _TrackSweep; // the word of _Convergence that this sweep adds its largest step to, or 0xFFFFFFFF (AvbdSolver.ConvergenceTolerance is 0): nothing is recorded
 uint _Color; // the graph color this dispatch solves. The dispatch is indirect: its size comes from the arguments ColorPlan wrote
 uint _DualSweep; // AVBD_FUSED_DUAL: the id of this sweep (above 0) if it runs the dual update of the sweep before, 0 if it does not
 
@@ -719,15 +717,6 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
     if (SolveLdlt6(body))
     {
         // Only the pose changes: write those two words, not the start-of-step pose that follows them in the 64 B record, and the compact copy of the pose.
-        if (_TrackSweep != 0xFFFFFFFFu)
-        {
-            // The size of the step in meters and in radians, whichever is larger: the host compares the largest of a sweep with its tolerance to see whether
-            // another sweep still changes anything (it decides the number of sweeps of a later step from it).
-            float3 stepLin = float3(AVBD_SOLVE_Y(0), AVBD_SOLVE_Y(1), AVBD_SOLVE_Y(2));
-            float3 stepAng = float3(AVBD_SOLVE_Y(3), AVBD_SOLVE_Y(4), AVBD_SOLVE_Y(5));
-            uint largest;
-            InterlockedMax(_Convergence[_TrackSweep], asuint(max(length(stepLin), length(stepAng))), largest);
-        }
         float4 newPosition = float4(position + float3(AVBD_SOLVE_Y(0), AVBD_SOLVE_Y(1), AVBD_SOLVE_Y(2)), 0.0);
         float4 newRotation = AvbdIntegrateAngular(rotation, float3(AVBD_SOLVE_Y(3), AVBD_SOLVE_Y(4), AVBD_SOLVE_Y(5)));
         _BodyState[slot].position = newPosition;
