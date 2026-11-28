@@ -518,36 +518,41 @@ uint SolveTerm(uint i, uint j)
 #define AVBD_SOLVE_A(i, j) gsSums[SolveTerm(i, j) * AVBD_PRIMAL_BODIES + body]
 #define AVBD_SOLVE_Y(i)    gsSums[(AVBD_TERM_RHS + (i)) * AVBD_PRIMAL_BODIES + body]
 
-// Solves A x = -rhs for the summed system of body `body` of the group with an LDL^T factorization, no pivoting, in groupshared memory: the lower triangle
-// of the matrix is overwritten by the factorization and the right-hand side by x (AVBD_SOLVE_Y). Mirrors Mat6.TrySolveLDLT in the reference. Returns false if
-// a pivot is not above 1e-20 or is NaN (x is then meaningless). Only lane 0 of a body runs it, so no barrier is needed.
+// Solves A x = -rhs for the summed system of body `body` of the group with an LDL^T factorization, no pivoting, in groupshared memory: the strict lower
+// triangle of the matrix is overwritten by L and the right-hand side by x (AVBD_SOLVE_Y); the pivots D stay in registers and are not written back. Mirrors
+// Mat6.TrySolveLDLT in the reference. Returns false if a pivot is not above 1e-20 or is NaN (x is then meaningless). Only lane 0 of a body runs it, so no
+// barrier is needed. Every element is read from groupshared memory once per use that cannot be shared: the row j of L is read once for both the products
+// with D and the pivot (it was read twice), the pivots are kept (they were written and read back for the diagonal step and the next columns), and the
+// intermediate vector of the substitutions is kept (it was written and read back element by element). The operations and their order are those of the
+// version that read everything from memory, so the result is the same bit for bit.
 bool SolveLdlt6(uint body)
 {
+    float d[6];
     float v[6];
     bool ok = true; // no early return inside the unrolled loops: a failed pivot is replaced by 1 and reported at the end
 
     [unroll]
-    for (uint n = 0; n < 6; n++)
-        AVBD_SOLVE_Y(n) = -AVBD_SOLVE_Y(n);
-
-    [unroll]
     for (uint j = 0; j < 6; j++)
     {
+        float lj[6];
         [unroll]
         for (uint k = 0; k < j; k++)
-            v[k] = AVBD_SOLVE_A(j, k) * AVBD_SOLVE_A(k, k);
+        {
+            lj[k] = AVBD_SOLVE_A(j, k);
+            v[k] = lj[k] * d[k];
+        }
 
         float dj = AVBD_SOLVE_A(j, j);
         [unroll]
         for (uint k2 = 0; k2 < j; k2++)
-            dj -= AVBD_SOLVE_A(j, k2) * v[k2];
+            dj -= lj[k2] * v[k2];
 
         if (!(dj > 1e-20))
         {
             ok = false;
             dj = 1.0;
         }
-        AVBD_SOLVE_A(j, j) = dj;
+        d[j] = dj;
 
         float inv = 1.0 / dj;
         [unroll]
@@ -561,32 +566,37 @@ bool SolveLdlt6(uint body)
         }
     }
 
-    // Forward substitution: L y = b
+    // Forward substitution: L y = b, with b the negated right-hand side
+    float y[6];
     [unroll]
     for (uint i1 = 0; i1 < 6; i1++)
     {
-        float s = AVBD_SOLVE_Y(i1);
+        float s = -AVBD_SOLVE_Y(i1);
         [unroll]
         for (uint k4 = 0; k4 < i1; k4++)
-            s -= AVBD_SOLVE_A(i1, k4) * AVBD_SOLVE_Y(k4);
-        AVBD_SOLVE_Y(i1) = s;
+            s -= AVBD_SOLVE_A(i1, k4) * y[k4];
+        y[i1] = s;
     }
 
     // Diagonal: D z = y
     [unroll]
     for (uint i2 = 0; i2 < 6; i2++)
-        AVBD_SOLVE_Y(i2) /= AVBD_SOLVE_A(i2, i2);
+        y[i2] /= d[i2];
 
-    // Backward substitution: L^T x = z
+    // Backward substitution: L^T x = z. y[k] above i3 already holds x[k] when it is read.
     [unroll]
     for (int i3 = 5; i3 >= 0; i3--)
     {
-        float s = AVBD_SOLVE_Y(i3);
+        float s = y[i3];
         [unroll]
         for (int k5 = i3 + 1; k5 < 6; k5++)
-            s -= AVBD_SOLVE_A(k5, i3) * AVBD_SOLVE_Y(k5);
-        AVBD_SOLVE_Y(i3) = s;
+            s -= AVBD_SOLVE_A(k5, i3) * y[k5];
+        y[i3] = s;
     }
+
+    [unroll]
+    for (uint n = 0; n < 6; n++)
+        AVBD_SOLVE_Y(n) = y[n];
 
     return ok;
 }
