@@ -59,6 +59,7 @@ StructuredBuffer<ContactPairRecord>    _ContactPairs;   // manifolds of the pool
 StructuredBuffer<ContactPointRecord>   _ContactPoints;
 #endif
 StructuredBuffer<uint>                 _ConstraintList; // entries, grouped per body (see _BodyRange): a joint or spring id, or AVBD_LIST_CONTACT_FLAG | manifold slot
+StructuredBuffer<uint>                 _ConstraintOther; // per list entry: the body on the other side (AVBD_INVALID for a world pin), from the same stage G as the list
 StructuredBuffer<uint>                 _ColorBodies;    // solved body slots, grouped per color
 StructuredBuffer<uint>                 _ColorWork;      // stage C's work buffer: the size and the start of every color
 RWStructuredBuffer<uint>               _Status;         // x = number of failed solves
@@ -80,32 +81,41 @@ struct PrimalSystem
     float3 rhsAng;
 };
 
-// Pose of body slot `id`. The body being solved is passed in, the others are read from the compact pose array (a joint or spring needs nothing else of
-// the neighbor, and 32 B records put twice as many bodies in a cache line as the 64 B state records). A manifold also needs the start-of-step pose
-// of both bodies, which only the state record has, so StampManifold reads the state record of both bodies once, and one line serves both.
-// A body A of AVBD_INVALID is the world: origin and identity rotation.
-void LoadPose(uint id, uint self, float3 selfPos, float4 selfRot, out float3 pos, out float4 rot)
+// The pose of the body on the other side of an entry, from the compact pose array (a joint or spring needs nothing else of the neighbor, and 32 B records put
+// twice as many bodies in a cache line as the 64 B state records). `other` is the entry's word of _ConstraintOther, known as soon as the entry is, so this
+// read is issued together with the read of the constraint record and not after it (the record would have to be read first to tell the neighbor). A body of
+// AVBD_INVALID is the world: origin and identity rotation. A manifold also needs the start-of-step pose of both bodies, which only the state record has, so
+// StampManifold reads the state records itself.
+void LoadOtherPose(uint other, out float3 pos, out float4 rot)
 {
-    if (id == self)
-    {
-        pos = selfPos;
-        rot = selfRot;
-    }
-    else if (id == AVBD_INVALID)
+    if (other == AVBD_INVALID)
     {
         pos = float3(0.0, 0.0, 0.0);
         rot = float4(0.0, 0.0, 0.0, 1.0);
     }
     else
     {
-        BodyPoseRecord p = _BodyPose[id];
+        BodyPoseRecord p = _BodyPose[other];
         pos = p.position.xyz;
         rot = p.rotation;
     }
 }
 
+// The poses of the two bodies of a joint or spring: the body being solved has its pose in registers, and the other body is the one loaded by LoadOtherPose
+// (the world for a pin). The list names the other body of the entry, so it is the one of the record that is not `slot`.
+void SelectPoses(uint idA, uint idB, uint slot, float3 selfPos, float4 selfRot, float3 otherPos, float4 otherRot,
+                 out float3 posA, out float4 rotA, out float3 posB, out float4 rotB)
+{
+    bool aIsSelf = idA == slot;
+    posA = aIsSelf ? selfPos : otherPos;
+    rotA = aIsSelf ? selfRot : otherRot;
+    bool bIsSelf = idB == slot;
+    posB = bIsSelf ? selfPos : otherPos;
+    rotB = bIsSelf ? selfRot : otherRot;
+}
+
 // `entry` is the index of the record in _Constraints. With AVBD_FUSED_DUAL the joint is first brought up to date, if this body is the first to see it in the sweep.
-void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, float3 selfPos, float4 selfRot, float3 otherPos, float4 otherRot, inout PrimalSystem sys)
 {
     float alpha = AVBD_ALPHA;
     bool hasA = c.ident.x != AVBD_INVALID;
@@ -113,8 +123,7 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
 
     float3 posA, posB;
     float4 rotA, rotB;
-    LoadPose(c.ident.x, slot, selfPos, selfRot, posA, rotA);
-    LoadPose(c.ident.y, slot, selfPos, selfRot, posB, rotB);
+    SelectPoses(c.ident.x, c.ident.y, slot, selfPos, selfRot, otherPos, otherRot, posA, rotA, posB, rotB);
 
     float4 rest = float4(0.0, 0.0, 0.0, 1.0); // rest rotation of the angular row: loaded below, or returned by the dual update that has just made it
     bool haveRest = false;
@@ -236,14 +245,13 @@ void StampJoint(inout ConstraintRecord c, uint flags, uint entry, uint slot, flo
     }
 }
 
-void StampSpring(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+void StampSpring(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, float3 otherPos, float4 otherRot, inout PrimalSystem sys)
 {
     bool isA = c.ident.x == slot;
 
     float3 posA, posB;
     float4 rotA, rotB;
-    LoadPose(c.ident.x, slot, selfPos, selfRot, posA, rotA);
-    LoadPose(c.ident.y, slot, selfPos, selfRot, posB, rotB);
+    SelectPoses(c.ident.x, c.ident.y, slot, selfPos, selfRot, otherPos, otherRot, posA, rotA, posB, rotB);
 
     float stiffness = c.anchorA.w;
     float rest = c.anchorB.w;
@@ -282,9 +290,14 @@ void StampSpring(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, 
 // The contact points of manifold slot `manifold` (the math of Include/AvbdContactSolve.hlsl, written out for the one body that is solved). The bodies, their displacements from the start of the step
 // and the contact basis are the same for every point of the pair, so they are loaded and made once; both bodies' displacements enter the
 // constraint value: the body being solved is passed in, the other is read from the state array.
-void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+void StampManifold(uint manifold, uint slot, uint other, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
 {
+    // The pair record and the state records of both bodies are requested together: the list entry gives the manifold and `other` (the body on the other side,
+    // _ConstraintOther), and the body being solved is `slot`, so none of the three reads waits for another. They used to be a chain: the pair, then the bodies
+    // it names. The list is built from these same pair records (after the narrow phase, in the same step), so the body that is not `slot` is `other`.
     ContactPairRecord pair = _ContactPairs[manifold];
+    BodyStateRecord stateSelf = _BodyState[slot];
+    BodyStateRecord stateOther = _BodyState[other == AVBD_INVALID ? slot : other]; // never AVBD_INVALID for a manifold: the guard only keeps the index in range
     uint count = min(pair.ident.z, AVBD_MAX_CONTACTS);
     if (pair.ident.x == AVBD_INVALID || count == 0u)
         return; // a manifold that is gone: nothing to stamp
@@ -293,22 +306,12 @@ void StampManifold(uint manifold, uint slot, float3 selfPos, float4 selfRot, ino
 
     // The state record of each body is read once: the pose and the start-of-step pose come from the same line. The body being solved has its own
     // pose in registers, which is what the record holds as well (the sweep writes it back at the end), so that one is not taken from the record.
-    BodyStateRecord stateA = _BodyState[pair.ident.x];
-    BodyStateRecord stateB = _BodyState[pair.ident.y];
-    float3 posA = stateA.position.xyz;
-    float4 rotA = stateA.rotation;
-    float3 posB = stateB.position.xyz;
-    float4 rotB = stateB.rotation;
-    if (pair.ident.x == slot)
-    {
-        posA = selfPos;
-        rotA = selfRot;
-    }
-    if (pair.ident.y == slot)
-    {
-        posB = selfPos;
-        rotB = selfRot;
-    }
+    BodyStateRecord stateA = isA ? stateSelf : stateOther;
+    BodyStateRecord stateB = isA ? stateOther : stateSelf;
+    float3 posA = isA ? selfPos : stateOther.position.xyz;
+    float4 rotA = isA ? selfRot : stateOther.rotation;
+    float3 posB = isA ? stateOther.position.xyz : selfPos;
+    float4 rotB = isA ? stateOther.rotation : selfRot;
     // The constraint value of a point is c0 (1 - alpha) + J_A dq_A + J_B dq_B with J_A = [B; r_A x B] and J_B = [-B; -(r_B x B)] (B the contact basis,
     // one row per direction). Row k of each body contributes b_k . dqLin + (r x b_k) . dqAng = b_k . (dqLin + dqAng x r) (with the sign of the body), so the whole product is the basis times
     // one vector, w = dqALin - dqBLin + dqAAng x rA - dqBAng x rB (a scalar triple product moved around: (r x b) . d = b . (d x r)). w is made once per point,
@@ -632,22 +635,36 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
         for (uint e = lane; e < range.y; e += AVBD_PRIMAL_LANES * AVBD_PRIMAL_BATCH)
         {
             uint entries[AVBD_PRIMAL_BATCH];
+            uint others[AVBD_PRIMAL_BATCH];
             ConstraintRecord records[AVBD_PRIMAL_BATCH];
+            float3 otherPositions[AVBD_PRIMAL_BATCH];
+            float4 otherRotations[AVBD_PRIMAL_BATCH];
 
             [unroll]
             for (uint b0 = 0; b0 < AVBD_PRIMAL_BATCH; b0++)
             {
                 entries[b0] = 0u;
+                others[b0] = AVBD_INVALID;
                 if (e + b0 * AVBD_PRIMAL_LANES < range.y)
+                {
+                    // The entry and the body on its other side are two reads of the same position of two arrays, issued together.
                     entries[b0] = _ConstraintList[range.x + e + b0 * AVBD_PRIMAL_LANES];
+                    others[b0] = _ConstraintOther[range.x + e + b0 * AVBD_PRIMAL_LANES];
+                }
             }
 
             [unroll]
             for (uint b1 = 0; b1 < AVBD_PRIMAL_BATCH; b1++)
             {
                 records[b1] = (ConstraintRecord)0;
+                otherPositions[b1] = float3(0.0, 0.0, 0.0);
+                otherRotations[b1] = float4(0.0, 0.0, 0.0, 1.0);
                 if (e + b1 * AVBD_PRIMAL_LANES < range.y && !(entries[b1] & AVBD_LIST_CONTACT_FLAG))
+                {
+                    // The record and the pose of the neighbor are requested together (a manifold issues its own reads in StampManifold).
                     records[b1] = _Constraints[entries[b1]];
+                    LoadOtherPose(others[b1], otherPositions[b1], otherRotations[b1]);
+                }
             }
 
             [unroll]
@@ -658,7 +675,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
                     uint entry = entries[b2];
                     if (entry & AVBD_LIST_CONTACT_FLAG)
                     {
-                        StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, position, rotation, sys);
+                        StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, others[b2], position, rotation, sys);
                     }
                     else
                     {
@@ -666,9 +683,9 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
                         uint flags = c.ident.z & AVBD_CONSTRAINT_FLAGS_MASK;
                         uint kind = c.ident.z >> AVBD_CONSTRAINT_KIND_SHIFT;
                         if (kind == AVBD_CONSTRAINT_KIND_JOINT)
-                            StampJoint(c, flags, entry, slot, position, rotation, sys);
+                            StampJoint(c, flags, entry, slot, position, rotation, otherPositions[b2], otherRotations[b2], sys);
                         else if (kind == AVBD_CONSTRAINT_KIND_SPRING)
-                            StampSpring(c, slot, position, rotation, sys);
+                            StampSpring(c, slot, position, rotation, otherPositions[b2], otherRotations[b2], sys);
                     }
                 }
             }

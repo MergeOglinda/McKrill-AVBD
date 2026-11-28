@@ -63,6 +63,7 @@ namespace McKrill.Avbd
         static readonly int RecordsId = Shader.PropertyToID("_Constraints");
         static readonly int FractureId = Shader.PropertyToID("_Fracture");
         static readonly int ListId = Shader.PropertyToID("_ConstraintList");
+        static readonly int ListOtherId = Shader.PropertyToID("_ConstraintOther");
         static readonly int ColorBodiesId = Shader.PropertyToID("_ColorBodies");
         static readonly int ColorWorkId = Shader.PropertyToID("_ColorWork");
         static readonly int ColorId = Shader.PropertyToID("_Color");
@@ -533,6 +534,7 @@ namespace McKrill.Avbd
             shader.SetBuffer(primalKernel, ContactPairsId, constraints.ContactPairsBuffer);
             shader.SetBuffer(primalKernel, ContactPointsId, constraints.ContactPointsBuffer);
             shader.SetBuffer(primalKernel, ListId, constraints.List);
+            shader.SetBuffer(primalKernel, ListOtherId, constraints.ListOther); // the body on the other side of every entry: its pose is read with the record
             shader.SetBuffer(primalKernel, ColorBodiesId, constraints.ColorBodies);
             shader.SetBuffer(primalKernel, ColorWorkId, constraints.ColorWork);
             shader.SetBuffer(primalKernel, StatusId, constraints.Status);
