@@ -339,6 +339,7 @@ namespace McKrill.Avbd.Samples
             // The plastic array only exists if the joints can be plastic: without it the solver runs the joint kernels with no plastic code at all.
             int jointCapacity = jointTotal + 8;
             constraints = new AvbdConstraintBuffers(bodies, jointCapacity, null, manifoldSlots, (plasticJoints || linearYield) ? jointCapacity : 0);
+            constraints.ColoringReductionPasses = 4;
             solver = new AvbdSolver(bodies, settings, null, constraints);
             solver.FuseDualUpdate = fuseDualUpdate;
 
