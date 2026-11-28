@@ -302,13 +302,25 @@ void StampSpring(ConstraintRecord c, uint slot, float3 selfPos, float4 selfRot, 
 // The contact points of manifold slot `manifold` (the math of Include/AvbdContactSolve.hlsl, written out for the one body that is solved). The bodies, their displacements from the start of the step
 // and the contact basis are the same for every point of the pair, so they are loaded and made once; both bodies' displacements enter the
 // constraint value: the body being solved is passed in, the other is read from the state array.
-void StampManifold(uint manifold, uint slot, uint other, float3 selfPos, float4 selfRot, inout PrimalSystem sys)
+// The displacement of the body being solved from the start of the step, as a manifold needs it: the same for every manifold of the body, so a lane makes it
+// for the first manifold it stamps (`known` false until then) and the manifolds after it reuse it: one state-record read and one quaternion difference (an
+// inverse, a product and a normalization) per lane instead of one per manifold, 7 registers kept alive in return.
+struct SelfDisplacement
+{
+    float3 dLin; // position - start position
+    float3 dAng; // AvbdQuatDifference(rotation, start rotation)
+    bool known;
+};
+
+void StampManifold(uint manifold, uint slot, uint other, float3 selfPos, float4 selfRot, inout SelfDisplacement selfShift, inout PrimalSystem sys)
 {
     // The pair record and the state records of both bodies are requested together: the list entry gives the manifold and `other` (the body on the other side,
     // _ConstraintOther), and the body being solved is `slot`, so none of the three reads waits for another. They used to be a chain: the pair, then the bodies
     // it names. The list is built from these same pair records (after the narrow phase, in the same step), so the body that is not `slot` is `other`.
     ContactPairRecord pair = _ContactPairs[manifold];
-    BodyStateRecord stateSelf = _BodyState[slot];
+    BodyStateRecord stateSelf = (BodyStateRecord)0;
+    if (!selfShift.known)
+        stateSelf = _BodyState[slot]; // only its start pose is used, and only once per lane
     BodyStateRecord stateOther = _BodyState[other == AVBD_INVALID ? slot : other]; // never AVBD_INVALID for a manifold: the guard only keeps the index in range
     uint count = min(pair.ident.z, AVBD_MAX_CONTACTS);
     if (pair.ident.x == AVBD_INVALID || count == 0u)
@@ -316,10 +328,14 @@ void StampManifold(uint manifold, uint slot, uint other, float3 selfPos, float4 
 
     bool isA = pair.ident.x == slot;
 
-    // The state record of each body is read once: the pose and the start-of-step pose come from the same line. The body being solved has its own
-    // pose in registers, which is what the record holds as well (the sweep writes it back at the end), so that one is not taken from the record.
-    BodyStateRecord stateA = isA ? stateSelf : stateOther;
-    BodyStateRecord stateB = isA ? stateOther : stateSelf;
+    // The state record of the other body is read once: the pose and the start-of-step pose come from the same line. The body being solved has its own
+    // pose in registers, which is what the record holds as well (the sweep writes it back at the end), and its displacement is made once per lane (above).
+    if (!selfShift.known)
+    {
+        selfShift.dLin = selfPos - stateSelf.startPosition.xyz;
+        selfShift.dAng = AvbdQuatDifference(selfRot, stateSelf.startRotation);
+        selfShift.known = true;
+    }
     float3 posA = isA ? selfPos : stateOther.position.xyz;
     float4 rotA = isA ? selfRot : stateOther.rotation;
     float3 posB = isA ? stateOther.position.xyz : selfPos;
@@ -328,9 +344,11 @@ void StampManifold(uint manifold, uint slot, uint other, float3 selfPos, float4 
     // one row per direction). Row k of each body contributes b_k . dqLin + (r x b_k) . dqAng = b_k . (dqLin + dqAng x r) (with the sign of the body), so the whole product is the basis times
     // one vector, w = dqALin - dqBLin + dqAAng x rA - dqBAng x rB (a scalar triple product moved around: (r x b) . d = b . (d x r)). w is made once per point,
     // and the four 3x3 Jacobians of AvbdEvaluateContactInBasis (36 floats, two of which are thrown away by the stamp) are never built.
-    float3 dLin = (posA - stateA.startPosition.xyz) - (posB - stateB.startPosition.xyz);
-    float3 dqAAng = AvbdQuatDifference(rotA, stateA.startRotation);
-    float3 dqBAng = AvbdQuatDifference(rotB, stateB.startRotation);
+    float3 otherLin = stateOther.position.xyz - stateOther.startPosition.xyz;
+    float3 otherAng = AvbdQuatDifference(stateOther.rotation, stateOther.startRotation);
+    float3 dLin = isA ? selfShift.dLin - otherLin : otherLin - selfShift.dLin; // (posA - startA) - (posB - startB)
+    float3 dqAAng = isA ? selfShift.dAng : otherAng;
+    float3 dqBAng = isA ? otherAng : selfShift.dAng;
 
 #if defined(AVBD_FUSED_DUAL)
     // The dual update of the pair after the sweep before, by the first body of the pair that gets here (see the top of the file): neither body has moved in
@@ -633,6 +651,10 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
     sys.lhsCross = sys.lhsLin;
     sys.rhsLin = float3(0.0, 0.0, 0.0);
     sys.rhsAng = float3(0.0, 0.0, 0.0);
+    SelfDisplacement selfShift;
+    selfShift.dLin = float3(0.0, 0.0, 0.0);
+    selfShift.dAng = float3(0.0, 0.0, 0.0);
+    selfShift.known = false;
 
     if (active)
     {
@@ -691,7 +713,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
                     uint entry = entries[b2];
                     if (entry & AVBD_LIST_CONTACT_FLAG)
                     {
-                        StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, others[b2], position, rotation, sys);
+                        StampManifold(entry & ~AVBD_LIST_CONTACT_FLAG, slot, others[b2], position, rotation, selfShift, sys);
                     }
                     else
                     {
