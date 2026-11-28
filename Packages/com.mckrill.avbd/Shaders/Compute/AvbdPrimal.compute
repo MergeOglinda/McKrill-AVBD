@@ -1,5 +1,6 @@
 // Stage V: primal update. AVBD_PRIMAL_LANES threads cooperate on one body: each assembles the 6x6 system of its share of the constraints in
-// the body's list (lane 0 also adds the inertia term), the shares are added up in groupshared memory, and lane 0 solves the sum with an LDL^T
+// the body's list (lane 0 also adds the inertia term), the shares are added up (with wave shuffles where the device has waves of 32 or 64 lanes, else in
+// groupshared memory), and lane 0 solves the sum with an LDL^T
 // factorization and applies the Newton step (Eqs. 4-6). A body with many constraints (a contact-heavy body has dozens of entries) is then
 // walked by several threads instead of one, which is what bounds the time of a color when the colors are small.
 // Dispatched (indirectly) once per graph color and iteration: the bodies of one color share no constraint, so a body writes only its own
@@ -24,6 +25,17 @@
 // before it stamps them, and marks the pair with the id of the sweep in the bits of ident.w above the stick bits. The DualContact kernel runs once after the
 // last sweep, like the Dual kernel.
 #pragma multi_compile_local _ AVBD_FUSED_DUAL
+
+// Compiled in on a device whose waves have 32 or 64 lanes (Unity picks the variant at run time from the device, on DX12, Vulkan and Metal): the lanes of a body, which
+// are adjacent threads of one wave, add their partial systems with shuffles inside the wave (AVBD_PRIMAL_WAVE_REDUCE below) and not through groupshared memory
+// and three barriers of the whole group. Without it (DX11, a device without wave operations, or a wave of another size) the groupshared path below is used.
+#pragma multi_compile _ UNITY_DEVICE_SUPPORTS_WAVE_32 UNITY_DEVICE_SUPPORTS_WAVE_64
+
+#if defined(UNITY_DEVICE_SUPPORTS_WAVE_32) || defined(UNITY_DEVICE_SUPPORTS_WAVE_64)
+// The shuffles of the sum pair the lane l of a body with lane l ^ k (k < AVBD_PRIMAL_LANES), which is a lane of the same body when the lanes of a body are
+// aligned in the wave: AVBD_PRIMAL_LANES a power of two that divides the wave size (32 or 64), and thread t of the group on lane t % wave size.
+#define AVBD_PRIMAL_WAVE_REDUCE 1
+#endif
 
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdBodyRecords.hlsl"
 #include "Packages/com.mckrill.avbd/Shaders/Include/AvbdConstraintRecords.hlsl"
@@ -416,9 +428,11 @@ void StampManifold(uint manifold, uint slot, uint other, float3 selfPos, float4 
 // H = AVBD_PRIMAL_LANES / 2) writes its terms, the lower half adds them to its own, and then the lower half writes the result and every sum over its H lanes is
 // formed by one thread. A slot holds the terms of one lane of the lower half: slot b * H + l is lane l of body b of the group, and the terms of a slot are
 // term-major, term t of slot s at t * AVBD_PRIMAL_SLOTS + s, so the neighboring threads of a warp write neighboring words.
+#if !defined(AVBD_PRIMAL_WAVE_REDUCE)
 #define AVBD_PRIMAL_HALF_LANES (AVBD_PRIMAL_LANES / 2u)
 #define AVBD_PRIMAL_SLOTS (AVBD_GROUP_SIZE / 2u)
 groupshared float gsTerms[AVBD_PRIMAL_TERMS * AVBD_PRIMAL_SLOTS];
+#endif
 
 // Index of the element (r, c), c <= r, in a packed lower triangle.
 uint TriIndex(uint r, uint c)
@@ -449,6 +463,7 @@ void PackSystem(PrimalSystem sys, out float p[AVBD_PRIMAL_TERMS])
     }
 }
 
+#if !defined(AVBD_PRIMAL_WAVE_REDUCE)
 void StoreTerms(uint slot, float p[AVBD_PRIMAL_TERMS])
 {
     [unroll]
@@ -462,6 +477,7 @@ void AddTerms(uint slot, inout float p[AVBD_PRIMAL_TERMS])
     for (uint t = 0; t < AVBD_PRIMAL_TERMS; t++)
         p[t] += gsTerms[t * AVBD_PRIMAL_SLOTS + slot];
 }
+#endif
 
 // The summed system of every body of the group, term-major like gsTerms, but with the body as the fast index: term t of body b is at t * AVBD_PRIMAL_BODIES + b.
 // The lanes write the sums here and lane 0 of each body factorizes it where it is. The LDL^T used to run on a local array of 36 + 6 floats, which stayed in
@@ -692,6 +708,31 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
         }
     }
 
+#if defined(AVBD_PRIMAL_WAVE_REDUCE)
+    // Add up the partial systems of the body's lanes inside the wave: three butterfly steps, in which lane l adds the terms of lane l ^ 4, then l ^ 2, then l ^ 1
+    // (for 8 lanes), so that every lane of the body ends with the whole sum. The two lanes of a pair hold the same two numbers and addition commutes, so the
+    // lanes of a body hold the same sum bit for bit, and the order of the additions is fixed (it does not depend on timing). No barrier and no groupshared
+    // terms: the lanes are in one wave, which runs them in lockstep, and every thread reaches the shuffles (nothing returns before them). A lane of a body that
+    // has no entry adds zeros. Lane 0 then writes the sums where it solves them; it reads only what it wrote, so there is no barrier after that either.
+    float terms[AVBD_PRIMAL_TERMS];
+    PackSystem(sys, terms);
+
+    uint laneInWave = WaveGetLaneIndex();
+    [unroll]
+    for (uint offset = AVBD_PRIMAL_LANES / 2u; offset > 0u; offset >>= 1u)
+    {
+        [unroll]
+        for (uint t = 0; t < AVBD_PRIMAL_TERMS; t++)
+            terms[t] += WaveReadLaneAt(terms[t], laneInWave ^ offset);
+    }
+
+    if (!active || lane != 0u)
+        return;
+
+    [unroll]
+    for (uint w = 0; w < AVBD_PRIMAL_TERMS; w++)
+        gsSums[w * AVBD_PRIMAL_BODIES + body] = terms[w];
+#else
     // Add up the partial systems of the body's lanes in two steps (see AVBD_PRIMAL_HALF_LANES), then into the body's column of gsSums. The order of the
     // additions is fixed, so the sum does not depend on timing: lane l of the lower half adds lane l + H to its own terms, and the sum is made in lane order.
     uint slotOfLane = body * AVBD_PRIMAL_HALF_LANES + (lane % AVBD_PRIMAL_HALF_LANES);
@@ -730,6 +771,7 @@ void Primal(uint3 id : SV_DispatchThreadID, uint tid : SV_GroupIndex)
 
     if (!active || lane != 0u)
         return;
+#endif
 
     if (SolveLdlt6(body))
     {
