@@ -17,7 +17,9 @@ is solid when it is inside the outer surface:
   * --surface touch: the voxel touches the mesh or is inside it. The object is up to one voxel larger; nothing is lost.
 The fill needs a closed mesh: the outside is found by flooding the grid from its corner, so a hole in the surface bigger than a voxel lets the flood into the
 inside and leaves the model hollow (the script warns when the mesh has open edges). The center test counts the crossings of a ray with the mesh, so it
-does not depend on the direction of the triangles.
+does not depend on the direction of the triangles. It does so for every shell of the mesh on its own (the triangles that are connected through shared
+vertices; a mesh made of several pieces has one per piece) and a center is inside if it is inside any of them, so pieces that are put partly inside each
+other make up the union of the pieces and the overlap does not count as outside.
 
 Each voxel is a box of voxel-size edges, and every voxel is linked to its immediate neighbors (--connectivity 6: the voxels that share a face; 18 adds
 the ones that share an edge; 26 the ones that share a corner) by one ball-socket joint, once per pair. The joint's anchor is the middle between the two
@@ -135,13 +137,19 @@ def transform(triangles, scale, zup_to_yup):
 
 # ---- checks --------------------------------------------------------------------------------------------------------
 
-def open_edge_count(triangles):
-    """The number of edges that do not belong to exactly two triangles (after welding the vertices that coincide): 0 for a closed mesh."""
+def welded_vertex_ids(triangles):
+    """The corners of the triangles as numbers of vertices, shape (T, 3), in which the corners at the same place (to a ten-millionth of the extent of the mesh)
+    have the same number."""
     flat = triangles.reshape(-1, 3)
     extent = max(float(np.ptp(flat, axis=0).max()), 1e-12)
     quantized = np.round(flat / (extent * 1e-7)).astype(np.int64)
     _, ids = np.unique(quantized, axis=0, return_inverse=True)
-    ids = ids.reshape(-1, 3)
+    return ids.reshape(-1, 3)
+
+
+def open_edge_count(triangles):
+    """The number of edges that do not belong to exactly two triangles (after welding the vertices that coincide): 0 for a closed mesh."""
+    ids = welded_vertex_ids(triangles)
     edges = np.concatenate([ids[:, [0, 1]], ids[:, [1, 2]], ids[:, [2, 0]]])
     edges.sort(axis=1)
     edges = edges[edges[:, 0] != edges[:, 1]]  # an edge of a collapsed triangle
@@ -153,6 +161,36 @@ def mesh_volume(triangles):
     """The volume of a closed mesh (the sum of the signed tetrahedra to the origin; the absolute value, so the winding does not matter)."""
     a, b, c = triangles[:, 0], triangles[:, 1], triangles[:, 2]
     return abs(float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum()) / 6.0)
+
+
+# ---- shells --------------------------------------------------------------------------------------------------------
+
+def shell_labels(triangles):
+    """The shell of every triangle: the triangles that are connected through vertices at the same place (a vertex shared by two triangles joins them) have
+    the same label. Returns (labels, count): an integer array of shape (T,) with the numbers 0 .. count - 1 in the order of the first triangle of each shell.
+    A mesh that is made of several pieces has one shell per piece, also when the pieces overlap: they share no vertex."""
+    ids = welded_vertex_ids(triangles)
+    parent = np.arange(int(ids.max()) + 1, dtype=np.int64)
+    ea = np.concatenate([ids[:, 0], ids[:, 1]])
+    eb = np.concatenate([ids[:, 1], ids[:, 2]])
+    while True:
+        pa, pb = parent[ea], parent[eb]            # the roots (the parents are compressed below)
+        low, high = np.minimum(pa, pb), np.maximum(pa, pb)
+        apart = low != high
+        if not apart.any():
+            break
+        np.minimum.at(parent, high[apart], low[apart])   # hang the root with the higher number below the lower one
+        while True:                                       # point everything at its root
+            grand = parent[parent]
+            if np.array_equal(grand, parent):
+                break
+            parent = grand
+    _, labels = np.unique(parent[ids[:, 0]], return_inverse=True)
+    labels = labels.reshape(-1)
+    order = np.unique(labels, return_index=True)[1]        # renumber by the first triangle of the shell, so that the numbering is easy to follow
+    renumber = np.empty(len(order), dtype=np.int64)
+    renumber[np.argsort(order, kind="stable")] = np.arange(len(order))
+    return renumber[labels], int(len(order))
 
 
 # ---- batches -------------------------------------------------------------------------------------------------------
@@ -302,6 +340,33 @@ class RayParity:
         return (above % 2) == 1
 
 
+class ShellParity:
+    """Tells for points whether they are inside the mesh, where inside means inside at least one of its shells (see shell_labels).
+
+    A mesh that is built from several pieces, which are put partly inside each other, has crossings of the ray from every piece. Counted together, the ones
+    in the overlap cancel each other and the overlap would count as outside. Counted shell by shell and combined with "or", the result is the union of the pieces,
+    and it still does not depend on the direction of the triangles. A mesh of one shell is a plain RayParity."""
+
+    def __init__(self, tris_u, nx, ny):
+        labels, count = shell_labels(tris_u)
+        self.shells = []
+        for label in range(count):
+            part = tris_u[labels == label]
+            # the cells that can have a center inside the shell: its bounding box (a center is at c + 0.5, and the ray is shifted by less than a cell)
+            lo = np.floor(part.reshape(-1, 3).min(axis=0) - 1.0).astype(np.int64)
+            hi = np.ceil(part.reshape(-1, 3).max(axis=0) + 1.0).astype(np.int64)
+            self.shells.append((lo, hi, RayParity(part, nx, ny)))
+
+    def inside(self, i, j, k):
+        """For the voxels (i, j, k) (integer arrays): is the center inside at least one shell?"""
+        result = np.zeros(len(i), dtype=bool)
+        for lo, hi, parity in self.shells:
+            near = ((i >= lo[0]) & (i <= hi[0]) & (j >= lo[1]) & (j <= hi[1]) & (k >= lo[2]) & (k <= hi[2])) & ~result
+            if near.any():
+                result[near] = parity.inside(i[near], j[near], k[near])
+        return result
+
+
 # ---- the voxels ----------------------------------------------------------------------------------------------------
 
 def grid_for(triangles, voxel_size=None, resolution=None):
@@ -348,7 +413,8 @@ def voxelize(triangles, voxel_size=None, resolution=None, surface="center", max_
         # Only the cells that a triangle touches can have their center outside the mesh (a cell that no triangle touches is wholly in or wholly out).
         # Starting from the cells next to the outside, test the center of each (a ray through the mesh counts the crossings: odd is inside) and take
         # out the ones that are outside; they become outside themselves, so the cells behind them (a part that is thinner than a few voxels) are
-        # tested in the next round. The cells next to a cavity are never tested, so cavities stay filled.
+        # tested in the next round. The cells next to a cavity are never tested, so cavities stay filled. A cell stays if its center is inside at least one
+        # shell of the mesh (ShellParity), so the pieces of a mesh that overlap do not take each other's inside away.
         parity = None
         checked = np.zeros_like(filled)
         while True:
@@ -364,7 +430,7 @@ def voxelize(triangles, voxel_size=None, resolution=None, surface="center", max_
             if len(ci) == 0:
                 break
             if parity is None:
-                parity = RayParity(tris_u, int(dims[0]), int(dims[1]))
+                parity = ShellParity(tris_u, int(dims[0]), int(dims[1]))
             removed = ~parity.inside(ci, cj, ck)
             if not removed.any():
                 break

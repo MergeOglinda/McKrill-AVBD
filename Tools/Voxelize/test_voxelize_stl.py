@@ -149,6 +149,65 @@ class VoxelizerTests(unittest.TestCase):
         b, _, _ = vox.voxelize(mesh[:, ::-1], voxel_size=0.1)
         np.testing.assert_array_equal(a, b)
 
+    # ---- a mesh of several pieces that overlap -------------------------------------------------------------------
+
+    @staticmethod
+    def union_of_boxes(boxes, origin, size, shape):
+        """The cells whose centers are inside at least one of the boxes (lo, hi)."""
+        centers = origin + (np.indices(shape).reshape(3, -1).T + 0.5) * size
+        inside = np.zeros(len(centers), dtype=bool)
+        for lo, hi in boxes:
+            inside |= np.all((centers > lo) & (centers < hi), axis=1)
+        return inside.reshape(shape)
+
+    def test_the_shells_are_the_pieces_that_share_no_vertex(self):
+        a = box_mesh((0, 0, 0), (3, 3, 3))
+        b = box_mesh((1.5, 1.5, 1.5), (4.5, 4.5, 4.5))
+        labels, count = vox.shell_labels(np.concatenate([a, b]))
+        self.assertEqual(count, 2)
+        self.assertEqual(labels.tolist(), [0] * len(a) + [1] * len(b))
+        self.assertEqual(vox.shell_labels(icosphere(1.0, 2))[1], 1)
+        # triangles that are listed in another order are still one shell, and a chain of triangles is one
+        sphere = icosphere(1.0, 2)
+        shuffled = sphere[np.random.default_rng(1).permutation(len(sphere))]
+        self.assertEqual(vox.shell_labels(shuffled)[1], 1)
+
+    def test_overlapping_pieces_make_up_their_union(self):
+        # a box that is partly inside another: counted over the whole mesh, the crossings in the overlap cancel, and the cells there (next to the outside, where
+        # the center test runs) would be taken out of the solid
+        # (the numbers are not on the 0.1 grid, so that no center is on a face)
+        boxes = [((0.173, 0.493, 1.604), (1.591, 1.213, 2.812)), ((0.962, 0.321, 1.473), (1.724, 1.468, 2.791))]
+        mesh = np.concatenate([box_mesh(lo, hi) for lo, hi in boxes])
+        solid, origin, size = vox.voxelize(mesh, voxel_size=0.1)
+        expected = self.union_of_boxes(boxes, origin, size, solid.shape)
+        np.testing.assert_array_equal(solid, expected)
+
+        # the same test on the whole mesh at once (what the center test was before) misses cells
+        tris_u = (mesh - origin) / size + vox.ALIGNMENT_SHIFT
+        dims = solid.shape
+        i, j, k = (a.reshape(-1) for a in np.indices(dims))
+        whole = vox.RayParity(tris_u, dims[0], dims[1]).inside(i, j, k).reshape(dims)
+        self.assertTrue(np.any(expected & ~whole), "the case is one that a single parity count gets wrong")
+
+    def test_overlapping_pieces_give_the_union_in_random_cases_and_do_not_depend_on_the_winding(self):
+        rng = np.random.default_rng(3)
+        for trial in range(6):
+            boxes = []
+            for _ in range(3):
+                lo = rng.uniform(0, 2, 3)
+                boxes.append((tuple(lo), tuple(lo + rng.uniform(0.6, 2, 3))))
+            parts = [box_mesh(lo, hi, inward=(n == 1)) for n, (lo, hi) in enumerate(boxes)]  # the middle one is turned inside out
+            solid, origin, size = vox.voxelize(np.concatenate(parts), voxel_size=0.1)
+            np.testing.assert_array_equal(solid, self.union_of_boxes(boxes, origin, size, solid.shape), "trial %d" % trial)
+
+    def test_a_piece_on_its_own_and_a_sphere_with_a_cube_inside_are_as_before(self):
+        sphere = icosphere(1.0, 2)
+        before = vox.voxelize(sphere, voxel_size=0.1)[0]
+        np.testing.assert_array_equal(before, vox.voxelize(sphere[::-1], voxel_size=0.1)[0])
+        # a cube that lies wholly inside a sphere: the union is the sphere, so the voxels are those of the sphere alone
+        both = np.concatenate([sphere, box_mesh((-0.3, -0.3, -0.3), (0.3, 0.3, 0.3))])
+        np.testing.assert_array_equal(vox.voxelize(both, voxel_size=0.1)[0], before)
+
     def test_resolution_sets_the_number_of_voxels_along_the_longest_side(self):
         mesh = box_mesh((0, 0, 0), (4, 2, 1))
         solid, _, size = vox.voxelize(mesh, resolution=16)

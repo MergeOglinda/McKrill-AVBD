@@ -21,7 +21,7 @@ python3 Tools/Voxelize/voxelize_stl.py model.stl -o model.voxels.json --voxel-si
 | `-o`, `--output` | Output file. Default: the mesh file's name with `.voxels.json`. |
 | `--voxel-size S` | Grid size as the edge length of a voxel, in output units (mesh units times `--scale`). |
 | `--resolution N` | Grid size as the number of voxels along the longest side of the mesh. Exactly one of `--voxel-size` and `--resolution` is required. |
-| `--surface center` (default) | A voxel is solid if its **center** is inside the mesh. The voxel volume is close to the mesh volume. |
+| `--surface center` (default) | A voxel is solid if its **center** is inside the mesh, that is inside at least one of its shells (see *How the fill works*). The voxel volume is close to the mesh volume. |
 | `--surface touch` | A voxel is solid if it touches or is inside the mesh. Conservative: the result contains the mesh. |
 | `--connectivity 6` (default) | Joint every voxel to its 6 face neighbors. `18` adds the 12 edge neighbors, `26` adds the 8 corner neighbors. |
 | `--scale F` | Multiplies the mesh first, for example `0.001` for a mesh in millimeters. |
@@ -45,6 +45,11 @@ Only the vertices (`v`) and the faces (`f`) of an OBJ are used. A face corner ca
    inside the mesh (there is no way to get in, so they are treated as solid).
 4. With `--surface center`, voxels on the boundary whose center is outside the mesh are removed again. Whether a center
    is inside is decided by counting ray crossings, which does not depend on the winding (orientation) of the triangles.
+   The crossings are counted **for every shell on its own**, and a center is inside if it is inside any shell. A shell
+   is a set of triangles that are connected through shared vertices (vertices at the same place, to a ten-millionth of the
+   size of the mesh); a mesh built from several pieces has one shell per piece. Pieces that are put partly inside each
+   other therefore make up the *union* of the pieces: counted together, the crossings in the overlap would cancel each
+   other and the voxels there, next to the outside, would be missing.
 
 ## Output format
 
@@ -166,6 +171,9 @@ The tests check that the voxels, joints and chunks of the shipped files are what
 
 - The mesh should be **closed** (watertight). For an open mesh the flood fill can leak into the inside and leave it
   empty; the script warns when it finds open edges.
+- Pieces that share vertices with each other (two boxes that touch in a corner or along an edge, with the vertices at the same place) are one shell, so
+  the overlap rule does not apply between them. `--smooth` decides the cut of its chunks with a ray count over the whole mesh, so a mesh whose pieces overlap
+  can still get chunks that disagree with the voxels in the overlap.
 - Features thinner than about one voxel can vanish with `--surface center`; use `--surface touch` or a smaller voxel.
 - The grid has to fit in memory: `--max-cells` stops runs that would not.
 - Large voxel counts mean many bodies and joints. At `--connectivity 6` there are about 3 joints per voxel.
