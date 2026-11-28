@@ -549,6 +549,9 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)AvbdGraphColoring.CursorsOffset, d["AVBD_COLOR_CURSORS_OFFSET"]);
             Assert.AreEqual((uint)AvbdGraphColoring.StartsOffset, d["AVBD_COLOR_STARTS_OFFSET"]);
             Assert.AreEqual((uint)AvbdGraphColoring.WorkWords, d["AVBD_COLOR_WORK_WORDS"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.Classes, d["AVBD_COLOR_CLASSES"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.ClassCountsOffset, d["AVBD_COLOR_CLASS_COUNTS_OFFSET"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.ClassCursorsOffset, d["AVBD_COLOR_CLASS_CURSORS_OFFSET"]);
             Assert.AreEqual((uint)AvbdGraphColoring.StatReleased, d["AVBD_COLOR_STAT_RELEASED"]);
             Assert.AreEqual((uint)AvbdGraphColoring.StatLastRound, d["AVBD_COLOR_STAT_LAST_ROUND"]);
             Assert.AreEqual((uint)AvbdGraphColoring.StatFinished, d["AVBD_COLOR_STAT_FINISHED"]);
@@ -570,7 +573,9 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual(AvbdGraphColoring.StartsOffset + AvbdGraphColoring.MaxColors, AvbdGraphColoring.StatReleased);
             Assert.AreEqual(AvbdGraphColoring.StatReleased + 1, AvbdGraphColoring.StatLastRound);
             Assert.AreEqual(AvbdGraphColoring.StatLastRound + 1, AvbdGraphColoring.StatFinished);
-            Assert.LessOrEqual(AvbdGraphColoring.StatFinished + 1, AvbdGraphColoring.WorkWords);
+            Assert.LessOrEqual(AvbdGraphColoring.StatFinished + 1, AvbdGraphColoring.ClassCountsOffset);
+            Assert.AreEqual(AvbdGraphColoring.ClassCountsOffset + AvbdGraphColoring.MaxColors * AvbdGraphColoring.Classes, AvbdGraphColoring.ClassCursorsOffset);
+            Assert.AreEqual(AvbdGraphColoring.ClassCursorsOffset + AvbdGraphColoring.MaxColors * AvbdGraphColoring.Classes, AvbdGraphColoring.WorkWords);
             Assert.Less(AvbdGraphColoring.ColorCountWord, AvbdGraphColoring.ControlWords);
             Assert.AreEqual(3 * sizeof(uint), AvbdGraphColoring.ArgsStride, "groups x, y and z");
             Assert.AreEqual(65535, AvbdGraphColoring.RowGroups, "the limit of one dimension of a dispatch");

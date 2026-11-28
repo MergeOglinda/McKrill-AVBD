@@ -21,7 +21,11 @@
 #define AVBD_COLOR_STAT_RELEASED   196 // bodies that lost their color because a higher-priority neighbor had the same one
 #define AVBD_COLOR_STAT_LAST_ROUND 197 // the last round (counted from 1) in which a body took a color
 #define AVBD_COLOR_STAT_FINISHED   198 // bodies still waiting after the rounds the host dispatched (before the extra rounds)
-#define AVBD_COLOR_WORK_WORDS 200
+// The bodies of a color are also ordered by how long their constraint lists are (AvbdBucketClass): the count of every (color, class) pair, and then the next
+// free entry of every pair (the bucket cursors), index color * AVBD_COLOR_CLASSES + class. AVBD_COLOR_CURSORS_OFFSET above is no longer written.
+#define AVBD_COLOR_CLASS_COUNTS_OFFSET  200
+#define AVBD_COLOR_CLASS_CURSORS_OFFSET 456
+#define AVBD_COLOR_WORK_WORDS 712
 
 // ColorBucket: slots per thread, and slots per thread group (a chunk; the bodies of a color keep slot order inside a chunk).
 #define AVBD_BUCKET_SPAN 4u
@@ -45,5 +49,16 @@
 // Priority order of the coloring.
 #define AVBD_COLOR_ORDER_SLOT   0 // a higher slot colors first: the same coloring as the reference solver's sequential greedy
 #define AVBD_COLOR_ORDER_HASHED 1 // by a hash of the slot: far fewer rounds on long chains, a different (equally valid) coloring
+
+// Classes of the bodies of a color by the length of their constraint list: a sweep walks a list AVBD_PRIMAL_LANES entries at a time, so a body takes
+// ceil(entries / AVBD_PRIMAL_LANES) trips of the stamp loop, and the bodies of a warp (a 32-thread warp holds 4 of them) all wait for the longest.
+// Within a color the bodies are placed class by class, so a warp holds bodies that take the same number of trips (the one warp at a boundary excepted).
+// Class k is k + 1 trips (up to 8, 16, 24 entries), the last class is every longer list.
+#define AVBD_COLOR_CLASSES 4u
+uint AvbdBucketClass(uint entries)
+{
+    uint trips = (entries + AVBD_PRIMAL_LANES - 1u) / AVBD_PRIMAL_LANES;
+    return min(max(trips, 1u) - 1u, AVBD_COLOR_CLASSES - 1u);
+}
 
 #endif // MCKRILL_AVBD_COLORING_PARAMS_INCLUDED

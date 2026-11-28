@@ -50,7 +50,14 @@ namespace McKrill.Avbd
         public const int StatReleased = 196;
         public const int StatLastRound = 197;
         public const int StatFinished = 198;
-        public const int WorkWords = 200;
+        public const int WorkWords = 712;
+
+        // Mirror AVBD_COLOR_CLASSES, _CLASS_COUNTS_OFFSET and _CLASS_CURSORS_OFFSET: the bodies of a color are ordered by the length of their list (the number of
+        // trips of the sweep's stamp loop: up to 8, 16, 24 entries and more), so the bodies of a warp take the same time. The count and the next free entry of
+        // every (color, class) pair, at color * Classes + class. CursorsOffset is no longer written.
+        public const int Classes = 4;
+        public const int ClassCountsOffset = 200;
+        public const int ClassCursorsOffset = 456;
 
         /// <summary>
         /// Rounds after the ones the tuner chose, each dispatched indirectly with groups only if bodies are still waiting (ColorRoundPlan), so a step that

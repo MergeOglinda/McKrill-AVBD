@@ -596,6 +596,28 @@ namespace McKrill.Avbd.Tests
                 got.Sort();
                 CollectionAssert.AreEqual(want, got, what + ": bodies of color " + c);
             }
+            AssertClassOrder(buffers, constraints, colors, what);
+        }
+
+        // Inside a color the bodies are placed class by class (AvbdBucketClass of the length of the body's constraint list, short lists first), so the bodies of
+        // a warp of the sweep take the same number of trips of the stamp loop.
+        static void AssertClassOrder(AvbdBodyBuffers buffers, AvbdConstraintBuffers constraints, int colors, string what)
+        {
+            var ranges = new BodyRangeRecord[buffers.Capacity];
+            buffers.Range.GetData(ranges);
+            uint[] bucketed = constraints.ReadColorBodies();
+            for (int c = 0; c < colors; c++)
+            {
+                int previous = 0;
+                for (int k = 0; k < constraints.ColorSize(c); k++)
+                {
+                    uint slot = bucketed[constraints.ColorOffset(c) + k];
+                    int trips = (int)((ranges[slot].range.y + AvbdGraphColoring.PrimalLanes - 1u) / AvbdGraphColoring.PrimalLanes);
+                    int bucketClass = Math.Min(Math.Max(trips, 1) - 1, AvbdGraphColoring.Classes - 1);
+                    Assert.GreaterOrEqual(bucketClass, previous, what + ": entry " + k + " of color " + c + " (body " + slot + ") is in an earlier class than the one before it");
+                    previous = bucketClass;
+                }
+            }
         }
 
         static int[] ReadColors(uint[] gpuColors, int bodyCount, bool[] solved)
@@ -766,6 +788,7 @@ namespace McKrill.Avbd.Tests
                 got.Sort();
                 CollectionAssert.AreEqual(want, got, what + ": bodies of color " + c);
             }
+            AssertClassOrder(buffers, constraints, colors, what);
         }
 
         // No two solved bodies joined by a constraint share a color, and every solved body has one.
