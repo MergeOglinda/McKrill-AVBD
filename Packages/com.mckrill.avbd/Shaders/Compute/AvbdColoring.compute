@@ -479,7 +479,7 @@ void ColorPlan(uint3 id : SV_DispatchThreadID)
         _ColorWork[AVBD_COLOR_STARTS_OFFSET + c] = start;
         start += count;
 
-        uint groups = (count * AVBD_PRIMAL_LANES + AVBD_GROUP_SIZE - 1u) / AVBD_GROUP_SIZE; // AVBD_PRIMAL_LANES threads per body
+        uint groups = (count * AvbdPrimalLanes(count) + AVBD_GROUP_SIZE - 1u) / AVBD_GROUP_SIZE; // AvbdPrimalLanes threads per body
         uint rows = max(1u, (groups + AVBD_COLOR_ROW_GROUPS - 1u) / AVBD_COLOR_ROW_GROUPS);
         _ColorArgs.Store3(c * AVBD_COLOR_ARGS_STRIDE, uint3(min(groups, AVBD_COLOR_ROW_GROUPS), rows, 1u));
     }

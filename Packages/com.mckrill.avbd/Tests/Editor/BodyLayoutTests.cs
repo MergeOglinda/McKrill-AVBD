@@ -554,12 +554,18 @@ namespace McKrill.Avbd.Tests
             Assert.AreEqual((uint)AvbdGraphColoring.StatFinished, d["AVBD_COLOR_STAT_FINISHED"]);
             Assert.AreEqual((uint)AvbdGraphColoring.ArgsStride, d["AVBD_COLOR_ARGS_STRIDE"]);
             Assert.AreEqual((uint)AvbdGraphColoring.RowGroups, d["AVBD_COLOR_ROW_GROUPS"]);
-            Assert.AreEqual((uint)AvbdGraphColoring.PrimalLanes, d["AVBD_PRIMAL_LANES"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.MaxPrimalLanes, d["AVBD_PRIMAL_LANES_MAX"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.PrimalLanesFrom4, d["AVBD_PRIMAL_LANES_FROM_4"]);
+            Assert.AreEqual((uint)AvbdGraphColoring.PrimalLanesFrom2, d["AVBD_PRIMAL_LANES_FROM_2"]);
             Assert.AreEqual((uint)AvbdGraphColoring.RoundLanes, d["AVBD_COLOR_LANES"]);
             Assert.AreEqual((uint)AvbdGraphColoring.BucketSpan, d["AVBD_BUCKET_SPAN"]);
             Assert.AreEqual(0, AvbdConst.GroupSize % AvbdGraphColoring.RoundLanes, "the lanes of a body are in one thread group");
-            Assert.AreEqual(0, AvbdConst.GroupSize % AvbdGraphColoring.PrimalLanes, "the lanes of a body are in one thread group");
-            Assert.AreEqual(0, AvbdGraphColoring.PrimalLanes & (AvbdGraphColoring.PrimalLanes - 1), "a power of two");
+            foreach (int lanes in new[] { 2, 4, AvbdGraphColoring.MaxPrimalLanes })
+            {
+                Assert.AreEqual(0, AvbdConst.GroupSize % lanes, lanes + " lanes of a body are in one thread group");
+                Assert.AreEqual(0, lanes & (lanes - 1), lanes + " is a power of two");
+            }
+            Assert.Less(AvbdGraphColoring.PrimalLanesFrom4, AvbdGraphColoring.PrimalLanesFrom2, "the thresholds go up as the lanes go down");
             Assert.AreEqual((uint)GraphColoringOrder.SlotOrder, d["AVBD_COLOR_ORDER_SLOT"]);
             Assert.AreEqual((uint)GraphColoringOrder.Hashed, d["AVBD_COLOR_ORDER_HASHED"]);
 

@@ -67,8 +67,21 @@ namespace McKrill.Avbd
         /// <summary>Mirrors AVBD_COLOR_ROW_GROUPS: thread groups per row of a big color (the limit of one dimension of a dispatch).</summary>
         public const int RowGroups = AvbdIndirect.RowGroups;
 
-        /// <summary>Mirrors AVBD_PRIMAL_LANES: threads that solve one body in the primal sweep.</summary>
-        public const int PrimalLanes = 8;
+        /// <summary>Mirrors AVBD_PRIMAL_LANES_MAX: the most threads that solve one body in the primal sweep (colors of fewer than <see cref="PrimalLanesFrom4"/> bodies).</summary>
+        public const int MaxPrimalLanes = 8;
+
+        /// <summary>Mirrors AVBD_PRIMAL_LANES_FROM_4: the size of a color from which 4 threads solve a body.</summary>
+        public const int PrimalLanesFrom4 = 4096;
+
+        /// <summary>Mirrors AVBD_PRIMAL_LANES_FROM_2: the size of a color from which 2 threads solve a body.</summary>
+        public const int PrimalLanesFrom2 = 32768;
+
+        /// <summary>
+        /// Threads that solve one body in the primal sweep over a color of <paramref name="bodies"/> bodies (AvbdPrimalLanes in the HLSL): 8, then 4 from
+        /// <see cref="PrimalLanesFrom4"/> bodies and 2 from <see cref="PrimalLanesFrom2"/>. A small color is bound by the longest serial chain of loads of its
+        /// busiest body, which more lanes shorten; a big color fills the GPU with fewer lanes and then pays less for the reduction. After three-avbd's rule.
+        /// </summary>
+        public static int PrimalLanesFor(long bodies) => bodies >= PrimalLanesFrom2 ? 2 : bodies >= PrimalLanesFrom4 ? 4 : MaxPrimalLanes;
 
         /// <summary>Mirrors AVBD_COLOR_LANES: threads that look at the neighbors of one body in a coloring round.</summary>
         public const int RoundLanes = 8;
@@ -167,10 +180,10 @@ namespace McKrill.Avbd
 
         /// <summary>
         /// Thread groups of the primal sweep over a color of <paramref name="count"/> bodies, as <c>ColorPlan</c> computes them:
-        /// <see cref="PrimalLanes"/> threads per body, x at most <see cref="RowGroups"/> and y the number of rows of that width.
+        /// <see cref="PrimalLanesFor"/> threads per body, x at most <see cref="RowGroups"/> and y the number of rows of that width.
         /// The mirror of the HLSL, which a test compares with the GPU's.
         /// </summary>
-        public static (uint x, uint y) GroupsFor(long count) => AvbdIndirect.GroupsFor(count * PrimalLanes);
+        public static (uint x, uint y) GroupsFor(long count) => AvbdIndirect.GroupsFor(count * PrimalLanesFor(count));
 
         public AvbdGraphColoring(ComputeShader shader)
         {
